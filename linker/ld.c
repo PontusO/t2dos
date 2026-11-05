@@ -1,6 +1,6 @@
 // ld - link T2DOS objects into a T2CC program (.bin)
 //   ld [-o out.bin] [-e entry] file.o...      (default output a.bin, entry main)
-// Errors print "ld: ..." and exit 1 without writing the output.
+// Errors print "ld: ..." and exit 1, and the output file is removed (no older one stays behind).
 //
 // Layout: the objects' text in command-line order, each object's text start aligned to 4
 // with nop halfwords (an .align inside an object assumes a 4-aligned section start); then
@@ -9,7 +9,9 @@
 // symbol's its object's data base + value (data offsets are relative to r9), an absolute
 // symbol's its value. A relocation's symbol, when it is defined in its own object (local or
 // global, including the section symbols .text/.data), is that definition; when undefined,
-// the one global definition among all objects.
+// the one global definition among all objects. The symbol must suit the relocation: a text
+// symbol for R_BL/R_BW/R_BCOND/R_FNADDR, a data or absolute one for R_DATA_ADDW/R_DATA_MOVW16,
+// any defined one for R_DATA_MOVW/R_DATA_MOVT/R_WORD.
 // With SYM_INIT symbols, an entry stub follows the text: push {r4, lr}; bl init (each in
 // link order); pop.w {r4, lr}; b.w entry. The stub is then the entry.
 // Archives (files starting with the archive magic) are searched after the objects: a member is
@@ -46,7 +48,7 @@ char *symname(int ob, int sym) { return t2o_name(objs[ob], sym); }
 
 int hash(char *s) {
   int h; h = 0;
-  while (*s) { h = h * 31 + (*s & 255); s++; }
+  while (*s) { h = (h * 31 + (*s & 255)) & 0xFFFFFF; s++; }   // masked: no signed overflow
   return h & (hsize - 1);
 }
 // the slot of name s in the table (tob, tsym): its entry, or the empty slot where it goes
@@ -67,14 +69,21 @@ int symval(int ob, int sym) {
   return s->value;
 }
 
-int bad(char *path) { printf("ld: %s: not a T2DOS object\n", path); exit(1); return 0; }
-int badarchive(char *path) { printf("ld: %s: not a T2DOS archive\n", path); exit(1); return 0; }
+char *outpath;                         // removed on an error, once the options are read
+int quit() { if (outpath) unlink(outpath); exit(1); return 0; }
+int bad(char *path) { printf("ld: %s: not a T2DOS object\n", path); return quit(); }
+int badarchive(char *path) { printf("ld: %s: not a T2DOS archive\n", path); return quit(); }
 
 // 1 if not: relocations must patch whole fields inside their section; data holds only R_WORD;
-// a run-before-main routine is a text symbol
+// a run-before-main routine is a text symbol; a text or data symbol lies inside its section
 int badrels(struct t2o *o) {
-  struct t2rel *r; int i; int n; int size;
-  for (i = 0; i < o->h.nsyms; i++) if ((o->syms[i].flags & SYM_INIT) && o->syms[i].sect != SEC_TEXT) return 1;
+  struct t2rel *r; struct t2sym *s; int i; int n; int size;
+  for (i = 0; i < o->h.nsyms; i++) {
+    s = o->syms + i;
+    if ((s->flags & SYM_INIT) && s->sect != SEC_TEXT) return 1;
+    if (s->sect == SEC_TEXT && (s->value < 0 || s->value > o->h.text_size)) return 1;
+    if (s->sect == SEC_DATA && (s->value < 0 || s->value > o->h.data_size)) return 1;
+  }
   for (i = 0; i < o->h.nrels; i++) {
     r = o->rels + i;
     n = 4;
@@ -92,7 +101,7 @@ int patch_b(int at, int target, int cond, char *name, char *path) {
   off = target - (at + 4);
   h1 = get16(code, at); h2 = get16(code, at + 2);
   if ((off & 1) || (!cond && (off < -16777216 || off > 16777214)) || (cond && (off < -1048576 || off > 1048574))) {
-    printf("ld: branch to %s out of range (in %s)\n", name, path); exit(1);
+    printf("ld: branch to %s out of range (in %s)\n", name, path); quit();
   }
   if (!cond) {
     s = (off >> 24) & 1;
@@ -113,16 +122,39 @@ int patch16(int at, int v) {
 
 int toofar(char *name, char *path, int v, char *insn) {
   printf("ld: data offset of %s (%s) is %d, too far for %s\n", name, path, v, insn);
-  exit(1);
+  quit();
   return 0;
 }
 
+// the section of symbol sym of object ob, or of its global definition
+int symsect(int ob, int sym) {
+  int h;
+  if (objs[ob]->syms[sym].sect != SEC_UNDEF) return objs[ob]->syms[sym].sect;
+  h = hfind(symname(ob, sym));
+  return objs[hobj[h]]->syms[hsym[h]].sect;
+}
+
+char *relname(int t) {
+  if (t == R_BL) return "R_BL";
+  if (t == R_BW) return "R_BW";
+  if (t == R_BCOND) return "R_BCOND";
+  if (t == R_DATA_ADDW) return "R_DATA_ADDW";
+  if (t == R_DATA_MOVW16) return "R_DATA_MOVW16";
+  return "R_FNADDR";
+}
+
 int relocate(int ob) {
-  struct t2o *o; struct t2rel *r; int i; int p; int v; char *name;
+  struct t2o *o; struct t2rel *r; int i; int p; int v; char *name; int sc; int t;
   o = objs[ob];
   for (i = 0; i < o->h.nrels; i++) {
     r = o->rels + i;
     name = symname(ob, r->sym);
+    sc = symsect(ob, r->sym); t = r->type;
+    if (((t == R_BL || t == R_BW || t == R_BCOND || t == R_FNADDR) && sc != SEC_TEXT)
+        || ((t == R_DATA_ADDW || t == R_DATA_MOVW16) && sc != SEC_DATA && sc != SEC_ABS)) {
+      printf("ld: %s (%s): wrong kind of symbol for %s\n", name, paths[ob], relname(t));
+      quit();
+    }
     v = symval(ob, r->sym) + r->addend;
     if (r->sect == SEC_DATA) { put32(data, dbase[ob] + r->off, v); continue; }
     p = tbase[ob] + r->off;
@@ -167,7 +199,7 @@ int addobj(struct t2o *o, char *path) {
     h = hfind(symname(nobj, j));
     if (hobj[h] >= 0) {
       printf("ld: duplicate symbol: %s (%s and %s)\n", symname(nobj, j), paths[hobj[h]], path);
-      exit(1);
+      quit();
     }
     hobj[h] = nobj; hsym[h] = j;
   }
@@ -195,15 +227,21 @@ int main(int argc, char **argv) {
   fsize = malloc((argc + 1) * sizeof(int)); fobj = malloc((argc + 1) * sizeof(int));
   ars = malloc((argc + 1) * sizeof(struct t2ar *)); arpaths = malloc((argc + 1) * sizeof(char *));
   mbase = malloc((argc + 1) * sizeof(int));
-  nf = 0; nar = 0; nmembers = 0; k = 0;
-  // read the inputs: objects (fobj 1, validated here) and archives (fobj 0)
+  nf = 0; nar = 0; nmembers = 0; k = 0; outpath = 0;
+  // the options first: from here on an error removes the output
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) { i++; out = argv[i]; }
-    else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) { i++; entname = argv[i]; }
+    else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) i++;
     else if (argv[i][0] == '-') usage();
+  }
+  outpath = out;
+  // read the inputs: objects (fobj 1, validated here) and archives (fobj 0)
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) i++;
+    else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) { i++; entname = argv[i]; }
     else {
       buf = t2_readfile(argv[i], &size);
-      if (!buf) { printf("ld: cannot read %s\n", argv[i]); return 1; }
+      if (!buf) { printf("ld: cannot read %s\n", argv[i]); quit(); }
       fpath[nf] = argv[i]; fbuf[nf] = buf; fsize[nf] = size;
       if (size >= 4 && get16(buf, 0) == (T2AR_MAGIC & 65535) && get16(buf, 2) == ((T2AR_MAGIC >> 16) & 65535)) {
         ar = malloc(sizeof(struct t2ar));
@@ -221,7 +259,7 @@ int main(int argc, char **argv) {
       nf++;
     }
   }
-  if (nf == 0) usage();
+  if (nf == 0) { outpath = 0; usage(); }
   mobj = malloc((nmembers + 1) * sizeof(struct t2o *)); madded = malloc((nmembers + 1) * sizeof(int));
   for (a = 0; a < nar; a++) {
     for (m = 0; m < ars[a]->h.nmembers; m++) {
@@ -275,7 +313,7 @@ int main(int argc, char **argv) {
     printf("ld: undefined symbol: %s\n", entname);
     nundef++;
   }
-  if (nundef) return 1;
+  if (nundef) quit();
 
   // layout
   csize = 0; dsize = 0; ninit = 0;
@@ -323,12 +361,12 @@ int main(int argc, char **argv) {
   }
 
   fd = open(out, 577, 420);    // O_WRONLY|O_CREAT|O_TRUNC, 0644
-  if (fd < 0) { printf("ld: cannot write %s\n", out); return 1; }
+  if (fd < 0) { printf("ld: cannot write %s\n", out); quit(); }
   hdr = 0;
   if (write(fd, "T2CC", 4) != 4 || write(fd, &csize, 4) != 4 || write(fd, &dsize, 4) != 4
       || write(fd, &hdr, 4) != 4 || write(fd, &entry, 4) != 4
       || write(fd, code, csize) != csize || (dsize && write(fd, data, dsize) != dsize)) {
-    printf("ld: cannot write %s\n", out); close(fd); return 1;
+    printf("ld: cannot write %s\n", out); close(fd); quit();
   }
   close(fd);
   return 0;

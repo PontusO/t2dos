@@ -56,7 +56,10 @@ ref:
 	@test -f build/ref/COMMIT || echo e4fb427 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/ld $(CC_HOST)
+# the reference compiler for check_ref.py, built once (make ref rebuilds it)
+build/ref/cc:
+	$(MAKE) ref
+check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/ld $(CC_HOST) build/ref/cc
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message
@@ -71,6 +74,8 @@ check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/l
 	python3 tools/check_asm.py --relocs tests/asm/reloc.s | diff - tests/asm/reloc.expected
 	test "$$(python3 tools/check_asm.py --inits tests/asm/reloc.s | tr '\n' ' ')" = ".Linit lfun "
 	python3 tools/check_asm.py --errors tests/asm/errors/*.s
+	@# randomized differential against GNU as (seeded): what as accepts, GNU as assembles to the same bytes
+	python3 tools/check_asm.py --diff 3000
 	python3 tools/check_link.py --pc
 	@# objdump: exact dumps of the sample object and of reloc.s's object, errors, equality with GNU objdump
 	build/host/objdump build/obj/sample.o | diff - tests/obj/objdump_sample.expected

@@ -5,7 +5,7 @@ A test NAME has NAME.expected and its inputs NAME.s or NAME_*.s (assembled with 
 NAME.o or NAME_*.o (used as they are), linked in file name order.
   tests/link/NAME.expected          a run test: the exact output lines, then "exit N"
   tests/link/errors/NAME.expected   an error test: the exact output of ld, which must exit 1
-                                    and leave no output file
+                                    and leave no output file (an older one is removed)
 
   check_link.py --pc      assemble and link every test with build/host/as and build/host/ld in
                           build/link/NAME/: error tests give their message, run tests link
@@ -74,10 +74,9 @@ def ld(wd, args):
 
 
 def expect_error(name, wd, args, want, out):
-    """ld args must exit 1 with output want and leave no file out"""
+    """ld args must exit 1 with output want and leave no file out (an older out is removed)"""
     p = os.path.join(wd, out)
-    if os.path.exists(p):
-        os.remove(p)
+    open(p, 'w').write('an older output\n')
     st, got = ld(wd, args)
     if st == 1 and got == want and not os.path.exists(p):
         return True
@@ -293,13 +292,21 @@ def check_pc():
     ok = expect_error('missing', wd, ['-o', 'x.bin', 'nofile.o'], 'ld: cannot read nofile.o\n', 'x.bin') and ok
     open(os.path.join(wd, 'lib.a'), 'wb').write(b'T2AR' + b'\0' * 16)
     ok = expect_error('archive', wd, ['lib.a'], 'ld: lib.a: not a T2DOS archive\n', 'a.bin') and ok
+    # a symbol value past the end of its section: not a T2DOS object
+    src = os.path.join(WORK, 'noentry', 'noentry.o')
+    b = bytearray(open(src, 'rb').read())
+    tsize, dsize, nsyms = struct.unpack('<3i', b[8:20])
+    at = 28 + tsize + dsize                    # the first symbol (start, a text label)
+    b[at + 8:at + 12] = struct.pack('<i', tsize + 2)
+    open(os.path.join(wd, 'past.o'), 'wb').write(bytes(b))
+    ok = expect_error('symbol past its section', wd, ['-o', 'p.bin', 'past.o'], 'ld: past.o: not a T2DOS object\n', 'p.bin') and ok
     # -e: noentry.o has no main but links with its start as the entry (offset 0)
     shutil.copyfile(os.path.join(WORK, 'noentry', 'noentry.o'), os.path.join(wd, 'noentry.o'))
     st, got = ld(wd, ['-o', 'e.bin', '-e', 'start', 'noentry.o'])
     if st != 0 or got or open(os.path.join(wd, 'e.bin'), 'rb').read()[4:20] != struct.pack('<4i', 2, 0, 0, 0):
         print('FAIL -e start: status %d, output %r' % (st, got))
         ok = False
-    n += 3
+    n += 4
     for e in sorted(glob.glob(os.path.join(TESTS, '*.expected'))):
         name = os.path.basename(e)[:-9]
         if name in ARCHIVE_TESTS:

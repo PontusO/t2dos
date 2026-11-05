@@ -6,7 +6,8 @@
 #include <unistd.h>
 #include "t2obj.h"
 
-// the tables point into the buffer given to t2o_read, which must stay alive
+// text, data and str point into the buffer given to t2o_read, which must stay alive; syms and
+// rels are 4-aligned copies (malloc'ed: in the file they are misaligned when the text size is 2 mod 4)
 struct t2o { struct t2obj_hdr h; char *text; char *data; struct t2sym *syms; struct t2rel *rels; char *str; };
 
 // 0 ok, -1 bad magic, truncated or inconsistent (the checks keep every table and name inside buf)
@@ -32,8 +33,11 @@ int t2o_read(char *buf, int size, struct t2o *o) {
   p = sizeof(struct t2obj_hdr);
   o->text = buf + p; p = p + o->h.text_size;
   o->data = buf + p; p = p + o->h.data_size;
-  o->syms = (struct t2sym *)(buf + p); p = p + o->h.nsyms * sizeof(struct t2sym);
-  o->rels = (struct t2rel *)(buf + p); p = p + o->h.nrels * sizeof(struct t2rel);
+  o->syms = malloc(o->h.nsyms * sizeof(struct t2sym) + 4);
+  o->rels = malloc(o->h.nrels * sizeof(struct t2rel) + 4);
+  if (!o->syms || !o->rels) return -1;
+  memcpy((char *)o->syms, buf + p, o->h.nsyms * sizeof(struct t2sym)); p = p + o->h.nsyms * sizeof(struct t2sym);
+  memcpy((char *)o->rels, buf + p, o->h.nrels * sizeof(struct t2rel)); p = p + o->h.nrels * sizeof(struct t2rel);
   o->str = buf + p;
   // string table: NUL terminated, empty only without symbols
   if (o->h.str_size == 0 && o->h.nsyms > 0) return -1;
@@ -110,17 +114,21 @@ int t2o_write(int fd, struct t2o *o) {
 
 char *t2o_name(struct t2o *o, int sym) { return o->str + o->syms[sym].name; }
 
-// whole file into a malloc'ed buffer (NUL after the data); 0 if it cannot be read
+// whole file into a malloc'ed buffer (NUL after the data); 0 if it cannot be read (or out of memory)
 char *t2_readfile(char *path, int *size) {
   int fd; char *buf; char *nb; int cap; int total; int n;
   fd = open(path, 0, 0);
   if (fd < 0) return 0;
   cap = 4096; total = 0;
-  buf = malloc(cap + 1); memset(buf, 0, cap + 1);
+  buf = malloc(cap + 1);
+  if (!buf) { close(fd); return 0; }
+  memset(buf, 0, cap + 1);
   while ((n = read(fd, buf + total, cap - total)) > 0) {
     total = total + n;
     if (total == cap) {
-      nb = malloc(cap * 2 + 1); memset(nb, 0, cap * 2 + 1); memcpy(nb, buf, total);
+      nb = malloc(cap * 2 + 1);
+      if (!nb) { free(buf); close(fd); return 0; }
+      memset(nb, 0, cap * 2 + 1); memcpy(nb, buf, total);
       free(buf); buf = nb; cap = cap * 2;
     }
   }

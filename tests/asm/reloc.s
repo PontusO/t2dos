@@ -4,8 +4,8 @@
 @ the section symbols .text/.data), ext/ext2/extd undefined, CONST/FWD/FWD12 absolute (no relocation).
         .syntax unified
         .thumb
-        .global gfun, gdat
-        .extern ext
+        .global gfun, gdat, notdefined
+        .extern ext, notused            @ notused and notdefined are never referenced: no symbol
         .equ    CONST, 100
 
         .text
