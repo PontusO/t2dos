@@ -1464,6 +1464,7 @@ int expr(int lev) {
       m = find_mem(ty); next();
       if (mems[m].off) addi12(0, 0, mems[m].off);
       ty = mems[m].type;
+      lastload = 0;                             // a struct or array member emits no load: do not let lvalue() undo the pointer's
       if (ty & ARR) ty = ty & ~ARR; else load(ty);
     }
     else if (tk == Brak) {
