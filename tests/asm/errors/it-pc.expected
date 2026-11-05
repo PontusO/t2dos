@@ -1,0 +1,1 @@
+tests/asm/errors/it-pc.s:4: error: a branch must be the last instruction of an IT block

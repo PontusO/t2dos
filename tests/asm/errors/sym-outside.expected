@@ -1,0 +1,1 @@
+tests/asm/errors/sym-outside.s:5: error: symbol 'past' is outside its section

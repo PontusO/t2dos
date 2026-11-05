@@ -27,6 +27,7 @@
                                    must reassemble with build/host/as to the original bytes
 """
 import glob
+import random
 import os
 import re
 import struct
@@ -607,7 +608,179 @@ def check_objdump_corpus():
     return failed == 0
 
 
+# ------------------------------------------------------------------ randomized differential
+DIFF_REGS = ['r0', 'r1', 'r2', 'r3', 'r4', 'r7', 'r8', 'r9', 'r12', 'sp', 'lr', 'pc']
+DIFF_IMMS = [0, 1, 2, 3, 4, 7, 8, 16, 31, 32, 33, 124, 128, 255, 256, 508, 512, 1020, 1024, 1028, 4095, 4096,
+             65535, 65536, 0xff00ff00, 0x00ff0000, 0xff0000ff, 0x55555555, 0x3fc00, 0x7fffffff, 0x80000000,
+             -1, -2, -4, -7, -8, -255, -256, -257, -1020, -1024, -4095, -4096, -65535]
+DIFF_OFFS = ['#0', '#-0', '#1', '#2', '#4', '#-4', '#31', '#62', '#124', '#128', '#-255', '#-256', '#1020',
+             '#1024', '#4095', '#4096', '#-4095']
+DIFF_MNS = ['mov', 'mvn', 'movw', 'movt', 'add', 'addw', 'sub', 'subw', 'cmp', 'cmn', 'tst', 'and', 'orr', 'eor',
+            'bic', 'lsl', 'lsr', 'asr', 'ror', 'mul', 'mls', 'sdiv', 'udiv', 'neg', 'sxtb', 'uxtb', 'sxth', 'uxth',
+            'ldr', 'str', 'ldrb', 'strb', 'ldrh', 'strh', 'ldrsb', 'ldrsh', 'push', 'pop', 'bx', 'blx', 'nop']
+DIFF_S = ('mov', 'mvn', 'add', 'sub', 'and', 'orr', 'eor', 'bic', 'lsl', 'lsr', 'asr', 'ror', 'mul', 'neg')
+
+
+def diff_case(rnd):
+    """One random test case: an instruction line (sometimes in an IT block) of the forms as supports."""
+    def reg():
+        return rnd.choice(DIFF_REGS)
+
+    def imm():
+        k = rnd.random()
+        if k < 0.6:
+            v = rnd.choice(DIFF_IMMS)
+        elif k < 0.8:
+            v = rnd.randrange(-300, 4200)
+        else:
+            v = rnd.randrange(256) << rnd.randrange(25)
+        return '#%d' % v if v < 0 or v < 1000 else '#0x%x' % (v & 0xffffffff)
+
+    def mem():
+        k = rnd.random()
+        if k < 0.25:
+            return '[%s]' % reg()
+        if k < 0.75:
+            return '[%s, %s]' % (reg(), rnd.choice(DIFF_OFFS))
+        return '[%s, %s]' % (reg(), reg())
+
+    m = rnd.choice(DIFF_MNS)
+    s = 's' if m in DIFF_S and rnd.random() < 0.35 else ''
+    w = rnd.choice(['', '', '', '.w', '.n'])
+    if m in ('push', 'pop'):
+        ops = '{' + ', '.join('r%d' % x for x in sorted(rnd.sample(range(16), rnd.randrange(1, 5)))) + '}'
+    elif m in ('bx', 'blx'):
+        ops = reg()
+    elif m == 'nop':
+        ops = ''
+    elif m.startswith(('ldr', 'str')):
+        ops = reg() + ', ' + mem()
+    elif m in ('movw', 'movt'):
+        ops = '%s, #%d' % (reg(), rnd.choice([0, 1, 255, 4096, 65535, 65536, -1]))
+    elif m == 'mls':
+        ops = ', '.join(reg() for _ in range(4))
+    else:
+        n = rnd.choice([2, 3, 3]) if m not in ('cmp', 'cmn', 'tst', 'neg', 'sxtb', 'uxtb', 'sxth', 'uxth') else 2
+        o = [reg() for _ in range(n)]
+        if rnd.random() < 0.5 and m not in ('mul', 'sdiv', 'udiv', 'neg', 'sxtb', 'uxtb', 'sxth', 'uxth'):
+            o[-1] = imm()
+        ops = ', '.join(o)
+    if rnd.random() < 0.12 and m not in ('push', 'pop', 'nop'):
+        c = rnd.choice(['eq', 'ne', 'cs', 'lt', 'gt'])
+        return '\tit\t%s\n\t%s%s%s%s\t%s' % (c, m, s, c, w, ops)
+    return '\t%s%s%s\t%s' % (m, s, w, ops)
+
+
+def diff_gnu(cases, work):
+    """GNU as on all cases in one file: (rejected case indices, {index: bytes} for the others).
+    A case GNU rejects in the batch is tried again alone, so an error cannot leak into the next case."""
+    lines = ['\t.syntax unified', '\t.thumb', '\t.text']
+    where = []                       # source line -> case index
+    for i, c in enumerate(cases):
+        lines.append('Lk%d:' % i)
+        where.append(None)
+        for l in c.split('\n'):
+            lines.append(l)
+            where.append(i)
+    lines.append('Lkend:')
+    src = work + '.gnu.s'
+    open(src, 'w').write('\n'.join(lines) + '\n')
+    obj = work + '.gnu.o'
+    r = subprocess.run([gnu('as')] + GNU_FLAGS + ['-o', obj, src], capture_output=True, text=True)
+    bad = set()
+    for m in re.finditer(r':(\d+): Error:', r.stderr):
+        k = int(m.group(1)) - 4
+        if 0 <= k < len(where) and where[k] is not None:
+            bad.add(where[k])
+    if r.returncode == 0 and bad:
+        raise RuntimeError('GNU as reported errors and wrote an object')
+    if r.returncode != 0 and not bad:
+        raise RuntimeError('GNU as failed: %s' % r.stderr[-500:])
+    good = [i for i in range(len(cases)) if i not in bad]
+    out = {}
+    if bad:
+        rejected = set()
+        for i in sorted(bad):        # alone: an error in the case before cannot reach it
+            g = diff_gnu_one(cases[i], work)
+            if g is None:
+                rejected.add(i)
+            else:
+                out[i] = g
+        bad = rejected
+        sub = [cases[i] for i in good]
+        _, res = diff_gnu(sub, work) if sub else (set(), {})
+        for j, i in enumerate(good):
+            out[i] = res[j]
+        return bad, out
+    subprocess.run([gnu('objcopy'), '-O', 'binary', '-j', '.text', obj, work + '.gnu.bin'], check=True)
+    text = open(work + '.gnu.bin', 'rb').read() if os.path.exists(work + '.gnu.bin') else b''
+    addr = {}
+    for l in subprocess.run([gnu('nm'), obj], capture_output=True, text=True, check=True).stdout.splitlines():
+        f = l.split()
+        if len(f) == 3 and f[2].startswith('Lk'):
+            addr[f[2][2:]] = int(f[0], 16)
+    for i in range(len(cases)):
+        end = addr[str(i + 1)] if i + 1 < len(cases) else addr['end']
+        out[i] = text[addr[str(i)]:end]
+    return set(), out
+
+
+def diff_gnu_one(case, work):
+    src = work + '.one.s'
+    open(src, 'w').write('\t.syntax unified\n\t.thumb\n\t.text\n' + case + '\n')
+    obj = work + '.one.o'
+    r = subprocess.run([gnu('as')] + GNU_FLAGS + ['-o', obj, src], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    subprocess.run([gnu('objcopy'), '-O', 'binary', '-j', '.text', obj, work + '.one.bin'], check=True)
+    return open(work + '.one.bin', 'rb').read()
+
+
+def check_diff(n, seed):
+    """n random cases (seeded): every case as accepts must assemble with GNU as to the same bytes."""
+    os.makedirs(WORK, exist_ok=True)
+    work = os.path.join(WORK, 'diff')
+    rnd = random.Random(seed)
+    cases = []
+    seen = set()
+    while len(cases) < n:
+        c = diff_case(rnd)
+        if c not in seen:
+            seen.add(c)
+            cases.append(c)
+    gbad, gout = diff_gnu(cases, work)
+    both = equal = only_ours = 0
+    fails = 0
+    for i, c in enumerate(cases):
+        o, err = ours_text(c, work)
+        g = None if i in gbad else gout[i]
+        if o is None and g is None:
+            both += 1
+        elif o is None:
+            only_ours += 1
+        elif g is None:
+            fails += 1
+            print('FAIL accepted by as, rejected by GNU: %s' % c.replace('\n', ';').replace('\t', ' ').strip())
+        elif o != g:
+            fails += 1
+            print('FAIL bytes: %s: as %s, GNU %s' % (c.replace('\n', ';').replace('\t', ' ').strip(), o.hex(), g.hex()))
+        else:
+            equal += 1
+    print('diff (seed %d): %d cases, %d equal to GNU as, %d rejected by both, %d rejected by as only, %d failed'
+          % (seed, n, equal, both, only_ours, fails))
+    return fails == 0
+
+
+def ours_text(case, work):
+    src = work + '.ours.s'
+    open(src, 'w').write('\t.syntax unified\n\t.thumb\n\t.text\n' + case + '\n')
+    o, err = ours(src, work + '.ours.o')
+    return (o[0] if o else None), err
+
+
 def main(argv):
+    if len(argv) > 1 and argv[1] == '--diff':
+        return 0 if check_diff(int(argv[2]) if len(argv) > 2 else 1000, int(argv[3]) if len(argv) > 3 else 1) else 1
     if len(argv) > 1 and argv[1] == '--objdump-corpus':
         return 0 if check_objdump_corpus() else 1
     if len(argv) > 1 and argv[1] == '--corpus':

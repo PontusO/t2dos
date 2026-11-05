@@ -7,7 +7,10 @@
 // (struct Item) that sit between the buffer bytes. The second pass lays the items out,
 // grows narrow branches that do not reach (like GNU as, never shrinking), then writes
 // the bytes. Encodings and the narrow/wide choice follow arm-none-eabi-as
-// (-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16): tools/check_asm.py compares the two byte for byte.
+// (-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16): tools/check_asm.py compares the two byte for byte,
+// and with --diff on random lines: what GNU as refuses (sp/pc where ARMv8-M makes them
+// unpredictable: "r13 not allowed here", "r15 not allowed here") as refuses too.
+// add/sub rd, pc, #imm is adr (T1, else addw/subw rd, pc), movs pc, lr is subs pc, lr, #0.
 //
 // Relocations (lib/t2obj.h). ld places each object's text and data, so a value that depends
 // on where a section lands is a relocation, with a zero field in the object and the addend in
@@ -58,7 +61,7 @@ int setf; int cond; int wid; int init; int w16;
 int itleft; int itpos; int itcond[4];
 enum { O_REG = 1, O_IMM, O_MEM, O_LIST, O_EXPR };
 // opart: 1 for #:lower16:, 2 for #:upper16:
-int okind[6]; int oreg[6]; int oidx[6]; int ohas[6]; int opart[6]; int osym[6]; int osym2[6]; int oval[6]; char *otext[6]; int nops;
+int okind[6]; int oreg[6]; int oidx[6]; int ohas[6]; int oneg[6]; int opart[6]; int osym[6]; int osym2[6]; int oval[6]; char *otext[6]; int nops;
 
 int fail(char *msg) { printf("%s:%d: error: %s\n", srcname, line, msg); exit(1); return 0; }
 int failname(char *fmt, char *name, int len) {
@@ -104,7 +107,7 @@ struct Item *newitem(int kind, int size) {
 }
 
 // ------------------------------------------------------------------ symbols
-int hashname(char *s, int n) { int h; int i; h = 0; for (i = 0; i < n; i++) h = h * 31 + s[i]; return h & (HBITS - 1); }
+int hashname(char *s, int n) { int h; int i; h = 0; for (i = 0; i < n; i++) h = (h * 31 + s[i]) & 0xFFFFFF; return h & (HBITS - 1); }
 
 int newsym(char *s, int n) {
   struct Sym *ns; struct Sym *y; int c;
@@ -341,7 +344,7 @@ int nosymentry(int i) {
 }
 
 // a constant now: folds a - b of two labels at fixed places in the same section
-int constexpr() {
+int constval() {
   expr();
   if (es1 < 0 && es2 < 0) return ec;
   if (es1 >= 0 && !(syms[es1].flags & F_DEF)) undefined(es1);
@@ -353,7 +356,7 @@ int constexpr() {
 int parseop(int i) {
   char *q; int n; int r; int r2; int k;
   skipws();
-  otext[i] = p; oidx[i] = -1; ohas[i] = 0; oval[i] = 0; osym[i] = -1; osym2[i] = -1; oreg[i] = -1; opart[i] = 0;
+  otext[i] = p; oidx[i] = -1; ohas[i] = 0; oneg[i] = 0; oval[i] = 0; osym[i] = -1; osym2[i] = -1; oreg[i] = -1; opart[i] = 0;
   if (*p == '#') {
     p++; skipws();
     if (*p == ':') {                   // #:lower16:x or #:upper16:x
@@ -377,7 +380,8 @@ int parseop(int i) {
     if (*p == ',') {
       p++; skipws();
       if (*p == '#') {
-        p++; expr(); ohas[i] = 1; osym[i] = es1; osym2[i] = es2; oval[i] = ec;
+        p++; skipws(); oneg[i] = *p == '-';             // [rn, #-0] is a wide encoding
+        expr(); ohas[i] = 1; osym[i] = es1; osym2[i] = es2; oval[i] = ec;
       } else {
         q = p; n = scanident(); r = regnum(q, n);
         if (r < 0) fail("register expected");
@@ -496,6 +500,10 @@ int mov16(int top, int rd, int v) {             // movw / movt
 // a 16-bit data-processing encoding sets the flags outside an IT block and not inside one
 int narrowdp() { return wid != 4 && ((setf && !init) || (!setf && init)); }
 int notnarrow() { if (wid == 2) fail("no narrow encoding for these operands"); return 0; }
+// the ARMv8-M rules on r13/r15 as GNU as applies them (its words)
+int nosp(int r) { if (r == 13) fail("r13 not allowed here"); return r; }
+int nopc(int r) { if (r == 15) fail("r15 not allowed here"); return r; }
+int badreg(int r) { nopc(r); return nosp(r); }
 
 // mnemonics, in the order of the enum
 enum { M_MOV, M_MVN, M_MOVW, M_MOVT, M_ADD, M_ADDW, M_SUB, M_SUBW, M_CMP, M_CMN, M_TST,
@@ -535,16 +543,22 @@ int do_mov(int id) {
   if (!isimm(1)) {
     rm = R(1);
     if (id == M_MVN) {
+      badreg(rd); badreg(rm);
       if (lo(rd) && lo(rm) && narrowdp()) return emit16(0x43C0 | rm << 3 | rd);
       notnarrow(); return dpreg(3, setf, 15, rd, rm, 0, 0);
     }
     if (setf) {
+      if (rd == 15 && rm == 14) { notnarrow(); return emit32(0xF3DE, 0x8F00); }   // subs pc, lr, #0, as GNU as
+      badreg(rd); badreg(rm);
       if (wid != 4 && !init && lo(rd) && lo(rm)) return emit16(rm << 3 | rd);   // lsls rd, rm, #0
       notnarrow(); return dpreg(2, 1, 15, rd, rm, 0, 0);
     }
     if (wid != 4) return emit16(0x4600 | (rd & 8) << 4 | rm << 3 | (rd & 7));
+    nopc(rd); nopc(rm);
+    if (rd == 13 && rm == 13) nosp(rd);
     return dpreg(2, 0, 15, rd, rm, 0, 0);
   }
+  badreg(rd);
   v = IMM(1);
   if (id == M_MOV && lo(rd) && narrowdp()) {
     if (v >= 0 && v <= 255) return emit16(0x2000 | rd << 8 | v);
@@ -571,15 +585,32 @@ int do_addsub(int id) {
       if (!sub && lo(rd) && v >= 0 && v <= 1020) return emit16(0xA800 | rd << 8 | v >> 2);
       if (rd == 13 && v >= 0 && v <= 508) return emit16((sub ? 0xB080 : 0xB000) | v >> 2);
     }
+    // add rd, pc, #imm is adr: T1 when it fits, else addw/subw rd, pc (also for adds and sub, as GNU as)
+    if (rn == 15 && !sub && !setf && wid != 4 && lo(rd) && (v & 3) == 0 && v >= 0 && v <= 1020) return emit16(0xA000 | rd << 8 | v >> 2);
     if (lo(rd) && lo(rn) && narrowdp()) {
       if (rd == rn && v >= 0 && v <= 255) return emit16((sub ? 0x3800 : 0x3000) | rd << 8 | v);
       if (v >= 0 && v <= 7) return emit16((sub ? 0x1E00 : 0x1C00) | v << 6 | rn << 3 | rd);
     }
     notnarrow();
+    if (rd == 15) {                    // only subs pc, lr, #imm8 (the exception return)
+      if (!sub) nopc(rd);
+      if (rn != 14 || !setf) fail("only SUBS PC, LR, #const allowed");
+      if (v < 0 || v > 255) fail("immediate out of range");
+      return emit32(0xF3DE, 0x8F00 | v);
+    }
+    if (rd == 13 && rn != 13) nosp(rd);
+    if (rn == 15) {
+      if (v >= 0 && v <= 4095) return plain12(sub, rn, rd, v);
+      if (v < 0 && v >= -4095) return plain12(!sub, rn, rd, -v);
+      return fail("immediate out of range");
+    }
     m = modimm(v);
     if (m >= 0) return dpimm(sub ? 13 : 8, setf, rn, rd, m);
     m = modimm(-v);
     if (m >= 0) return dpimm(sub ? 8 : 13, setf, rn, rd, m);
+    // GNU as widens a narrow add/sub that does not fit (low registers in an IT block) only
+    // to the modified-immediate form: no addw/subw for it
+    if (wid == 0 && lo(rd) && lo(rn) && narrowdp()) fail("immediate out of range");
     if (!setf && v >= 0 && v <= 4095) return plain12(sub, rn, rd, v);
     if (!setf && v < 0 && v >= -4095) return plain12(!sub, rn, rd, -v);
     return fail("immediate out of range");
@@ -591,15 +622,19 @@ int do_addsub(int id) {
     return emit16(0x4400 | (rd & 8) << 4 | o << 3 | (rd & 7));
   }
   notnarrow();
+  nopc(rd);
+  if (rd == 13 && rn != 13) nosp(rd);
+  nopc(rn); badreg(rm);
   return dpreg(sub ? 13 : 8, setf, rn, rd, rm, 0, 0);
 }
 
 int do_addw(int id) {
   int rd; int rn; int v;
-  nargs(2, 3);
+  nargs(3, 3);                         // GNU as has no two-operand addw/subw
   if (wid == 2) fail("no narrow encoding for these operands");
-  rd = R(0);
-  if (nops == 3) rn = R(1); else rn = rd;
+  rd = R(0); rn = R(1);
+  nopc(rd);
+  if (rd == 13 && rn != 13) nosp(rd);
   if (id == M_ADDW && !opart[nops - 1] && symfix(nops - 1, R_DATA_ADDW)) return plain12(0, rn, rd, 0);
   v = IMM(nops - 1);
   if (v < 0 || v > 4095) fail("immediate out of range");
@@ -611,7 +646,7 @@ int do_mov16(int id) {
   int rd; int top; int v;
   nargs(2, 2); if (wid == 2) notnarrow();
   top = id == M_MOVT;
-  rd = R(0);
+  rd = badreg(R(0));
   if (!isimm(1)) fail("immediate expected");
   if (opart[1]) {
     if (w16 || opart[1] != top + 1) fail("movw takes :lower16: and movt takes :upper16:");
@@ -644,6 +679,12 @@ int do_fnaddr() {
 int do_cmp(int id) {
   int rn; int rm; int v; int m;
   nargs(2, 2); rn = R(0);
+  nopc(rn);
+  if (id == M_TST) nosp(rn);
+  if (!isimm(1)) {
+    if (id == M_CMP && wid != 4) nopc(R(1));             // cmp.n allows sp (deprecated)
+    else badreg(R(1));
+  }
   if (isimm(1)) {
     v = IMM(1);
     if (id == M_CMP && lo(rn) && wid != 4 && v >= 0 && v <= 255) return emit16(0x2800 | rn << 8 | v);
@@ -668,8 +709,9 @@ int do_logic(int id) {
   if (id == M_ORR) { op = 2; nop16 = 0x4300; }
   if (id == M_EOR) { op = 4; nop16 = 0x4040; }
   if (id == M_BIC) { op = 1; nop16 = 0x4380; comm = 0; }
-  rd = R(0);
-  if (nops == 3) rn = R(1); else rn = rd;
+  rd = badreg(R(0));
+  if (nops == 3) rn = badreg(R(1)); else rn = rd;
+  if (!isimm(nops - 1)) badreg(R(nops - 1));
   if (isimm(nops - 1)) {
     v = IMM(nops - 1);
     notnarrow();
@@ -692,7 +734,8 @@ int do_shift(int id) {
   int rd; int rn; int rm; int v; int type;
   nargs(2, 3);
   type = id - M_LSL;                   // lsl 0 lsr 1 asr 2 ror 3
-  rd = R(0);
+  rd = badreg(R(0));
+  for (v = 1; v < nops; v++) if (!isimm(v)) badreg(R(v));
   if (isimm(nops - 1)) {
     if (nops == 3) rm = R(1); else rm = rd;
     v = IMM(nops - 1);
@@ -719,12 +762,12 @@ int do_mul(int id) {
   int rd; int rn; int rm; int ra;
   if (id == M_MLS) {
     nargs(4, 4); if (wid == 2) notnarrow();
-    rd = R(0); rn = R(1); rm = R(2); ra = R(3);
+    rd = badreg(R(0)); rn = badreg(R(1)); rm = badreg(R(2)); ra = badreg(R(3));
     return emit32(0xFB00 | rn, ra << 12 | rd << 8 | 0x10 | rm);
   }
   if (id == M_SDIV || id == M_UDIV) {
     nargs(3, 3); if (wid == 2) notnarrow();
-    rd = R(0); rn = R(1); rm = R(2);
+    rd = badreg(R(0)); rn = badreg(R(1)); rm = badreg(R(2));
     return emit32((id == M_SDIV ? 0xFB90 : 0xFBB0) | rn, 0xF0F0 | rd << 8 | rm);
   }
   nargs(2, 3);
@@ -734,6 +777,7 @@ int do_mul(int id) {
     return emit16(0x4340 | (rd == rm ? rn : rm) << 3 | rd);
   if (setf) fail("muls needs low registers and rd equal to one source");
   notnarrow();
+  badreg(rd); badreg(rn); badreg(rm);
   return emit32(0xFB00 | rn, 0xF000 | rd << 8 | rm);
 }
 
@@ -747,7 +791,7 @@ int do_neg() {
 
 int do_ext(int id) {
   int rd; int rm; int k; int w;
-  nargs(2, 2); rd = R(0); rm = R(1);
+  nargs(2, 2); rd = badreg(R(0)); rm = badreg(R(1));
   k = 0; w = 0;                                     // sxth
   if (id == M_SXTB) { k = 1; w = 4; }
   if (id == M_UXTH) { k = 2; w = 1; }
@@ -773,8 +817,10 @@ int do_mem(int id) {
   if (okind[1] != O_MEM) fail("memory operand expected");
   rn = oreg[1];
   if (rn == 15 && (k < 3 || oidx[1] >= 0)) fail("cannot use register index with PC-relative addressing");   // GNU's words
+  if (k == 0) nopc(rt);
+  else if (k != 4) badreg(rt);
   if (oidx[1] >= 0) {
-    rm = oidx[1];
+    rm = badreg(oidx[1]);
     if (wid != 4 && lo(rt) && lo(rn) && lo(rm)) return emit16(0x5000 | k << 9 | rm << 6 | rn << 3 | rt);
     notnarrow();
     return emit32((tb - 0x80) | rn, rt << 12 | rm);
@@ -782,6 +828,7 @@ int do_mem(int id) {
   v = 0;
   if (ohas[1]) v = opconst(1);
   if (v % scale) fail("misaligned offset");
+  if (oneg[1] && v == 0) { notnarrow(); return emit32(tb | rn, rt << 12); }   // [rn, #-0]: wide, as GNU as
   if (rn == 15) {                      // literal loads: ldr T1 (narrow), else imm12 with the U bit (bit 7) for the sign
     if (wid != 4 && k == 4 && lo(rt) && v >= 0 && v <= 1020) return emit16(0x4800 | rt << 8 | v >> 2);
     notnarrow();
@@ -827,6 +874,7 @@ int do_branch(int id) {
   nargs(1, 1);
   if (id == M_BX || id == M_BLX) {
     if (wid == 4) fail("no wide encoding for bx/blx");
+    if (id == M_BLX) nopc(R(0));
     return emit16((id == M_BX ? 0x4700 : 0x4780) | R(0) << 3);
   }
   if (okind[0] != O_EXPR && okind[0] != O_REG) fail("branch target expected");
@@ -922,7 +970,7 @@ int do_vldr(int store) {
     if (*p != '#') fail("immediate expected");
     p++; skipws();
     if (*p == '-') neg = 1;
-    v = constexpr();
+    v = constval();
     skipws();
   }
   if (*p != ']') fail("missing ]");
@@ -936,23 +984,23 @@ int do_vldr(int store) {
 }
 
 int do_vpush(int pop) {
-  int a; int b; int r; int first; int count; int mask;
+  int a; int b; int r; int first; int count; char in[33];   // in[r]: sr in the list (no 1 << 31)
   skipws();
   if (*p != '{') fail("register list expected");
-  p++; mask = 0;
+  p++; memset(in, 0, 33);
   while (1) {
     a = sreg(); b = a; skipws();
     if (*p == '-') { p++; b = sreg(); if (b < a) fail("bad register range"); skipws(); }
-    for (r = a; r <= b; r++) mask = mask | 1 << r;
+    for (r = a; r <= b; r++) in[r] = 1;
     if (*p == ',') { p++; continue; }
     if (*p == '}') { p++; break; }
     fail("missing }");
   }
   first = 0;
-  while (!(mask & 1 << first)) first++;
+  while (!in[first]) first++;
   count = 0;
-  for (r = first; r < 32 && (mask & 1 << r); r++) count++;
-  for (r = first + count; r < 32; r++) if (mask & 1 << r) fail("register list not consecutive");
+  for (r = first; r < 32 && in[r]; r++) count++;
+  for (r = first + count; r < 32; r++) if (in[r]) fail("register list not consecutive");
   return emit32((pop ? 0xECBD : 0xED2D) | (first & 1) << 6, 0x0A00 | (first >> 1) << 12 | count);
 }
 
@@ -1034,6 +1082,8 @@ int instruction(char *q, int n) {
     if (cond != itcond[itpos]) fail("wrong condition in IT block");
     init = 1; itpos++; itleft--;
     if (itleft && (id == M_B || id == M_BL || id == M_BX || id == M_BLX)) fail("a branch must be the last instruction of an IT block");
+    if (itleft && (id == M_MOV || id == M_ADD || id == M_SUB || id == M_LDR) && nops > 0 && okind[0] == O_REG && oreg[0] == 15)
+      fail("a branch must be the last instruction of an IT block");     // a write to pc, as GNU as
   } else if (cond >= 0 && id != M_B) fail("conditional instruction outside an IT block");
   if (id == M_MOV || id == M_MVN) return do_mov(id);
   if (id == M_MOVW || id == M_MOVT) return do_mov16(id);
@@ -1105,10 +1155,11 @@ int strings(int zero) {
 int align(int bytes) {
   struct Item *it;
   if (bytes > 32768 || (bytes & (bytes - 1))) fail("alignment must be a power of two");
+  if (bytes > 4) fail("alignment above 4 is not supported");    // ld aligns each section only to 4
   it = newitem(K_ALIGN, 0);
   it->val = bytes; it->sym2 = -1;
   skipws();
-  if (*p == ',') { p++; it->sym2 = constexpr() & 255; }
+  if (*p == ',') { p++; it->sym2 = constval() & 255; }
   if (bytes > maxal[cur]) maxal[cur] = bytes;
   return 0;
 }
@@ -1153,20 +1204,20 @@ int directive(char *q, int n) {
   if (isdir(q, n, ".ascii")) return strings(0);
   if (isdir(q, n, ".asciz") || isdir(q, n, ".string")) return strings(1);
   if (isdir(q, n, ".space") || isdir(q, n, ".zero")) {
-    v = constexpr(); f = 0;
+    v = constval(); f = 0;
     if (v < 0) fail("negative size");
     skipws();
-    if (*p == ',') { p++; f = constexpr(); }
+    if (*p == ',') { p++; f = constval(); }
     for (i = 0; i < v; i++) emit8(f);
     return 0;
   }
   if (isdir(q, n, ".align")) {
-    v = constexpr();
+    v = constval();
     if (v < 0 || v > 15) fail("alignment out of range");
     return align(1 << v);
   }
   if (isdir(q, n, ".balign")) {
-    v = constexpr();
+    v = constval();
     if (v < 1) fail("alignment must be a power of two");
     return align(v);
   }
@@ -1291,6 +1342,9 @@ int checkrefs(int sec) {
         if (y->sect != SEC_TEXT) failname("fnaddr target '%s' is not a text label", y->name, y->len);
         if (sec != SEC_TEXT) fail("fnaddr in the data section");
       } else if (y->sect != SEC_ABS) it->rel = it->flags;
+      // ld relocates only R_WORD in data: a field of an instruction there cannot be filled in
+      if (sec != SEC_TEXT && it->flags == R_FNADDR) fail("fnaddr in the data section");
+      if (sec != SEC_TEXT && it->rel) fail("data reference in the data section");
     }
   }
   return 0;
@@ -1402,7 +1456,7 @@ char *finish(int sec, int *size) {
   q = 0; at = 0;
   for (k = 0; k < nitems[sec]; k++) {
     it = items[sec] + k;
-    memcpy(o + at, sb[sec] + q, it->pos - q);
+    if (it->pos > q) memcpy(o + at, sb[sec] + q, it->pos - q);      // sb[sec] is 0 while empty
     at = at + it->pos - q; q = it->pos;
     if (it->kind == K_BR) encbranch(o + at, it);
     if (it->kind == K_ALIGN) fill(o + at, it->addr, it->size, it->sym2, sec == SEC_TEXT);
@@ -1416,7 +1470,7 @@ char *finish(int sec, int *size) {
     }
     at = at + it->size;
   }
-  memcpy(o + at, sb[sec] + q, sl[sec] - q);
+  if (sl[sec] > q) memcpy(o + at, sb[sec] + q, sl[sec] - q);
   fill(o + n, n, pad, -1, 1);
   for (k = 0; k < nitems[sec]; k++) {  // fields resolved here: absolute symbols, local fnaddr
     it = items[sec] + k;
@@ -1439,7 +1493,7 @@ int writeobj(char *out) {
     y = syms + i;
     if (y->flags & F_ANON) continue;
     if (nosymentry(i) && !(y->flags & F_INIT)) continue;
-    if (!(y->flags & (F_DEF | F_GLOBAL | F_EXTERN | F_REF))) continue;
+    if (!(y->flags & (F_DEF | F_REF))) continue;       // an unused .extern or .global of nothing: no entry
     y->out = ns; ns++; strsize = strsize + y->len + 1;
   }
   nr = 0; secsym[SEC_TEXT] = -1; secsym[SEC_DATA] = -1;
@@ -1460,7 +1514,13 @@ int writeobj(char *out) {
     if (y->out < 0) continue;
     ts[y->out].name = at;
     memcpy(str + at, y->name, y->len); at = at + y->len + 1;
-    if (y->flags & F_DEF) { ts[y->out].sect = y->sect; ts[y->out].value = symaddr(i); }
+    if (y->flags & F_DEF) {
+      ts[y->out].sect = y->sect; ts[y->out].value = symaddr(i);
+      if (y->sect != SEC_ABS && (symaddr(i) < 0 || symaddr(i) > (y->sect == SEC_TEXT ? tsz : dsz))) {
+        line = y->line;                // ld rejects a symbol past the end of its section
+        failname("symbol '%s' is outside its section", y->name, y->len);
+      }
+    }
     else { ts[y->out].sect = SEC_UNDEF; ts[y->out].value = 0; }
     ts[y->out].flags = 0;
     if ((y->flags & (F_GLOBAL | F_EXTERN)) || !(y->flags & F_DEF)) ts[y->out].flags = SYM_GLOBAL;

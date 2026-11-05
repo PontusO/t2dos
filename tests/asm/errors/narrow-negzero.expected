@@ -1,0 +1,1 @@
+tests/asm/errors/narrow-negzero.s:4: error: no narrow encoding for these operands

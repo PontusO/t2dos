@@ -1,0 +1,1 @@
+tests/asm/errors/dataref-data.s:4: error: data reference in the data section

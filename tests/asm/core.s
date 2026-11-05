@@ -447,13 +447,13 @@ helper:
         .byte   'a', '\n', 0b11, 0x7f
         .align  2
         nop
-        .balign 8
+        .balign 4
         .space  3
         .space  2, 0x55
         .zero   1
         .balign 4
         .byte   1
-        .align  3
+        .align  2
         mov     r0, r0
 @ ---------------------------------------------------------------- data
         .data
@@ -462,7 +462,7 @@ dstart:
         .byte   7
         .align  2
         .short  2
-        .balign 8
+        .balign 4
         .asciz  "hello"
         .space  3, 1
 dend:
@@ -578,3 +578,54 @@ loop2:
         ldrsb   r0, [pc]
         ldrsh   r0, [pc, #-300]
         ldrsh.w r0, [pc, #4]
+@ ---------------------------------------------------------------- PC-relative add/sub (adr), sp/pc forms
+        add     r0, pc, #4
+        add     r7, pc, #1020
+        add     r0, pc, #0
+        add     r1, pc, #1
+        add     r2, pc, #1024
+        add     r8, pc, #4
+        add     r0, pc, #-4
+        add     r3, pc, #4095
+        add     r0, pc, #-4095
+        add.w   r2, pc, #16
+        add.w   r7, pc, #-255
+        adds    r0, pc, #4
+        addw    r1, pc, #5
+        addw    r1, pc, #4095
+        subw    r1, pc, #4095
+        sub     r3, pc, #4
+        sub     r3, pc, #-4
+        sub.w   r9, pc, #1020
+        subs    r0, pc, #8
+        subs    pc, lr, #0
+        subs    pc, lr, #4
+        subs.w  pc, lr, #255
+        movs    pc, lr
+        ldr     r0, [r1, #-0]
+        ldr     r0, [sp, #-0]
+        ldr     r0, [pc, #-0]
+        ldrb    r0, [r1, #-0]
+        strh    r0, [r1, #-0]
+        add     sp, r1
+        add     r0, sp, r1
+        add     r0, r0, sp
+        add     pc, r0
+        mov     sp, r1
+        mov     r1, sp
+        mov     pc, r1
+        mov.w   sp, r1
+        mov.w   r1, sp
+        cmp     sp, r1
+        cmp     r1, sp
+        cmp.w   sp, r1
+        cmn     sp, r1
+        cmp     sp, #4
+        sub     sp, sp, r1
+        addw    sp, sp, #4
+        add     sp, sp, #4096
+        ldr     sp, [r0, #4]
+        ldr     pc, [r0, #4]
+        str     sp, [r0, #4]
+        neg     sp, r0
+        bx      pc

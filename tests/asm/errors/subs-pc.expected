@@ -1,0 +1,1 @@
+tests/asm/errors/subs-pc.s:4: error: only SUBS PC, LR, #const allowed

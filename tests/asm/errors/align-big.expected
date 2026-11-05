@@ -1,0 +1,1 @@
+tests/asm/errors/align-big.s:4: error: alignment above 4 is not supported

@@ -1,0 +1,1 @@
+tests/asm/errors/fnaddr-data-undef.s:4: error: fnaddr in the data section

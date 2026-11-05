@@ -230,7 +230,11 @@ int dec16(int h) {
     m16((h & 0x800) ? "ldr" : "str");
     return memop((h >> 8) & 7, 13, (h & 255) * 4, 0);
   }
-  if (h < 0xA800) return 0;                             // adr
+  if (h < 0xA800) {                                     // adr, as GNU prints it
+    m16("add");
+    sprintf(ops, "%s, pc, #%d", rname((h >> 8) & 7), (h & 255) * 4);
+    return 1;
+  }
   if (h < 0xB000) {
     m16("add");
     sprintf(ops, "%s, sp, #%d", rname((h >> 8) & 7), (h & 255) * 4);
@@ -426,7 +430,12 @@ int dec_branch(int h1, int h2) {
   }
   if (h2 & 0x4000) return 0;                            // blx
   c = (h1 >> 6) & 15;
-  if (c >= 14) {                                        // miscellaneous: only nop.w
+  if (c >= 14) {                                        // miscellaneous: nop.w, subs pc, lr, #imm8
+    if (h1 == 0xF3DE && (h2 & 0xFF00) == 0x8F00) {
+      if (icond >= 0 && !ilast) return 0;               // it writes pc: last in an IT block
+      m32("subs", 0, 0); sprintf(ops, "pc, lr, #%d", h2 & 255);
+      return 1;
+    }
     if (h1 != 0xF3AF || h2 != 0x8000) return 0;
     m32("nop", 0, 1); ops[0] = 0;
     return 1;

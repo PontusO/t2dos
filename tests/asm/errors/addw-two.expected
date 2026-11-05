@@ -1,0 +1,1 @@
+tests/asm/errors/addw-two.s:4: error: wrong number of operands
