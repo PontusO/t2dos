@@ -1,0 +1,9 @@
+# build artifacts (make all / make host regenerate them)
+/cc
+/host_linux
+*.bin
+/root/bin/
+/root/src/*
+!/root/src/.keep
+/root/lib/
+__pycache__/

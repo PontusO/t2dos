@@ -1,0 +1,40 @@
+// sys.h - T2DOS syscall ABI. Shared by the kernel (C++), cc.c (builtin table)
+// and user programs. Numbers are frozen; add new ones in the gaps.
+//
+// Convention: all arguments are ints on the stack, result in r0.
+// Builtins are called by name from C: open("x", 1), gpio_write(25, 1), ...
+
+enum {
+  // process
+  SYS_exit = 0, SYS_exec = 1, SYS_millis = 2, SYS_sleep = 3, SYS_sysinfo = 4,
+  // console (fd 0 = console in, fd 1 = console out)
+  SYS_putchar = 16, SYS_getchar = 17, SYS_kbhit = 18, SYS_conctl = 19, SYS_redirect = 20,
+  // files
+  SYS_open = 32, SYS_close = 33, SYS_read = 34, SYS_write = 35, SYS_seek = 36, SYS_stat = 37,
+  SYS_unlink = 38, SYS_rename = 39, SYS_mkdir = 40, SYS_rmdir = 41,
+  SYS_opendir = 42, SYS_readdir = 43, SYS_closedir = 44, SYS_chdir = 45, SYS_getcwd = 46,
+  // memory and string helpers (done in the kernel: fast, saves code in every program)
+  SYS_malloc = 64, SYS_free = 65, SYS_memset = 66, SYS_memcmp = 67, SYS_memcpy = 68,
+  SYS_strlen = 69, SYS_strcmp = 70, SYS_strcpy = 71, SYS_printf = 72, SYS_sprintf = 73,
+  SYS_atoi = 74, SYS_strncmp = 75, SYS_strchr = 76,
+  // network: 80..95 reserved
+  // board
+  SYS_gpio_mode = 96, SYS_gpio_write = 97, SYS_gpio_read = 98, SYS_analog_read = 99, SYS_pwm_write = 100,
+  SYS_i2c_write = 101, SYS_i2c_read = 102, SYS_spi_transfer = 103, SYS_delay_us = 104
+};
+
+// open() flags
+enum { OPEN_READ = 0, OPEN_WRITE = 1, OPEN_APPEND = 2 };
+// seek() whence
+enum { SEEK_BEGIN = 0, SEEK_CURRENT = 1, SEEK_FINISH = 2 };
+// sysinfo() kinds
+enum { INFO_SRAM_FREE = 0, INFO_PSRAM_TOTAL = 1, INFO_PSRAM_FREE = 2, INFO_DISK_TOTAL_KB = 3, INFO_DISK_USED_KB = 4, INFO_CONSOLE = 5 };
+// conctl() commands
+enum { CON_CLEAR = 0, CON_GOTO = 1, CON_COLOR = 2, CON_SIZE = 3 };
+// gpio_mode()
+enum { PIN_INPUT = 0, PIN_OUTPUT = 1, PIN_INPUT_PULLUP = 2 };
+
+// stat() fills this
+struct stat_t { int size; int isdir; int mtime; };
+// readdir() fills this
+struct dirent_t { char name[64]; int size; int isdir; };
