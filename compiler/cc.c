@@ -18,6 +18,7 @@
 // ------------------------------------------------------------------ tokens
 enum { Num = 128, Str, Id,
   Break, Case, Char, Continue, Default, Else, Enum, For, If, Int, Return, Sizeof, Struct, Switch, Typedef, Void, While,
+  Long, Short, Signed, Unsigned,
   Assign, AddA, SubA, MulA, DivA, ModA, AndA, OrA, XorA, ShlA, ShrA, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr,
   Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak };
 
@@ -26,7 +27,7 @@ enum { CNum = 1, CFun, CSys, CGlo, CLoc };
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
 // FN marks a function type; bits 22.. index fnret[] (its return type). A function
 // designator has 0 pointer levels, a function pointer 1.
-enum { TCHAR = 0, TINT = 1, TSTRUCT = 2, PTR = 256, ARR = 1048576, FN = 2097152 };
+enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TSTRUCT = 6, PTR = 256, ARR = 1048576, FN = 2097152 };
 
 #include "sys.h"
 
@@ -53,10 +54,12 @@ int loc;                 // current local frame depth
 int maxloc;
 int ret_fix, brk_fix, cont_fix, cont_tgt;  // fixup chains / targets
 int nparams;
+int fnrty;               // return type of the function being compiled
 
 int *fnret; int nfn;     // function types: return type of each
 int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
 struct Sym *dname; int darr;                       // set by declarator(): name, array size, -1 none, -2 for []
+int numty;                                         // type of the last number token: TINT or TUINT
 int slen;                                          // bytes of the last string literal, with its 0
 int ikind; int ibase;                              // initializer target: 0 = data offset, 1 = frame offset
 int init_open; int init_head; int init_tail;       // code chunks for global initializers, run before main
@@ -142,12 +145,43 @@ int fnret_of(int t) { return fnret[(t >> 22) & 511]; }
 int load(int t) {
   if (isfndes(t)) return 0;                                  // a function is its own address
   if (t == TCHAR) { emit32(63888, 0); lastload = 4; }          // ldrsb.w r0,[r0]  F990 0000
-  else if (t == TINT || t >= PTR) { emit16(26624); lastload = 2; } // ldr r0,[r0]  6800
+  else if (t == TINT || t == TUINT || t >= PTR) { emit16(26624); lastload = 2; } // ldr r0,[r0]  6800
+  else if (t == TUCHAR) { emit16(30720); lastload = 2; }       // ldrb r0,[r0]     7800
+  else if (t == TSHORT) { emit32(63920, 0); lastload = 4; }    // ldrsh.w r0,[r0]  F9B0 0000
+  else if (t == TUSHORT) { emit16(34816); lastload = 2; }      // ldrh r0,[r0]     8800
   // struct: keep address
   return 0;
 }
 // store *r1 = r0
-int store(int t) { if (t == TCHAR) emit16(28680); else emit16(24584); return 0; } // strb r0,[r1] 7008 / str r0,[r1] 6008
+int store(int t) {                       // strb r0,[r1] 7008 / strh r0,[r1] 8008 / str r0,[r1] 6008
+  if (t == TCHAR || t == TUCHAR) emit16(28680); else if (t == TSHORT || t == TUSHORT) emit16(32776); else emit16(24584);
+  return 0;
+}
+// r0 = *r1 according to type (for ++ and --)
+int load_r1(int t) {
+  if (t == TCHAR) emit32(63889, 0);                    // ldrsb.w r0,[r1]  F991 0000
+  else if (t == TUCHAR) emit16(30728);                 // ldrb r0,[r1]     7808
+  else if (t == TSHORT) emit32(63921, 0);              // ldrsh.w r0,[r1]  F9B1 0000
+  else if (t == TUSHORT) emit16(34824);                // ldrh r0,[r1]     8808
+  else emit16(26632);                                  // ldr r0,[r1]      6808
+  return 0;
+}
+// *r1 = r2 according to type: strb 700A / strh 800A / str 600A
+int store_r2(int t) {
+  if (t == TCHAR || t == TUCHAR) emit16(28682); else if (t == TSHORT || t == TUSHORT) emit16(32778); else emit16(24586);
+  return 0;
+}
+// convert r0 to type t (casts, return values): sign or zero extend the small types
+int conv(int t) {
+  if (t == TCHAR) emit16(45632);                       // sxtb r0,r0  B240
+  else if (t == TUCHAR) emit16(45760);                 // uxtb r0,r0  B2C0
+  else if (t == TSHORT) emit16(45568);                 // sxth r0,r0  B200
+  else if (t == TUSHORT) emit16(45696);                // uxth r0,r0  B280
+  return 0;
+}
+// usual arithmetic conversions: small types promote to int; unsigned int wins
+int arith(int a, int b) { if (a == TUINT || b == TUINT) return TUINT; return TINT; }
+int isuns(int a, int b) { return a < PTR && b < PTR && arith(a, b) == TUINT; }
 
 // branches, all 32-bit so they can be patched. returns offset of instruction.
 int b_w(int target) {   // unconditional b.w to target (target<0: fixup later)
@@ -236,6 +270,9 @@ int next() {
         }
       }
       else { while (*p >= '0' && *p <= '7') { ival = ival * 8 + *p - '0'; p = p + 1; } }
+      numty = TINT;                          // 10u 10L 10UL; 0x80000000 and up do not fit an int
+      while (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L') { if (*p == 'u' || *p == 'U') numty = TUINT; p = p + 1; }
+      if (ival < 0) numty = TUINT;
       tk = Num; return 0;
     }
     else if (tk == '/') {
@@ -268,7 +305,7 @@ int next() {
         if (tk == '"') { data[dpos] = c; dpos = dpos + 1; } else ival = c;
       }
       p = p + 1;
-      if (tk == '"') { data[dpos] = 0; dpos = dpos + 1; ival = pp - data; slen = dpos - ival; tk = Str; } else tk = Num;
+      if (tk == '"') { data[dpos] = 0; dpos = dpos + 1; ival = pp - data; slen = dpos - ival; tk = Str; } else { tk = Num; numty = TINT; }
       return 0;
     }
     else if (tk == '=') { if (*p == '=') { p = p + 1; tk = Eq; } else tk = Assign; return 0; }
@@ -318,7 +355,7 @@ int preprocess() {
     if (tk != Id) die("bad #define");
     d = id;
     while (*p == ' ' || *p == '\t') p = p + 1;
-    if (*p >= '0' && *p <= '9') { next(); d->class = CNum; d->type = TINT; d->val = ival; }
+    if (*p >= '0' && *p <= '9') { next(); d->class = CNum; d->type = numty; d->val = ival; }
     line = sv;
   }
   while (*p && *p != '\n') p = p + 1;
@@ -340,18 +377,26 @@ int mkrow(int et, int n);
 int decay() { if (isrow(ty)) ty = rowelem(ty) + PTR; return 0; }
 int tysize(int t) {
   if (t >= PTR) return 4;
-  if (t == TCHAR) return 1;
-  if (t == TINT) return 4;
+  if (t == TCHAR || t == TUCHAR) return 1;
+  if (t == TSHORT || t == TUSHORT) return 2;
+  if (t == TINT || t == TUINT) return 4;
   return stsize[t - TSTRUCT];
 }
 
 // parse a base type (optionally with struct definition) and pointer stars
-int is_type() { return tk == Int || tk == Char || tk == Void || tk == Struct || (tk == Id && id->class == 8); }
+int is_type() { return tk == Int || tk == Char || tk == Void || tk == Struct || tk == Long || tk == Short || tk == Signed || tk == Unsigned || (tk == Id && id->class == 8); }
 
 int parse_type() {
   int bt; int mt; int si; int off; int sz; int al;
-  if (tk == Int) { bt = TINT; next(); }
-  else if (tk == Char || tk == Void) { bt = TCHAR; next(); }
+  if (tk == Int || tk == Char || tk == Long || tk == Short || tk == Signed || tk == Unsigned) {
+    off = 0; sz = 0; al = 0;               // unsigned, short, char seen
+    while (tk == Int || tk == Char || tk == Long || tk == Short || tk == Signed || tk == Unsigned) {
+      if (tk == Unsigned) off = 1; else if (tk == Short) sz = 1; else if (tk == Char) al = 1;
+      next();
+    }
+    if (al) bt = off ? TUCHAR : TCHAR; else if (sz) bt = off ? TUSHORT : TSHORT; else bt = off ? TUINT : TINT;
+  }
+  else if (tk == Void) { bt = TCHAR; next(); }
   else if (tk == Id && id->class == 8) { bt = id->type; next(); }   // typedef name
   else if (tk == Struct) {
     next();
@@ -550,23 +595,32 @@ int scale1(int n) {
 
 // r0 = r1 op r0 where r1 has type t and r0 has type ty; sets ty to the result type
 int binop(int op, int t) {
-  if (op == Or)  { emit16(17160); ty = TINT; }                     // orrs r0,r1
-  else if (op == Xor) { emit16(16456); ty = TINT; }                // eors r0,r1
-  else if (op == And) { emit16(16392); ty = TINT; }                // ands r0,r1
-  else if (op == Shl) { emit32(64001, 61440); ty = TINT; }         // lsl.w r0,r1,r0
-  else if (op == Shr) { emit32(64065, 61440); ty = TINT; }         // asr.w r0,r1,r0
+  int u;
+  u = isuns(t, ty);
+  if (op == Or)  { emit16(17160); ty = arith(t, ty); }             // orrs r0,r1
+  else if (op == Xor) { emit16(16456); ty = arith(t, ty); }        // eors r0,r1
+  else if (op == And) { emit16(16392); ty = arith(t, ty); }        // ands r0,r1
+  else if (op == Shl) { emit32(64001, 61440); ty = arith(t, t); }  // lsl.w r0,r1,r0
+  else if (op == Shr) {                                            // the left operand decides
+    if (t == TUINT) emit32(64033, 61440); else emit32(64065, 61440); // lsr.w / asr.w r0,r1,r0
+    ty = arith(t, t);
+  }
   else if (op == Add) {
     if (t >= PTR && ty < PTR) { scale(tysize(t - PTR)); ty = t; }
     else if (ty >= PTR && t < PTR) scale1(tysize(ty - PTR));
+    else if (t < PTR && ty < PTR) ty = arith(t, ty);
     emit16(6152);                                                  // adds r0,r1,r0
   }
   else if (op == Sub) {
     if (t >= PTR && ty >= PTR) { emit16(6664); imm(2, tysize(t - PTR)); emit32(64400, 61682); ty = TINT; }  // subs ; sdiv r0,r0,r2
-    else { if (t >= PTR) scale(tysize(t - PTR)); emit16(6664); ty = t; }                                   // subs r0,r1,r0
+    else { if (t >= PTR) scale(tysize(t - PTR)); emit16(6664); ty = t < PTR ? arith(t, ty) : t; }      // subs r0,r1,r0
   }
-  else if (op == Mul) { emit16(17224); ty = TINT; }                // muls r0,r1
-  else if (op == Div) { emit32(64401, 61680); ty = TINT; }         // sdiv r0,r1,r0
-  else if (op == Mod) { emit32(64401, 62192); emit32(64258, 4112); ty = TINT; }  // sdiv r2,r1,r0 ; mls r0,r2,r0,r1
+  else if (op == Mul) { emit16(17224); ty = arith(t, ty); }        // muls r0,r1
+  else if (op == Div) { if (u) emit32(64433, 61680); else emit32(64401, 61680); ty = arith(t, ty); }   // udiv / sdiv r0,r1,r0
+  else if (op == Mod) {                                            // udiv / sdiv r2,r1,r0 ; mls r0,r2,r0,r1
+    if (u) emit32(64433, 62192); else emit32(64401, 62192);
+    emit32(64258, 4112); ty = arith(t, ty);
+  }
   return 0;
 }
 
@@ -574,7 +628,7 @@ int expr(int lev) {
   int t; int n; int at; int at2; int m; int sz; int tmp; struct Sym *d;
 
   if (!tk) die("unexpected eof in expression");
-  else if (tk == Num) { imm(0, ival); next(); ty = TINT; }
+  else if (tk == Num) { imm(0, ival); ty = numty; next(); }
   else if (tk == Str) { lea_glo(ival); next(); ty = TCHAR + PTR; }
   else if (tk == Sizeof) {
     next(); if (tk != '(') die("( expected after sizeof"); next();
@@ -594,7 +648,7 @@ int expr(int lev) {
       else die("bad function call");
       ty = d->type;
     }
-    else if (d->class == CNum) { imm(0, d->val); ty = TINT; }
+    else if (d->class == CNum) { imm(0, d->val); ty = d->type; }
     else if (d->class == 6) { lea_glo(d->val); ty = d->type; }   // global array: address
     else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype(d->type); }   // function as a value
     else {
@@ -610,7 +664,7 @@ int expr(int lev) {
     if (is_type()) {                          // cast
       t = declarator(parse_type());
       if (tk != ')') die(") expected in cast"); next();
-      expr(Inc); ty = t;
+      expr(Inc); conv(t); ty = t;
     } else { expr(Assign); if (tk != ')') die(") expected"); next(); }
   }
   else if (tk == Mul) {                         // dereference
@@ -627,21 +681,20 @@ int expr(int lev) {
     else { lvalue(); ty = ty + PTR; }
   }
   else if (tk == '!') { next(); expr(Inc); emit16(10240); emit16(48908); emit16(8193); emit16(8192); ty = TINT; } // cmp r0,#0; ite eq; mov 1; mov 0
-  else if (tk == '~') { next(); expr(Inc); emit16(17344); ty = TINT; }   // mvns r0,r0  43C0
-  else if (tk == Add) { next(); expr(Inc); ty = TINT; }
+  else if (tk == '~') { next(); expr(Inc); emit16(17344); ty = arith(ty, ty); }   // mvns r0,r0  43C0
+  else if (tk == Add) { next(); expr(Inc); ty = arith(ty, ty); }
   else if (tk == Sub) {
     next();
-    if (tk == Num) { imm(0, -ival); next(); } else { expr(Inc); emit16(16960); }   // negs r0,r0  4240
-    ty = TINT;
+    if (tk == Num) { imm(0, -ival); ty = numty; next(); } else { expr(Inc); emit16(16960); ty = arith(ty, ty); }   // negs r0,r0  4240
   }
   else if (tk == Inc || tk == Dec) {            // prefix
     t = tk; next(); expr(Inc); lvalue();
     sz = ty >= PTR ? tysize(ty - PTR) : 1;
     emit16(17921);                              // mov r1,r0        4601
-    if (ty == TCHAR) emit32(63889, 0); else emit16(26632);   // ldrsb.w r0,[r1] / ldr r0,[r1] 6808
+    load_r1(ty);
     if (t == Dec) sz = -sz;
     if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(6272); } // adds r0,r0,r2 1880
-    if (ty == TCHAR) emit16(28680); else emit16(24584);         // strb/str r0,[r1]
+    store(ty);
   }
   else die("bad expression");
 
@@ -673,10 +726,10 @@ int expr(int lev) {
     else if (tk == And) { next(); push(); expr(Eq);  pop1(); binop(And, t); }
     else if (tk == Eq)  { next(); push(); expr(Lt);  pop1(); setcc(0);  ty = TINT; }
     else if (tk == Ne)  { next(); push(); expr(Lt);  pop1(); setcc(1);  ty = TINT; }
-    else if (tk == Lt)  { next(); push(); expr(Shl); pop1(); setcc(11); ty = TINT; }
-    else if (tk == Gt)  { next(); push(); expr(Shl); pop1(); setcc(12); ty = TINT; }
-    else if (tk == Le)  { next(); push(); expr(Shl); pop1(); setcc(13); ty = TINT; }
-    else if (tk == Ge)  { next(); push(); expr(Shl); pop1(); setcc(10); ty = TINT; }
+    else if (tk == Lt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 3 : 11); ty = TINT; }   // lo / lt
+    else if (tk == Gt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 8 : 12); ty = TINT; }   // hi / gt
+    else if (tk == Le)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 9 : 13); ty = TINT; }   // ls / le
+    else if (tk == Ge)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 2 : 10); ty = TINT; }   // hs / ge
     else if (tk == Shl) { next(); push(); expr(Add); pop1(); binop(Shl, t); }
     else if (tk == Shr) { next(); push(); expr(Add); pop1(); binop(Shr, t); }
     else if (tk == Add) { next(); push(); expr(Mul); pop1(); binop(Add, t); }
@@ -689,9 +742,9 @@ int expr(int lev) {
       sz = ty >= PTR ? tysize(ty - PTR) : 1;
       if (tk == Dec) sz = -sz;
       emit16(17921);                            // mov r1,r0
-      if (ty == TCHAR) emit32(63889, 0); else emit16(26632);   // load r0 from [r1]
+      load_r1(ty);
       if (sz >= 0 && sz < 4096) addi12(2, 0, sz); else if (sz < 0 && -sz < 4096) subi12(2, 0, -sz); else { imm(2, sz); emit16(6274); } // adds r2,r0,r2 1882
-      if (ty == TCHAR) emit16(28682); else emit16(24586);         // strb r2,[r1] 700A / str r2,[r1] 600A
+      store_r2(ty);
       next();
     }
     else if (tk == Dot || tk == Arrow) {
@@ -737,7 +790,8 @@ int init_code() {                      // make sure global initializer code goes
 int init_close() { if (init_open) { init_tail = b_w(-1); init_open = 0; } return 0; }
 int poke(int off, int v, int t) {
   data[off] = v;
-  if (t != TCHAR) { data[off + 1] = v >> 8; data[off + 2] = v >> 16; data[off + 3] = v >> 24; }
+  if (tysize(t) >= 2) data[off + 1] = v >> 8;
+  if (tysize(t) == 4) { data[off + 2] = v >> 16; data[off + 3] = v >> 24; }
   return 0;
 }
 // [-] number | enum or #define name, followed by , } or ;  ->  1, value in ival. Else 0, nothing consumed.
@@ -785,7 +839,7 @@ int init_scalar(int t, int off) {
 int init_array(int et, int cnt, int off) {  // returns the number of elements given
   int i; int es; int n;
   es = tysize(et);
-  if (tk == Str && et == TCHAR) {           // char s[N] = "..."
+  if (tk == Str && (et == TCHAR || et == TUCHAR)) {   // char s[N] = "..."
     n = slen;                               // with the terminating 0
     if (n - 1 > cnt) die("string longer than the array");
     if (n > cnt) n = cnt;                   // char s[3] = "abc": no terminator, as in C
@@ -917,7 +971,7 @@ int stmt() {
   else if (tk == Continue) { next(); if (tk != ';') die("; expected"); next(); b_w(cont_tgt); }
   else if (tk == Return) {
     next();
-    if (tk != ';') expr(Assign);
+    if (tk != ';') { expr(Assign); conv(fnrty); }   // unsigned char f() { return 300; } gives 44
     if (tk != ';') die("; expected"); next();
     ret_fix = chain_add(ret_fix, b_w(-1));
   }
@@ -1013,7 +1067,7 @@ int parse_global() {
       if (tk != '{') die("{ expected");
       // fix param offsets: param i at r7 + 8 + 4*(n-1-i)
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) syms[i].val = 8 + 4 * (n - 1 - syms[i].val); i = i + 1; }
-      s->class = CFun; s->val = cpos; nparams = n;
+      s->class = CFun; s->val = cpos; nparams = n; fnrty = t;
       chain_patch(s->fix, cpos, 53248); s->fix = -1;
       emit16(46464);                            // push {r7,lr}      B580
       emit16(18031);                            // mov r7,sp         466F
@@ -1082,8 +1136,8 @@ int main(int argc, char **argv) {
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
   // keywords, in token enum order
-  p = "break case char continue default else enum for if int return sizeof struct switch typedef void while";
-  i = Break; while (i <= While) { next(); id->tk = i; i = i + 1; }
+  p = "break case char continue default else enum for if int return sizeof struct switch typedef void while long short signed unsigned";
+  i = Break; while (i <= Unsigned) { next(); id->tk = i; i = i + 1; }
   // builtin host functions: name, syscall number (see sys.h)
   p = "exit 0 exec 1 millis 2 sleep 3 sysinfo 4 putchar 16 getchar 17 kbhit 18 conctl 19 redirect 20 open 32 close 33 read 34 write 35 seek 36 stat 37 unlink 38 rename 39 mkdir 40 rmdir 41 opendir 42 readdir 43 closedir 44 chdir 45 getcwd 46 malloc 64 free 65 memset 66 memcmp 67 memcpy 68 strlen 69 strcmp 70 strcpy 71 printf 72 sprintf 73 atoi 74 strncmp 75 strchr 76 net_join 80 net_status 81 net_ip 82 connect 83 send 84 recv 85 listen 86 accept 87 sock_avail 88 gpio_mode 96 gpio_write 97 gpio_read 98 analog_read 99 pwm_write 100 i2c_write 101 i2c_read 102 spi_transfer 103 delay_us 104";
   next();

@@ -91,12 +91,18 @@ read/write/close; exec closes sockets a child leaked.
 - `printf`/`sprintf` are kernel-side: `%[-][0][width]d u x c s %%`.
 
 ## Language subset (compiler/cc.c)
-int char void, pointers, structs (named or anonymous, array members),
+int char short void, unsigned and signed (`unsigned char`, `unsigned short`,
+`unsigned`), long (= int, 32 bits), pointers, structs (named or anonymous,
+array members),
 typedef, global/local arrays of any dimension, enum, `#define NAME number`,
 `#include "file"` (also searched in /lib), all operators incl. ?: ++/-- and
 compound assignment (+= -= *= /= %= &= |= ^= <<= >>=), sizeof(type), casts,
 if/else while for switch/case/default break continue return, prototypes.
 String and char escapes: `\n \t \r \b \a \f \v \e \\ \' \"`, octal `\033`, hex `\x1b`.
+Integer rules follow C: char and short promote to int; with an unsigned int
+operand, comparisons, `/`, `%` and `>>` are unsigned. Casts, stores and
+`return` truncate to the target type. Literals take `u`/`l` suffixes; hex
+constants above 0x7FFFFFFF are unsigned. `sizeof` gives an int.
 Function pointers: `int (*fp)(int)`, arrays `int (*tbl[4])(int)`, struct
 members, parameters, typedefs (`typedef int (*op)(int, int);`), casts and
 sizeof `(int (*)(int))`, `fp = f` / `fp = &f`, calls `fp(x)` / `(*fp)(x)` /
@@ -114,9 +120,10 @@ Multi-dimensional arrays: `int m[3][4]`, `int cube[2][3][4]`, struct members
 `int m[2][3]`, `char names[][8] = {"a", "b"}`, `int t[][2] = {{1, 2}, {3, 4}}`,
 parameters `int m[][4]`, pointers to arrays `int (*p)[4] = m;`, `m[i]` as an
 `int *` to row i, `sizeof(int[3][4])`. Only the first dimension may be empty.
-Not yet: float, unsigned/short, multi-line macros.
+Not yet: float, the comma operator, multi-line macros.
 See compiler/tests/ for the covered subset (test4.c: function pointers,
-test5.c: initializers, test6.c: multi-dimensional arrays).
+test5.c: initializers, test6.c: multi-dimensional arrays, test7.c:
+unsigned/short).
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -127,9 +134,9 @@ build, and that `cc` rebuilds it again identically. PSRAM is fully returned
 after every program. `edit` works through `screen` (tested with its default
 flow control on) and builds on the board byte-identical to the PC build.
 Backspace erases at the shell and `write` prompts. test4.c (function
-pointers), test5.c (initializers) and test6.c (multi-dimensional arrays)
-print the same as a native gcc build, whether compiled on the PC or on the
-board.
+pointers), test5.c (initializers), test6.c (multi-dimensional arrays) and
+test7.c (unsigned/short) print the same as a native gcc build, whether
+compiled on the PC or on the board.
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
@@ -145,7 +152,7 @@ byte-identical to the PC cross build.
   unlike the board kernel.
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
 - compiler/tests/ has no automatic runner: compare their output by hand
-  (test4.c to test6.c against `gcc compiler/tests/testN.c && ./a.out`;
+  (test4.c to test7.c against `gcc compiler/tests/testN.c && ./a.out`;
   test4's pointer `sizeof` differs on a 64-bit PC).
 - Under qemu/host_linux the function pointer support has not been run yet
   (qemu-arm is not installed on the development PC).
