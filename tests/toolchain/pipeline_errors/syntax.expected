@@ -1,0 +1,2 @@
+syntax.c:4: error: bad expression near token 59
+exit 1

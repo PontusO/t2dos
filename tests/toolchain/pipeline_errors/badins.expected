@@ -1,0 +1,2 @@
+badins.s:7: error: unknown instruction 'frobnicate'
+exit 1

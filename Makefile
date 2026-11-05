@@ -5,15 +5,13 @@ BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
 all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
-# Board binaries: compiler/cc -S writes assembly, build/host/as and build/host/ld turn it into
-# the .bin (intermediates in build/s/). TOOLS is what every such build needs.
+# Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
+# itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
-# CCBIN source flags: one C file to $@ through build/s/NAME.s and build/s/NAME.o
+# CCBIN source flags: one C file to $@
 define CCBIN
-	@mkdir -p root/bin build/s
-	./$(CC_HOST) -S $(2) -o build/s/$(basename $(notdir $@)).s $(1)
-	build/host/as -o build/s/$(basename $(notdir $@)).o build/s/$(basename $(notdir $@)).s
-	build/host/ld -o $@ build/s/$(basename $(notdir $@)).o
+	@mkdir -p root/bin
+	./$(CC_HOST) $(2) -o $@ $(1)
 endef
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): compiler/cc.c sys.h
@@ -84,8 +82,10 @@ check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/l
 	  if [ $$st -ne 1 ] || [ "$$out" != "objdump: cannot read build/obj/missing.o" ]; then echo "FAIL objdump missing: status $$st, output '$$out'"; exit 1; fi
 	@echo objdump error checks ok
 	python3 tools/check_asm.py --objdump-corpus
-	@# cc -S + as + ld against the reference compiler (make ref): identical .bin files
+	@# cc (driving as and ld) against the reference compiler (make ref): identical .bin files
 	python3 tools/check_ref.py
+	@# the cc driver: multi-file programs, assembly and C mixed, archives, pipeline errors
+	python3 tools/check_toolchain.py --pc
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin build/s

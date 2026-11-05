@@ -1,0 +1,4 @@
+sp 4 add 42
+r1 11 pc 3
+push 18 gadd 5 gpc 10
+exit 112

@@ -3,8 +3,8 @@
 
   check_ref.py            for every userland/*.c, compiler/cc.c, assembler/as.c, linker/ld.c,
                           binutils/*.c and compiler/tests/test*.c: build/ref/cc -o ref.bin X
-                          versus compiler/cc -S X, build/host/as, build/host/ld; the .bin files
-                          must be byte-identical.
+                          versus compiler/cc -o new.bin X (cc runs build/host/as and
+                          build/host/ld); the .bin files must be byte-identical.
 
 A file whose reference .bin starts at an init stub (its entry is not main: the reference
 cc's stub begins with push {r4, lr} = 0xB510) has run-before-main initializer code, which
@@ -24,8 +24,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'ref')
 REF_CC = os.path.join(ROOT, 'build', 'ref', 'cc')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-AS = os.path.join(ROOT, 'build', 'host', 'as')
-LD = os.path.join(ROOT, 'build', 'host', 'ld')
 
 
 def sources():
@@ -69,10 +67,8 @@ def main():
     for src, flags in srcs:
         name = src.replace('/', '-')[:-2]
         ref = os.path.join(WORK, name + '.ref.bin')
-        s = os.path.join(WORK, name + '.s')
-        o = os.path.join(WORK, name + '.o')
         new = os.path.join(WORK, name + '.bin')
-        for f in (ref, s, o, new):
+        for f in (ref, new):
             if os.path.exists(f):
                 os.remove(f)
         st, msg = run([REF_CC] + flags + ['-o', ref, src])
@@ -82,11 +78,7 @@ def main():
         if has_init_stub(ref):
             excluded.append(src)
             continue
-        st, msg = run([CC, '-S'] + flags + ['-o', s, src])
-        if st == 0:
-            st, msg = run([AS, '-o', o, s])
-        if st == 0:
-            st, msg = run([LD, '-o', new, o])
+        st, msg = run([CC] + flags + ['-o', new, src])
         if st != 0:
             diff.append((src, msg.splitlines()[0] if msg else 'exit %d' % st))
             continue

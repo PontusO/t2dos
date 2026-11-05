@@ -2,7 +2,10 @@
 // (RP2350). Written in the subset of C it compiles, so it can build itself.
 //
 // Build on a PC as a cross compiler:   gcc -O2 -I . -o compiler/cc compiler/cc.c   (from the repo root)
-// Use:                                 cc -S [-o prog.s] prog.c ; as -o prog.o prog.s ; ld -o prog.bin prog.o
+// Use:  cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
+//   cc compiles each .c to assembly itself, then runs as on it and ld on all the objects
+//   (/bin/as.bin and /bin/ld.bin on the board; on the PC build/host/as and build/host/ld,
+//   or the ones in $T2_TOOLS). -S stops at the .s, -c at the .o; else the output is a .bin.
 //
 // Generated code model:
 //   r7 = frame pointer, r8 = host syscall entry, r9 = data/bss base.
@@ -21,10 +24,12 @@ enum { Num = 128, Str, Id,
   Break, Case, Char, Continue, Default, Else, Enum, For, If, Int, Return, Sizeof, Struct, Switch, Typedef, Void, While,
   Long, Short, Signed, Unsigned, Float, Double,
   Assign, AddA, SubA, MulA, DivA, ModA, AndA, OrA, XorA, ShlA, ShrA, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr,
-  Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak };
+  Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak,
+  Extern };   // keywords added later go after the operators, whose order expr() relies on
 
 // symbol classes
 enum { CNum = 1, CFun, CSys, CGlo, CLoc };   // 6 = global array, 8 = typedef
+// 7 = extern variable, 9 = extern array: no storage in this file, ld finds the symbol
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
 // FN marks a function type; bits 22.. index fnret[] (its return type). A function
 // designator has 0 pointer levels, a function pointer 1.
@@ -82,13 +87,16 @@ int pp_if;               // evaluating an #if: unknown identifiers are 0
 char *srcname;
 char *incdir;
 int ofd; char *outname;  // the output file, removed again when compiling fails
+char **srcbuf; int nsrcbuf;   // the source buffers readfile() read, freed when the file is compiled
+char **tmpf; int ntmp;   // the driver's temporary files, removed when cc ends (also on an error)
 
 int preprocess(); int lex(); int expand(struct Sym *m); int expanding(struct Sym *m); int intern(char *s, int n); int idstart(int c); int idchar(int c);
 int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
 int declarator(int t); int die(char *msg); int expr_comma(); int itcc(int cond); int param_types(int *pl);
 
 // ------------------------------------------------------------------ helpers
-int quit() { if (ofd >= 0) { close(ofd); unlink(outname); } exit(1); return 0; }
+int cleanup() { int i; i = 0; while (i < ntmp) { unlink(tmpf[i]); i = i + 1; } ntmp = 0; return 0; }
+int quit() { if (ofd >= 0) { close(ofd); unlink(outname); } cleanup(); exit(1); return 0; }
 int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); quit(); return 0; }
 
 char *readfile(char *name) {
@@ -104,6 +112,7 @@ char *readfile(char *name) {
   }
   if (fd < 0) { printf("cannot open %s\n", name); quit(); }
   buf = malloc(1048576);
+  if (nsrcbuf < 256) { srcbuf[nsrcbuf] = buf; nsrcbuf = nsrcbuf + 1; }
   total = 0;
   while ((n = read(fd, buf + total, 65536)) > 0) total = total + n;
   buf[total] = 0;
@@ -231,6 +240,13 @@ int lea_glo(int off) {
     lnew(L_INS); ls("movw\tr1, #:lower16:.Ldata+"); ls(dec(off)); lend();
     lnew(L_INS); ls("movt\tr1, #:upper16:.Ldata+"); ls(dec(off)); lend();
   }
+  ins("add.w\tr0, r9, r1");
+  return 0;
+}
+// r0 = r9 + the data offset of extern s, which only ld knows: movw/movt of the symbol
+int lea_ext(struct Sym *s) {
+  lnew(L_INS); ls("movw\tr1, #:lower16:"); lsym(s); lend();
+  lnew(L_INS); ls("movt\tr1, #:upper16:"); lsym(s); lend();
   ins("add.w\tr0, r9, r1");
   return 0;
 }
@@ -1350,10 +1366,12 @@ int expr(int lev) {
     }
     else if (d->class == CNum) { imm(0, d->val); ty = d->type; }
     else if (d->class == 6) { lea_glo(d->val); ty = d->type; }   // global array: address
+    else if (d->class == 9) { lea_ext(d); ty = d->type; }        // extern array: address
     else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype_p(d->type, d->ptypes, d->ptypes ? d->nptypes : -1); }   // function as a value
     else {
       if (d->class == CLoc) lea_loc(d->val);
       else if (d->class == CGlo) lea_glo(d->val);
+      else if (d->class == 7) lea_ext(d);
       else die("undefined variable");
       ty = d->type;
       load(ty);
@@ -1739,7 +1757,7 @@ int stmt() {
 
 // ------------------------------------------------------------------ top level
 int parse_global() {
-  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz; int hi;
+  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz; int hi; int ext;
   if (tk == Enum) {
     next(); if (tk == Id) next();
     if (tk == '{') {
@@ -1763,6 +1781,8 @@ int parse_global() {
     if (tk != ';') die("; expected"); next();
     return 0;
   }
+  ext = 0;
+  if (tk == Extern) { ext = 1; next(); }        // a declaration: the storage is in another file
   bt = parse_type();
   while (tk != ';') {
     t = declarator(bt);
@@ -1815,8 +1835,17 @@ int parse_global() {
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
       return 0;
     }
-    // global variable
-    if (s->class) die("duplicate global");
+    if (ext) {                                  // extern variable or array
+      if (tk == Assign) die("extern with an initializer");
+      if (s->class == 0) {
+        if (darr != -1) { s->class = 9; s->type = t + PTR; } else { s->class = 7; s->type = t; }
+      }
+      else if (s->class != CGlo && s->class != 6 && s->class != 7 && s->class != 9) die("duplicate global");
+      if (tk == ',') next();
+      continue;
+    }
+    // global variable (declared extern before, it is now defined here: later references are normal)
+    if (s->class && s->class != 7 && s->class != 9) die("duplicate global");
     if (nglob >= 8192) die("too many globals");
     hi = 0;
     if (tk == Assign) { next(); hi = 1; }
@@ -1867,44 +1896,41 @@ int write_data() {
   return 0;
 }
 
-int main(int argc, char **argv) {
-  int i; int n; int sflag; int ndefs; char *dn; char *dv; struct Sym *s;
-  ofd = -1; outname = 0; srcname = 0; incdir = 0; ndefs = 0; sflag = 0;
-  i = 1;
-  while (i < argc) {
-    if (!strcmp(argv[i], "-o")) { outname = argv[i + 1]; i = i + 2; }
-    else if (!strcmp(argv[i], "-S")) { sflag = 1; i = i + 1; }
-    else if (!strcmp(argv[i], "-I")) { incdir = argv[i + 1]; i = i + 2; }
-    else if (!strcmp(argv[i], "-D")) { ndefs = ndefs + 1; i = i + 2; }   // defined below, once syms exist
-    else { srcname = argv[i]; i = i + 1; }
-  }
-  if (!sflag) { printf("cc: use -S (the driver comes with the next change)\n"); return 1; }
-  if (!srcname) { printf("usage: cc -S [-o out.s] [-I incdir] [-D name[=value]] file.c\n"); return 1; }
-  if (!outname) {                               // file.c -> file.s
-    n = strlen(srcname); outname = malloc(n + 3); strcpy(outname, srcname);
-    if (n > 2 && srcname[n - 2] == '.' && srcname[n - 1] == 'c') outname[n - 1] = 's'; else strcpy(outname + n, ".s");
-  }
 
+// ------------------------------------------------------------------ one C file to assembly
+char **dnames; char **dvals; int ndefs;          // -D NAME[=value]
+
+// Compile src to the assembly file out. Every table is allocated here and freed at the
+// end, so the driver can compile several files in one run and as and ld get the memory.
+int compile(char *src, char *out) {
+  int i; struct Sym *s;
+  tk = 0; ival = 0; line = 0; id = 0; nsyms = 0; nmems = 0; nstructs = 0; ndims = 0; dpos = 0; lastload = 0;
+  ty = 0; loc = 0; maxloc = 0; ret_fix = 0; brk_fix = 0; cont_fix = 0; cont_tgt = 0; nparams = 0; fnrty = 0;
+  nfn = 0; dname = 0; darr = 0; pb = 0; numty = 0; slen = 0; ikind = 0; ibase = 0; init_open = 0;
+  fdepth = 0; ifdepth = 0; pp_if = 0; tdepth = 0; nsrcbuf = 0;
+  srcname = src; outname = out; ofd = -1;
   syms = malloc(8192 * sizeof(struct Sym)); nsyms = 0;
   mems = malloc(2048 * sizeof(struct Mem)); nmems = 0;
   stsize = malloc(256 * 4); stfirst = malloc(256 * 4); nstructs = 0;
   starr = malloc(256 * 4); stcnt = malloc(256 * 4); dims = malloc(8 * 4);
   data = malloc(1048576); dpos = 0;
+  memset(data, 0, 1048576);                     // the data image starts zeroed (malloc may reuse memory)
   fstack_p = malloc(64 * 4); fstack_line = malloc(64 * 4); fstack_mac = malloc(64 * 4); fdepth = 0;
   sv_fp = malloc(64 * 4); sv_fl = malloc(64 * 4); sv_fm = malloc(64 * 4); mbuf = malloc(65536);
   tstack = malloc(64 * 4); tdepth = 0; bn = malloc(256 * 4); bnl = 1;
   fnret = malloc(512 * 4); fnparams = malloc(512 * 4); fnnp = malloc(512 * 4); nfn = 0;
-  init_open = 0;
   lpool = malloc(262144); lppos = 0; nlines = 0; nlabels = 0;
   lkind = malloc(16384 * 4); ltext = malloc(16384 * 4); llab = malloc(16384 * 4); lcond = malloc(16384 * 4); lnext = malloc(16384 * 4);
   obuf = malloc(65536); opos = 0; ibuf = malloc(262144); ipos = 0; tobuf = 0;
   numbuf = malloc(16); ccbuf = malloc(4); ccname = "eqnecsccmiplvsvchilsgeltgtle";
   gsym = malloc(8192 * sizeof(struct Sym *)); goff = malloc(8192 * 4); nglob = 0;
+  srcbuf = malloc(256 * sizeof(char *));
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
   // keywords, in token enum order
   p = "break case char continue default else enum for if int return sizeof struct switch typedef void while long short signed unsigned float double";
   i = Break; while (i <= Double) { next(); id->tk = i; i = i + 1; }
+  p = "extern"; next(); id->tk = Extern;
   // builtin host functions: name, syscall number (see sys.h)
   p = "exit 0 exec 1 millis 2 sleep 3 sysinfo 4 putchar 16 getchar 17 kbhit 18 conctl 19 redirect 20 open 32 close 33 read 34 write 35 seek 36 stat 37 unlink 38 rename 39 mkdir 40 rmdir 41 opendir 42 readdir 43 closedir 44 chdir 45 getcwd 46 malloc 64 free 65 memset 66 memcmp 67 memcpy 68 strlen 69 strcmp 70 strcpy 71 printf 72 sprintf 73 atoi 74 strncmp 75 strchr 76 net_join 80 net_status 81 net_ip 82 connect 83 send 84 recv 85 listen 86 accept 87 sock_avail 88 gpio_mode 96 gpio_write 97 gpio_read 98 analog_read 99 pwm_write 100 i2c_write 101 i2c_read 102 spi_transfer 103 delay_us 104";
   next();
@@ -1915,18 +1941,11 @@ int main(int argc, char **argv) {
   }
   // predefined macro and -D NAME[=value]
   define_macro("__T2CC__", "1");
-  i = 1;
-  while (i < argc) {
-    if (!strcmp(argv[i], "-D") && i + 1 < argc) {
-      dn = argv[i + 1]; dv = strchr(dn, '=');
-      if (dv) { *dv = 0; define_macro(dn, dv + 1); } else define_macro(dn, "1");
-    }
-    i = i + 1;
-  }
+  i = 0; while (i < ndefs) { define_macro(dnames[i], dvals[i]); i = i + 1; }
 
   p = readfile(srcname); line = 1;
   ofd = open(outname, 577, 420);                // O_WRONLY|O_CREAT|O_TRUNC, 0644
-  if (ofd < 0) { printf("cannot write %s\n", outname); return 1; }
+  if (ofd < 0) { printf("cannot write %s\n", outname); quit(); }
   oput("\t.syntax unified\n\t.thumb\n\t.text\n");
   next();
   while (tk) parse_global();
@@ -1941,5 +1960,200 @@ int main(int argc, char **argv) {
   write_data();
   oflush();
   close(ofd); ofd = -1;
+
+  i = 0; while (i < nsyms) { if (syms[i].ptypes) free(syms[i].ptypes); i = i + 1; }
+  i = 0; while (i < nfn) { if (fnparams[i]) free(fnparams[i]); i = i + 1; }
+  i = 0; while (i < nsrcbuf) { free(srcbuf[i]); i = i + 1; }
+  free(srcbuf); free(syms); free(mems); free(stsize); free(stfirst); free(starr); free(stcnt); free(dims); free(data);
+  free(fstack_p); free(fstack_line); free(fstack_mac); free(sv_fp); free(sv_fl); free(sv_fm); free(mbuf);
+  free(tstack); free(bn); free(fnret); free(fnparams); free(fnnp); free(lpool);
+  free(lkind); free(ltext); free(llab); free(lcond); free(lnext); free(obuf); free(ibuf); free(numbuf); free(ccbuf);
+  free(gsym); free(goff);
   return 0;
+}
+
+// ------------------------------------------------------------------ running as and ld
+// tmp_id(): the number in the temporary names, make_tmpdir(), init_tools(argv0), and
+// run_tool(name, argc, argv): the tool's exit code (argv[0] is its name).
+#ifdef __T2CC__
+int tmp_id() { return millis(); }
+int make_tmpdir() { mkdir("/tmp"); return 0; }   // an error means it is there already
+int init_tools(char *argv0) { return 0; }
+int run_tool(char *name, int argc, char **argv) {
+  char *path; int r;
+  path = malloc(strlen(name) + 10); sprintf(path, "/bin/%s.bin", name);
+  r = exec(path, argc, argv);
+  if (r < 0) { printf("cc: cannot run %s (%d)\n", path, r); r = 1; }
+  free(path);
+  return r;
+}
+#endif
+#ifndef __T2CC__
+// The PC (gcc) build: as and ld from $T2_TOOLS, else build/host/ under the directory that
+// holds the directory of this executable (compiler/cc -> build/host/), run by system().
+// Temporary names use the process id: make -j starts several cc in the same millisecond.
+#include <sys/wait.h>
+char *toolsdir;
+int tmp_id() { return getpid(); }
+int make_tmpdir() { return 0; }
+int init_tools(char *argv0) {
+  char buf[4096]; ssize_t k; int j; char *sl; char *e;
+  e = getenv("T2_TOOLS");
+  if (e && *e) { toolsdir = e; return 0; }
+  k = readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (k > 0) buf[k] = 0; else { strncpy(buf, argv0, sizeof buf - 1); buf[sizeof buf - 1] = 0; }
+  for (j = 0; j < 2; j++) { sl = strrchr(buf, '/'); if (sl) *sl = 0; else strcpy(buf, "."); }
+  toolsdir = malloc(strlen(buf) + 16); sprintf(toolsdir, "%s/build/host", buf);
+  return 0;
+}
+static char *shquote(char *o, const char *s) {
+  *o++ = '\'';
+  for (; *s; s++) { if (*s == '\'') { strcpy(o, "'\\''"); o += 4; } else *o++ = *s; }
+  *o++ = '\''; *o = 0;
+  return o;
+}
+int run_tool(char *name, int argc, char **argv) {
+  size_t n; int i; int st; char *cmd; char *o; char *path;
+  path = malloc(strlen(toolsdir) + strlen(name) + 2); sprintf(path, "%s/%s", toolsdir, name);
+  n = 4 * strlen(path) + 8;
+  for (i = 1; i < argc; i++) n += 4 * strlen(argv[i]) + 3;
+  cmd = malloc(n); o = shquote(cmd, path);
+  for (i = 1; i < argc; i++) { *o++ = ' '; o = shquote(o, argv[i]); }
+  fflush(stdout);
+  st = system(cmd);
+  free(cmd);
+  if (st == -1 || !WIFEXITED(st)) { printf("cc: cannot run %s\n", path); free(path); return 1; }
+  free(path);
+  return WEXITSTATUS(st);
+}
+#endif
+
+// ------------------------------------------------------------------ the driver
+char *tmppre; int ntmpn;                         // temporary files: /tmp/cc<id & 0xffff>_<n>.s/.o
+
+int endswith(char *s, char *suf) { int n; int k; n = strlen(s); k = strlen(suf); return n > k && !strcmp(s + n - k, suf); }
+// a new temporary file name, removed again by cleanup()
+char *newtmp(char *ext) {
+  char *t;
+  if (!ntmpn) make_tmpdir();
+  ntmpn = ntmpn + 1;
+  t = malloc(strlen(tmppre) + 24); sprintf(t, "%s%d.%s", tmppre, ntmpn, ext);
+  tmpf[ntmp] = t; ntmp = ntmp + 1;
+  return t;
+}
+// the base name of path (a .c or .s) in the current directory, with ext (".o" or ".s") for its suffix
+char *outfile(char *path, char *ext) {
+  char *b; char *q; char *r; int n;
+  b = path; q = path; while (*q) { if (*q == '/') b = q + 1; q = q + 1; }
+  n = strlen(b); r = malloc(n + 4); strcpy(r, b); strcpy(r + n - 2, ext);
+  return r;
+}
+// as -o obj src; a failure ends cc with as's exit code
+int assemble(char *src, char *obj) {
+  char **av; int r;
+  av = malloc(5 * sizeof(char *)); av[0] = "as"; av[1] = "-o"; av[2] = obj; av[3] = src; av[4] = 0;
+  r = run_tool("as", 4, av);
+  free(av);
+  if (r) { cleanup(); exit(r); }
+  return 0;
+}
+int exists(char *path) { int fd; fd = open(path, 0, 0); if (fd < 0) return 0; close(fd); return 1; }
+// libNAME.a in the -L directories, the current directory, /lib; 0 if not found
+char *findlib(char *name, char **ldirs, int nldir) {
+  char *path; int i;
+  i = 0;
+  while (i <= nldir + 1) {
+    path = malloc(strlen(name) + 16 + (i < nldir ? strlen(ldirs[i]) : 0));
+    if (i < nldir) sprintf(path, "%s/lib%s.a", ldirs[i], name);
+    else if (i == nldir) sprintf(path, "lib%s.a", name);
+    else sprintf(path, "/lib/lib%s.a", name);
+    if (exists(path)) return path;
+    free(path);
+    i = i + 1;
+  }
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  int i; int mode; int nin; char **in; int nlib; char **libs; char **ldirs; int nldir; char *a; char *dn; char *dv;
+  char *out; char *s; char *o; char **av; int nav; int r;
+  ofd = -1; outname = 0; incdir = 0; ntmp = 0; ntmpn = 0; out = 0;
+  in = malloc(64 * sizeof(char *)); libs = malloc(64 * sizeof(char *)); ldirs = malloc(64 * sizeof(char *));
+  dnames = malloc(64 * sizeof(char *)); dvals = malloc(64 * sizeof(char *));
+  tmpf = malloc(160 * sizeof(char *)); nin = 0; nlib = 0; nldir = 0; ndefs = 0;
+  mode = 0;                                     // 0: link a .bin, 1: -c, 2: -S
+  i = 1;
+  while (i < argc) {
+    a = argv[i];
+    if (nin >= 64 || nlib >= 64 || nldir >= 64 || ndefs >= 64) { printf("cc: too many arguments\n"); return 1; }
+    if (a[0] == '-' && i + 1 >= argc && (!strcmp(a, "-o") || !strcmp(a, "-I") || !strcmp(a, "-D") || !strcmp(a, "-L") || !strcmp(a, "-l"))) {
+      printf("cc: %s needs an argument\n", a); return 1;
+    }
+    if (!strcmp(a, "-o")) { out = argv[i + 1]; i = i + 2; }
+    else if (!strcmp(a, "-S")) { mode = 2; i = i + 1; }
+    else if (!strcmp(a, "-c")) { if (mode != 2) mode = 1; i = i + 1; }
+    else if (!strcmp(a, "-I")) { incdir = argv[i + 1]; i = i + 2; }
+    else if (!strcmp(a, "-D")) {                // a copy: every compile() defines it again
+      dn = malloc(strlen(argv[i + 1]) + 1); strcpy(dn, argv[i + 1]); dv = strchr(dn, '=');
+      if (dv) { *dv = 0; dv = dv + 1; } else dv = "1";
+      dnames[ndefs] = dn; dvals[ndefs] = dv; ndefs = ndefs + 1; i = i + 2;
+    }
+    else if (!strcmp(a, "-L")) { ldirs[nldir] = argv[i + 1]; nldir = nldir + 1; i = i + 2; }
+    else if (!strcmp(a, "-l")) { libs[nlib] = argv[i + 1]; nlib = nlib + 1; i = i + 2; }
+    else if (a[0] == '-' && a[1] == 'L' && a[2]) { ldirs[nldir] = a + 2; nldir = nldir + 1; i = i + 1; }
+    else if (a[0] == '-' && a[1] == 'l' && a[2]) { libs[nlib] = a + 2; nlib = nlib + 1; i = i + 1; }
+    else if (a[0] == '-') { printf("cc: unknown option %s\n", a); return 1; }
+    else { in[nin] = a; nin = nin + 1; i = i + 1; }
+  }
+  if (!nin) { printf("usage: cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...\n"); return 1; }
+  i = 0;
+  while (i < nin) {
+    s = in[i];
+    if (!endswith(s, ".c") && !endswith(s, ".s") && !endswith(s, ".o") && !endswith(s, ".a")) { printf("cc: %s: unknown file type\n", s); return 1; }
+    if (mode == 2 && !endswith(s, ".c")) { printf("cc: -S needs .c inputs\n"); return 1; }
+    if (mode == 1 && !endswith(s, ".c") && !endswith(s, ".s")) { printf("cc: -c needs .c or .s inputs\n"); return 1; }
+    i = i + 1;
+  }
+  if (mode == 1 && out && nin != 1) { printf("cc: -o with -c needs exactly one input\n"); return 1; }
+  if (mode == 2 && out && nin != 1) { printf("cc: -o with -S needs exactly one input\n"); return 1; }
+  init_tools(argv[0]);
+  tmppre = malloc(32); sprintf(tmppre, "/tmp/cc%x_", tmp_id() & 65535);
+
+  if (mode == 2) {                              // -S: NAME.s, or out
+    i = 0;
+    while (i < nin) { o = out; if (!o) o = outfile(in[i], ".s"); compile(in[i], o); i = i + 1; }
+    return 0;
+  }
+  if (mode == 1) {                              // -c: NAME.o, or out
+    i = 0;
+    while (i < nin) {
+      o = out; if (!o) o = outfile(in[i], ".o");
+      if (endswith(in[i], ".c")) { s = newtmp("s"); compile(in[i], s); assemble(s, o); }
+      else assemble(in[i], o);
+      i = i + 1;
+    }
+    cleanup();
+    return 0;
+  }
+  // link: objects in command-line order, then the -l archives
+  av = malloc((nin + nlib + 4) * sizeof(char *)); av[0] = "ld"; av[1] = "-o"; av[2] = out; if (!out) av[2] = "a.bin"; nav = 3;
+  i = 0;
+  while (i < nlib) {                            // look for them first: no work wasted on a typo
+    s = findlib(libs[i], ldirs, nldir);
+    if (!s) { printf("cc: library %s not found\n", libs[i]); return 1; }
+    libs[i] = s; i = i + 1;
+  }
+  i = 0;
+  while (i < nin) {
+    s = in[i];
+    if (endswith(s, ".c")) { o = newtmp("s"); compile(s, o); s = o; }
+    if (endswith(s, ".s")) { o = newtmp("o"); assemble(s, o); s = o; }
+    av[nav] = s; nav = nav + 1;
+    i = i + 1;
+  }
+  i = 0; while (i < nlib) { av[nav] = libs[i]; nav = nav + 1; i = i + 1; }
+  av[nav] = 0;
+  r = run_tool("ld", nav, av);
+  cleanup();
+  return r;
 }
