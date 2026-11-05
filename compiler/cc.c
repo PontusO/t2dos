@@ -31,6 +31,61 @@ enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TSTR
 
 #include "sys.h"
 
+// ------------------------------------------------------------------ Thumb-2 encodings
+// Instructions as the ARMv8-M manual writes them. A 32-bit instruction is two
+// halfwords, I_X then I_X_2. Bases (marked +) get register or immediate fields
+// ORed in by the helpers that use them. Plain numbers: older cc must build this.
+enum {
+  I_PUSH_R0 = 0xB401, I_POP_R1 = 0xBC02,                      // push {r0} / pop {r1}
+  I_PUSH_R4 = 0xB410, I_POP_R4 = 0xBC10,                      // push {r4} / pop {r4}
+  I_PUSH_R4_LR = 0xB510, I_PUSH_R7_LR = 0xB580, I_POP_R7_PC = 0xBD80,
+  I_POP_W_R4_LR = 0xE8BD, I_POP_W_R4_LR_2 = 0x4010,           // pop.w {r4,lr}  (ldmia.w sp!)
+  I_MOVW = 0xF240, I_MOVT = 0xF2C0,                           // + movw/movt rd,#imm16 (T3)
+  I_ADDW = 0xF200, I_SUBW = 0xF2A0,                           // + addw/subw rd,rn,#imm12 (T4)
+  I_ADDS_R0_R7_R1 = 0x18B8, I_SUBS_R0_R7_R1 = 0x1A78,
+  I_ADD_W_R0_R9_R1 = 0xEB09, I_ADD_W_R0_R9_R1_2 = 0x0001,     // add.w r0,r9,r1
+  I_LDR_R0_R0 = 0x6800, I_LDRB_R0_R0 = 0x7800, I_LDRH_R0_R0 = 0x8800,
+  I_LDRSB_W_R0_R0 = 0xF990, I_LDRSB_W_R0_R0_2 = 0x0000,      // ldrsb.w r0,[r0]
+  I_LDRSH_W_R0_R0 = 0xF9B0, I_LDRSH_W_R0_R0_2 = 0x0000,      // ldrsh.w r0,[r0]
+  I_LDR_R0_R1 = 0x6808, I_LDRB_R0_R1 = 0x7808, I_LDRH_R0_R1 = 0x8808,
+  I_LDRSB_W_R0_R1 = 0xF991, I_LDRSB_W_R0_R1_2 = 0x0000,      // ldrsb.w r0,[r1]
+  I_LDRSH_W_R0_R1 = 0xF9B1, I_LDRSH_W_R0_R1_2 = 0x0000,      // ldrsh.w r0,[r1]
+  I_STR_R0_R1 = 0x6008, I_STRB_R0_R1 = 0x7008, I_STRH_R0_R1 = 0x8008,
+  I_STR_R2_R1 = 0x600A, I_STRB_R2_R1 = 0x700A, I_STRH_R2_R1 = 0x800A,
+  I_STR_R1_R0 = 0x6001,                                       // str r1,[r0]
+  I_SXTB_R0 = 0xB240, I_UXTB_R0 = 0xB2C0, I_SXTH_R0 = 0xB200, I_UXTH_R0 = 0xB280,
+  I_B_W = 0xF000,                                             // + first half of b.w, bl and b<cond>.w
+  I_B_W_2 = 0x9000, I_BL_2 = 0xD000, I_BCOND_2 = 0x8000,      // + second halves (T4 b.w, bl, T3 b<cond>.w)
+  I_BCOND_KEEP = 0xFBC0,                                      // opcode and cond bits of a T3 first half
+  I_CMP_R1_R0 = 0x4281, I_CMP_R0_R1 = 0x4288, I_CMP_R0_0 = 0x2800,
+  I_IT = 0xBF00, I_ITE_EQ = 0xBF0C,                           // + it<cond>, firstcond << 4 | mask
+  I_MOVS_R0 = 0x2000, I_MOVS_R1 = 0x2100,                     // + movs r0/r1,#imm8
+  I_MOVS_R0_1 = 0x2001,                                       // movs r0,#1 (cc does not fold constants: keep it one number)
+  I_ADD_SP = 0xB000,                                          // + add sp,#4*imm7
+  I_LDR_R1_SP = 0x9900,                                       // + ldr r1,[sp,#4*imm8]
+  I_ADD_R0_PC = 0x4478, I_BLX_R1 = 0x4788, I_BLX_R8 = 0x47C0,
+  I_MOV_R1_R0 = 0x4601, I_MOV_R2_SP = 0x466A, I_MOV_R3_SP = 0x466B, I_MOV_R4_SP = 0x466C, I_MOV_R7_SP = 0x466F,
+  I_MOV_SP_R3 = 0x469D, I_MOV_SP_R4 = 0x46A5, I_MOV_SP_R7 = 0x46BD,
+  I_BIC_W_R3_R3_7 = 0xF023, I_BIC_W_R3_R3_7_2 = 0x0307,      // bic.w r3,r3,#7
+  I_SUB_W_SP_SP_R1 = 0xEBAD, I_SUB_W_SP_SP_R1_2 = 0x0D01,    // sub.w sp,sp,r1
+  I_LSLS_R0_R0_2 = 0x0080, I_LSLS_R1_R1_2 = 0x0089,           // lsls rd,rd,#2
+  I_MULS_R0_R1 = 0x4348, I_MULS_R0_R2 = 0x4350, I_MULS_R1_R2 = 0x4351,
+  I_ORRS_R0_R1 = 0x4308, I_EORS_R0_R1 = 0x4048, I_ANDS_R0_R1 = 0x4008,
+  I_MVNS_R0 = 0x43C0, I_NEGS_R0 = 0x4240,
+  I_ADDS_R0_R1_R0 = 0x1808, I_SUBS_R0_R1_R0 = 0x1A08, I_ADDS_R0_R0_R2 = 0x1880, I_ADDS_R2_R0_R2 = 0x1882,
+  I_LSL_W_R0_R1_R0 = 0xFA01, I_LSL_W_R0_R1_R0_2 = 0xF000,
+  I_LSR_W_R0_R1_R0 = 0xFA21, I_LSR_W_R0_R1_R0_2 = 0xF000,
+  I_ASR_W_R0_R1_R0 = 0xFA41, I_ASR_W_R0_R1_R0_2 = 0xF000,
+  I_SDIV_R0_R1_R0 = 0xFB91, I_SDIV_R0_R1_R0_2 = 0xF0F0,
+  I_UDIV_R0_R1_R0 = 0xFBB1, I_UDIV_R0_R1_R0_2 = 0xF0F0,
+  I_SDIV_R2_R1_R0 = 0xFB91, I_SDIV_R2_R1_R0_2 = 0xF2F0,
+  I_UDIV_R2_R1_R0 = 0xFBB1, I_UDIV_R2_R1_R0_2 = 0xF2F0,
+  I_SDIV_R0_R0_R2 = 0xFB90, I_SDIV_R0_R0_R2_2 = 0xF0F2,
+  I_MLS_R0_R2_R0_R1 = 0xFB02, I_MLS_R0_R2_R0_R1_2 = 0x1010   // mls r0,r2,r0,r1: r0 = r1 - r2 * r0
+};
+// condition codes (it, b<cond>)
+enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_HI = 8, CC_LS = 9, CC_GE = 10, CC_LT = 11, CC_GT = 12, CC_LE = 13 };
+
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
              int hclass; int htype; int hval; int fix; int stag;
              int mdef; char *mbody; char **margs; int mnargs; int mvar; };   // macro: defined, body, params (-1: object-like), ...
@@ -111,30 +166,30 @@ int emit32(int hi, int lo) { emit16(hi); emit16(lo); return 0; }
 int put16(int at, int x) { code[at] = x; code[at + 1] = x >> 8; return 0; }
 int get16(int at) { return (code[at] & 255) | ((code[at + 1] & 255) << 8); }
 
-int push() { return emit16(46081); }          // push {r0}      B401
-int pop1() { return emit16(48130); }          // pop  {r1}      BC02
+int push() { return emit16(I_PUSH_R0); }
+int pop1() { return emit16(I_POP_R1); }
 
 // movw/movt rd, #imm32
 int imm(int rd, int v) {
   int lo; int hi;
   lo = v & 65535; hi = (v >> 16) & 65535;
-  emit32(62016 | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
-  if (hi) emit32(62144 | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
+  emit32(I_MOVW | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
+  if (hi) emit32(I_MOVT | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
   return 0;
 }
 // add.w/sub.w rd, rn, #imm12 (T4 encodings)
-int addi12(int rd, int rn, int v) { return emit32(61952 | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
-int subi12(int rd, int rn, int v) { return emit32(62112 | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
+int addi12(int rd, int rn, int v) { return emit32(I_ADDW | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
+int subi12(int rd, int rn, int v) { return emit32(I_SUBW | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
 
 // r0 = address of local/param at signed frame offset off
 int lea_loc(int off) {
-  if (off < 0) { off = -off; if (off < 4096) subi12(0, 7, off); else { imm(1, off); emit16(6776); } } // subs r0,r7,r1
-  else { if (off < 4096) addi12(0, 7, off); else { imm(1, off); emit16(6328); } }                     // adds r0,r7,r1  18B8
+  if (off < 0) { off = -off; if (off < 4096) subi12(0, 7, off); else { imm(1, off); emit16(I_SUBS_R0_R7_R1); } }
+  else { if (off < 4096) addi12(0, 7, off); else { imm(1, off); emit16(I_ADDS_R0_R7_R1); } }
   return 0;
 }
 // r0 = r9 + off
 int lea_glo(int off) {
-  if (off < 4096) addi12(0, 9, off); else { imm(1, off); emit32(60169, 1); }   // add.w r0,r9,r1  EB09 0001
+  if (off < 4096) addi12(0, 9, off); else { imm(1, off); emit32(I_ADD_W_R0_R9_R1, I_ADD_W_R0_R9_R1_2); }
   return 0;
 }
 // function types
@@ -153,39 +208,39 @@ int fnret_of(int t) { return fnret[(t >> 22) & 511]; }
 // load r0 = *r0 according to type
 int load(int t) {
   if (isfndes(t)) return 0;                                  // a function is its own address
-  if (t == TCHAR) { emit32(63888, 0); lastload = 4; }          // ldrsb.w r0,[r0]  F990 0000
-  else if (t == TINT || t == TUINT || t >= PTR) { emit16(26624); lastload = 2; } // ldr r0,[r0]  6800
-  else if (t == TUCHAR) { emit16(30720); lastload = 2; }       // ldrb r0,[r0]     7800
-  else if (t == TSHORT) { emit32(63920, 0); lastload = 4; }    // ldrsh.w r0,[r0]  F9B0 0000
-  else if (t == TUSHORT) { emit16(34816); lastload = 2; }      // ldrh r0,[r0]     8800
+  if (t == TCHAR) { emit32(I_LDRSB_W_R0_R0, I_LDRSB_W_R0_R0_2); lastload = 4; }
+  else if (t == TINT || t == TUINT || t >= PTR) { emit16(I_LDR_R0_R0); lastload = 2; }
+  else if (t == TUCHAR) { emit16(I_LDRB_R0_R0); lastload = 2; }
+  else if (t == TSHORT) { emit32(I_LDRSH_W_R0_R0, I_LDRSH_W_R0_R0_2); lastload = 4; }
+  else if (t == TUSHORT) { emit16(I_LDRH_R0_R0); lastload = 2; }
   // struct: keep address
   return 0;
 }
 // store *r1 = r0
-int store(int t) {                       // strb r0,[r1] 7008 / strh r0,[r1] 8008 / str r0,[r1] 6008
-  if (t == TCHAR || t == TUCHAR) emit16(28680); else if (t == TSHORT || t == TUSHORT) emit16(32776); else emit16(24584);
+int store(int t) {
+  if (t == TCHAR || t == TUCHAR) emit16(I_STRB_R0_R1); else if (t == TSHORT || t == TUSHORT) emit16(I_STRH_R0_R1); else emit16(I_STR_R0_R1);
   return 0;
 }
 // r0 = *r1 according to type (for ++ and --)
 int load_r1(int t) {
-  if (t == TCHAR) emit32(63889, 0);                    // ldrsb.w r0,[r1]  F991 0000
-  else if (t == TUCHAR) emit16(30728);                 // ldrb r0,[r1]     7808
-  else if (t == TSHORT) emit32(63921, 0);              // ldrsh.w r0,[r1]  F9B1 0000
-  else if (t == TUSHORT) emit16(34824);                // ldrh r0,[r1]     8808
-  else emit16(26632);                                  // ldr r0,[r1]      6808
+  if (t == TCHAR) emit32(I_LDRSB_W_R0_R1, I_LDRSB_W_R0_R1_2);
+  else if (t == TUCHAR) emit16(I_LDRB_R0_R1);
+  else if (t == TSHORT) emit32(I_LDRSH_W_R0_R1, I_LDRSH_W_R0_R1_2);
+  else if (t == TUSHORT) emit16(I_LDRH_R0_R1);
+  else emit16(I_LDR_R0_R1);
   return 0;
 }
-// *r1 = r2 according to type: strb 700A / strh 800A / str 600A
+// *r1 = r2 according to type
 int store_r2(int t) {
-  if (t == TCHAR || t == TUCHAR) emit16(28682); else if (t == TSHORT || t == TUSHORT) emit16(32778); else emit16(24586);
+  if (t == TCHAR || t == TUCHAR) emit16(I_STRB_R2_R1); else if (t == TSHORT || t == TUSHORT) emit16(I_STRH_R2_R1); else emit16(I_STR_R2_R1);
   return 0;
 }
 // convert r0 to type t (casts, return values): sign or zero extend the small types
 int conv(int t) {
-  if (t == TCHAR) emit16(45632);                       // sxtb r0,r0  B240
-  else if (t == TUCHAR) emit16(45760);                 // uxtb r0,r0  B2C0
-  else if (t == TSHORT) emit16(45568);                 // sxth r0,r0  B200
-  else if (t == TUSHORT) emit16(45696);                // uxth r0,r0  B280
+  if (t == TCHAR) emit16(I_SXTB_R0);
+  else if (t == TUCHAR) emit16(I_UXTB_R0);
+  else if (t == TSHORT) emit16(I_SXTH_R0);
+  else if (t == TUSHORT) emit16(I_UXTH_R0);
   return 0;
 }
 // usual arithmetic conversions: small types promote to int; unsigned int wins
@@ -194,30 +249,30 @@ int isuns(int a, int b) { return a < PTR && b < PTR && arith(a, b) == TUINT; }
 
 // branches, all 32-bit so they can be patched. returns offset of instruction.
 int b_w(int target) {   // unconditional b.w to target (target<0: fixup later)
-  int at; at = cpos; emit32(61440, 36864); if (target >= 0) patch_b(at, target); return at;
+  int at; at = cpos; emit32(I_B_W, I_B_W_2); if (target >= 0) patch_b(at, target); return at;
 }
-int bl_w() { int at; at = cpos; emit32(61440, 53248); return at; }
-int bc_w(int cond) { int at; at = cpos; emit32(61440 | cond << 6, 32768); return at; }
+int bl_w() { int at; at = cpos; emit32(I_B_W, I_BL_2); return at; }
+int bc_w(int cond) { int at; at = cpos; emit32(I_B_W | cond << 6, I_BCOND_2); return at; }
 
 int patch_b(int at, int target) {
   int off; int s; int j1; int j2; int h1; int h2; int i1; int i2;
   off = target - (at + 4);
   h1 = get16(at); h2 = get16(at + 2);
-  if ((h2 & 36864) == 36864 || (h2 & 53248) == 53248) {      // T4 b.w / bl (24-bit)
+  if ((h2 & I_B_W_2) == I_B_W_2 || (h2 & I_BL_2) == I_BL_2) {   // T4 b.w / bl (24-bit)
     s = (off >> 24) & 1; i1 = (off >> 23) & 1; i2 = (off >> 22) & 1;
     j1 = (i1 ^ 1) ^ s; j2 = (i2 ^ 1) ^ s;
-    put16(at, 61440 | s << 10 | ((off >> 12) & 1023));
-    put16(at + 2, (h2 & 53248) | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
+    put16(at, I_B_W | s << 10 | ((off >> 12) & 1023));
+    put16(at + 2, (h2 & I_BL_2) | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
   } else {                                                    // T3 conditional (20-bit)
     s = (off >> 20) & 1; j2 = (off >> 19) & 1; j1 = (off >> 18) & 1;
-    put16(at, (h1 & 64448) | s << 10 | ((off >> 12) & 63));
-    put16(at + 2, 32768 | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
+    put16(at, (h1 & I_BCOND_KEEP) | s << 10 | ((off >> 12) & 63));
+    put16(at + 2, I_BCOND_2 | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
   }
   return 0;
 }
 // fixup chains: an unpatched branch slot holds the previous chain entry (or -1)
 int chain_add(int head, int at) { put16(at + 2, head & 65535); put16(at, (head >> 16) & 65535); return at; }
-int chain_patch(int head, int target, int kind) {   // kind: 36864 = b.w, 53248 = bl
+int chain_patch(int head, int target, int kind) {   // kind: I_B_W_2 = b.w, I_BL_2 = bl
   int nxt;
   while (head >= 0) { nxt = (get16(head) << 16) | get16(head + 2); put16(head + 2, kind); patch_b(head, target); head = nxt; }
   return 0;
@@ -226,16 +281,16 @@ int chain_patch(int head, int target, int kind) {   // kind: 36864 = b.w, 53248 
 int imm2(int rd, int v) {
   int lo; int hi;
   lo = v & 65535; hi = (v >> 16) & 65535;
-  emit32(62016 | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
-  emit32(62144 | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
+  emit32(I_MOVW | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
+  emit32(I_MOVT | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
   return 0;
 }
 
 // compare r1 ? r0 -> r0 = 0/1 using IT block
 int setcc(int cond) {
-  emit16(17025);                                              // cmp r1,r0  4281
-  emit16(48896 | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);      // ite cond
-  emit16(8193); emit16(8192);                                 // mov r0,#1 ; mov r0,#0
+  emit16(I_CMP_R1_R0);
+  emit16(I_IT | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);       // ite cond
+  emit16(I_MOVS_R0_1); emit16(I_MOVS_R0);                   // movs r0,#1 ; movs r0,#0
   return 0;
 }
 
@@ -943,7 +998,7 @@ int call_fn(struct Sym *f, int n) {
   at = bl_w();
   if (f->class == CFun && f->val >= 0) patch_b(at, f->val);
   else { f->fix = chain_add(f->fix, at); if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; } }
-  if (n) emit16(45056 | n);                     // add sp,#4n  B000|n
+  if (n) emit16(I_ADD_SP | n);                  // pop the args
   return 0;
 }
 // r0 = address of function f (Thumb bit set), PC relative: movw/movt r0,#off ; add r0,pc.
@@ -954,7 +1009,7 @@ int fn_addr(struct Sym *f) {
   if (naddr >= 4096) die("too many function addresses");
   afix_at[naddr] = cpos; afix_sym[naddr] = f; naddr = naddr + 1;
   imm2(0, 0);
-  emit16(17528);                                // add r0,pc        4478
+  emit16(I_ADD_R0_PC);
   return 0;
 }
 // Call through a function address in r0: keep it on the stack under the args,
@@ -965,34 +1020,34 @@ int call_ind(int t) {
   while (tk != ')') { expr(Assign); push(); n = n + 1; if (tk == ',') next(); }
   next();
   if (n > 126) die("too many arguments");
-  emit16(39168 | n);                            // ldr r1,[sp,#4n]  9900|n
-  emit16(18312);                                // blx r1           4788
-  emit16(45056 | (n + 1));                      // add sp,#4(n+1)
+  emit16(I_LDR_R1_SP | n);                      // the address, under the n args
+  emit16(I_BLX_R1);
+  emit16(I_ADD_SP | (n + 1));                   // args and the address
   ty = fnret_of(t);
   return 0;
 }
 // Emit a host syscall: r0 = num, r1 = nargs, r2 = argv (argv[n-1] is arg 0)
 int call_sys(int num, int n) {
-  emit16(18026);                                // mov r2,sp        466A
-  emit16(46096);                                // push {r4}        B410
-  emit16(18028);                                // mov r4,sp        466C
-  emit16(18027);                                // mov r3,sp        466B
-  emit32(61475, 775);                           // bic.w r3,r3,#7   F023 0307
-  emit16(18077);                                // mov sp,r3        469D
-  emit16(8448 | n);                             // movs r1,#n
-  emit16(8192 | num);                           // movs r0,#num
-  emit16(18368);                                // blx r8           47C0
-  emit16(18085);                                // mov sp,r4        46A5
-  emit16(48144);                                // pop {r4}         BC10
-  if (n) emit16(45056 | n);                     // add sp,#4n
+  emit16(I_MOV_R2_SP);                          // r2 = argv
+  emit16(I_PUSH_R4);
+  emit16(I_MOV_R4_SP);
+  emit16(I_MOV_R3_SP);
+  emit32(I_BIC_W_R3_R3_7, I_BIC_W_R3_R3_7_2);   // 8-byte aligned sp for the kernel
+  emit16(I_MOV_SP_R3);
+  emit16(I_MOVS_R1 | n);
+  emit16(I_MOVS_R0 | num);
+  emit16(I_BLX_R8);
+  emit16(I_MOV_SP_R4);
+  emit16(I_POP_R4);
+  if (n) emit16(I_ADD_SP | n);                  // pop the args
   return 0;
 }
 
 // scale r0 by n (for pointer arithmetic)
 int scale(int n) {
   if (n == 1) return 0;
-  if (n == 4) return emit16(128);               // lsls r0,r0,#2   0080
-  imm(2, n); return emit16(17232);              // muls r0,r2      4350
+  if (n == 4) return emit16(I_LSLS_R0_R0_2);
+  imm(2, n); return emit16(I_MULS_R0_R2);
 }
 
 // Roll back the last load so r0 holds an address, for lvalue use.
@@ -1004,37 +1059,37 @@ int lvalue() {
 // scale r1 by n
 int scale1(int n) {
   if (n == 1) return 0;
-  if (n == 4) return emit16(137);               // lsls r1,r1,#2   0089
-  imm(2, n); return emit16(17233);              // muls r1,r2      4351
+  if (n == 4) return emit16(I_LSLS_R1_R1_2);
+  imm(2, n); return emit16(I_MULS_R1_R2);
 }
 
 // r0 = r1 op r0 where r1 has type t and r0 has type ty; sets ty to the result type
 int binop(int op, int t) {
   int u;
   u = isuns(t, ty);
-  if (op == Or)  { emit16(17160); ty = arith(t, ty); }             // orrs r0,r1
-  else if (op == Xor) { emit16(16456); ty = arith(t, ty); }        // eors r0,r1
-  else if (op == And) { emit16(16392); ty = arith(t, ty); }        // ands r0,r1
-  else if (op == Shl) { emit32(64001, 61440); ty = arith(t, t); }  // lsl.w r0,r1,r0
+  if (op == Or)  { emit16(I_ORRS_R0_R1); ty = arith(t, ty); }
+  else if (op == Xor) { emit16(I_EORS_R0_R1); ty = arith(t, ty); }
+  else if (op == And) { emit16(I_ANDS_R0_R1); ty = arith(t, ty); }
+  else if (op == Shl) { emit32(I_LSL_W_R0_R1_R0, I_LSL_W_R0_R1_R0_2); ty = arith(t, t); }
   else if (op == Shr) {                                            // the left operand decides
-    if (t == TUINT) emit32(64033, 61440); else emit32(64065, 61440); // lsr.w / asr.w r0,r1,r0
+    if (t == TUINT) emit32(I_LSR_W_R0_R1_R0, I_LSR_W_R0_R1_R0_2); else emit32(I_ASR_W_R0_R1_R0, I_ASR_W_R0_R1_R0_2);
     ty = arith(t, t);
   }
   else if (op == Add) {
     if (t >= PTR && ty < PTR) { scale(tysize(t - PTR)); ty = t; }
     else if (ty >= PTR && t < PTR) scale1(tysize(ty - PTR));
     else if (t < PTR && ty < PTR) ty = arith(t, ty);
-    emit16(6152);                                                  // adds r0,r1,r0
+    emit16(I_ADDS_R0_R1_R0);
   }
   else if (op == Sub) {
-    if (t >= PTR && ty >= PTR) { emit16(6664); imm(2, tysize(t - PTR)); emit32(64400, 61682); ty = TINT; }  // subs ; sdiv r0,r0,r2
-    else { if (t >= PTR) scale(tysize(t - PTR)); emit16(6664); ty = t < PTR ? arith(t, ty) : t; }      // subs r0,r1,r0
+    if (t >= PTR && ty >= PTR) { emit16(I_SUBS_R0_R1_R0); imm(2, tysize(t - PTR)); emit32(I_SDIV_R0_R0_R2, I_SDIV_R0_R0_R2_2); ty = TINT; }   // pointer difference
+    else { if (t >= PTR) scale(tysize(t - PTR)); emit16(I_SUBS_R0_R1_R0); ty = t < PTR ? arith(t, ty) : t; }
   }
-  else if (op == Mul) { emit16(17224); ty = arith(t, ty); }        // muls r0,r1
-  else if (op == Div) { if (u) emit32(64433, 61680); else emit32(64401, 61680); ty = arith(t, ty); }   // udiv / sdiv r0,r1,r0
-  else if (op == Mod) {                                            // udiv / sdiv r2,r1,r0 ; mls r0,r2,r0,r1
-    if (u) emit32(64433, 62192); else emit32(64401, 62192);
-    emit32(64258, 4112); ty = arith(t, ty);
+  else if (op == Mul) { emit16(I_MULS_R0_R1); ty = arith(t, ty); }
+  else if (op == Div) { if (u) emit32(I_UDIV_R0_R1_R0, I_UDIV_R0_R1_R0_2); else emit32(I_SDIV_R0_R1_R0, I_SDIV_R0_R1_R0_2); ty = arith(t, ty); }
+  else if (op == Mod) {                                            // r1 - (r1 / r0) * r0
+    if (u) emit32(I_UDIV_R2_R1_R0, I_UDIV_R2_R1_R0_2); else emit32(I_SDIV_R2_R1_R0, I_SDIV_R2_R1_R0_2);
+    emit32(I_MLS_R0_R2_R0_R1, I_MLS_R0_R2_R0_R1_2); ty = arith(t, ty);
   }
   return 0;
 }
@@ -1095,20 +1150,20 @@ int expr(int lev) {
     if (isfndes(ty)) ty = ty + PTR;             // &f: the address is already in r0
     else { lvalue(); ty = ty + PTR; }
   }
-  else if (tk == '!') { next(); expr(Inc); emit16(10240); emit16(48908); emit16(8193); emit16(8192); ty = TINT; } // cmp r0,#0; ite eq; mov 1; mov 0
-  else if (tk == '~') { next(); expr(Inc); emit16(17344); ty = arith(ty, ty); }   // mvns r0,r0  43C0
+  else if (tk == '!') { next(); expr(Inc); emit16(I_CMP_R0_0); emit16(I_ITE_EQ); emit16(I_MOVS_R0_1); emit16(I_MOVS_R0); ty = TINT; }
+  else if (tk == '~') { next(); expr(Inc); emit16(I_MVNS_R0); ty = arith(ty, ty); }
   else if (tk == Add) { next(); expr(Inc); ty = arith(ty, ty); }
   else if (tk == Sub) {
     next();
-    if (tk == Num) { imm(0, -ival); ty = numty; next(); } else { expr(Inc); emit16(16960); ty = arith(ty, ty); }   // negs r0,r0  4240
+    if (tk == Num) { imm(0, -ival); ty = numty; next(); } else { expr(Inc); emit16(I_NEGS_R0); ty = arith(ty, ty); }
   }
   else if (tk == Inc || tk == Dec) {            // prefix
     t = tk; next(); expr(Inc); lvalue();
     sz = ty >= PTR ? tysize(ty - PTR) : 1;
-    emit16(17921);                              // mov r1,r0        4601
+    emit16(I_MOV_R1_R0);
     load_r1(ty);
     if (t == Dec) sz = -sz;
-    if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(6272); } // adds r0,r0,r2 1880
+    if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R0_R0_R2); }
     store(ty);
   }
   else die("bad expression");
@@ -1121,14 +1176,14 @@ int expr(int lev) {
       next(); lvalue(); push(); expr(Assign); pop1(); store(t); ty = t;
     }
     else if (tk == Cond) {
-      next(); emit16(10240); at = bc_w(0);      // cmp r0,#0 ; beq
+      next(); emit16(I_CMP_R0_0); at = bc_w(CC_EQ);
       expr_comma();
       if (tk != ':') die(": expected"); next();
       at2 = b_w(-1); patch_b(at, cpos);
       expr(Cond); patch_b(at2, cpos);
     }
-    else if (tk == Lor) { next(); emit16(10240); at = bc_w(1); expr(Lan); patch_b(at, cpos); ty = TINT; }
-    else if (tk == Lan) { next(); emit16(10240); at = bc_w(0); expr(Or); patch_b(at, cpos); ty = TINT; }
+    else if (tk == Lor) { next(); emit16(I_CMP_R0_0); at = bc_w(CC_NE); expr(Lan); patch_b(at, cpos); ty = TINT; }
+    else if (tk == Lan) { next(); emit16(I_CMP_R0_0); at = bc_w(CC_EQ); expr(Or); patch_b(at, cpos); ty = TINT; }
     else if (tk >= AddA && tk <= ShrA) {        // compound assignment
       n = tk; next(); lvalue(); push(); load(t); push(); expr(Assign); pop1();
       if (n == AddA) n = Add; else if (n == SubA) n = Sub; else if (n == MulA) n = Mul; else if (n == DivA) n = Div; else if (n == ModA) n = Mod;
@@ -1139,12 +1194,12 @@ int expr(int lev) {
     else if (tk == Or)  { next(); push(); expr(Xor); pop1(); binop(Or, t); }
     else if (tk == Xor) { next(); push(); expr(And); pop1(); binop(Xor, t); }
     else if (tk == And) { next(); push(); expr(Eq);  pop1(); binop(And, t); }
-    else if (tk == Eq)  { next(); push(); expr(Lt);  pop1(); setcc(0);  ty = TINT; }
-    else if (tk == Ne)  { next(); push(); expr(Lt);  pop1(); setcc(1);  ty = TINT; }
-    else if (tk == Lt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 3 : 11); ty = TINT; }   // lo / lt
-    else if (tk == Gt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 8 : 12); ty = TINT; }   // hi / gt
-    else if (tk == Le)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 9 : 13); ty = TINT; }   // ls / le
-    else if (tk == Ge)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? 2 : 10); ty = TINT; }   // hs / ge
+    else if (tk == Eq)  { next(); push(); expr(Lt);  pop1(); setcc(CC_EQ); ty = TINT; }
+    else if (tk == Ne)  { next(); push(); expr(Lt);  pop1(); setcc(CC_NE); ty = TINT; }
+    else if (tk == Lt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_LO : CC_LT); ty = TINT; }
+    else if (tk == Gt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_HI : CC_GT); ty = TINT; }
+    else if (tk == Le)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_LS : CC_LE); ty = TINT; }
+    else if (tk == Ge)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_HS : CC_GE); ty = TINT; }
     else if (tk == Shl) { next(); push(); expr(Add); pop1(); binop(Shl, t); }
     else if (tk == Shr) { next(); push(); expr(Add); pop1(); binop(Shr, t); }
     else if (tk == Add) { next(); push(); expr(Mul); pop1(); binop(Add, t); }
@@ -1156,9 +1211,9 @@ int expr(int lev) {
       lvalue();
       sz = ty >= PTR ? tysize(ty - PTR) : 1;
       if (tk == Dec) sz = -sz;
-      emit16(17921);                            // mov r1,r0
+      emit16(I_MOV_R1_R0);
       load_r1(ty);
-      if (sz >= 0 && sz < 4096) addi12(2, 0, sz); else if (sz < 0 && -sz < 4096) subi12(2, 0, -sz); else { imm(2, sz); emit16(6274); } // adds r2,r0,r2 1882
+      if (sz >= 0 && sz < 4096) addi12(2, 0, sz); else if (sz < 0 && -sz < 4096) subi12(2, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R2_R0_R2); }
       store_r2(ty);
       next();
     }
@@ -1175,7 +1230,7 @@ int expr(int lev) {
       if (tk != ']') die("] expected"); next();
       if (t < PTR) die("indexing a non-pointer");
       scale(tysize(t - PTR));
-      emit16(6152);                             // adds r0,r1,r0
+      emit16(I_ADDS_R0_R1_R0);
       ty = t - PTR; load(ty); decay();
     }
     else die("bad operator");
@@ -1332,7 +1387,7 @@ int stmt() {
   if (tk == If) {
     next(); if (tk != '(') die("( expected"); next();
     expr_comma(); if (tk != ')') die(") expected"); next();
-    emit16(10240); at = bc_w(0);                // cmp r0,#0 ; beq else
+    emit16(I_CMP_R0_0); at = bc_w(CC_EQ);       // false: to the else
     stmt();
     if (tk == Else) { next(); at2 = b_w(-1); patch_b(at, cpos); stmt(); patch_b(at2, cpos); }
     else patch_b(at, cpos);
@@ -1342,10 +1397,10 @@ int stmt() {
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1; cont_tgt = cpos;
     expr_comma(); if (tk != ')') die(") expected"); next();
-    emit16(10240); at = bc_w(0);
+    emit16(I_CMP_R0_0); at = bc_w(CC_EQ);
     stmt();
     b_w(cont_tgt); patch_b(at, cpos);
-    chain_patch(brk_fix, cpos, 36864);
+    chain_patch(brk_fix, cpos, I_B_W_2);
     brk_fix = sv_brk; cont_fix = sv_cont; cont_tgt = sv_tgt;
   }
   else if (tk == For) {
@@ -1355,7 +1410,7 @@ int stmt() {
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1;
     at = cpos;                                  // condition
-    if (tk != ';') { expr_comma(); emit16(10240); at2 = bc_w(0); } else at2 = -1;
+    if (tk != ';') { expr_comma(); emit16(I_CMP_R0_0); at2 = bc_w(CC_EQ); } else at2 = -1;
     if (tk != ';') die("; expected"); next();
     body = b_w(-1);                             // skip increment first time
     cont_tgt = cpos;                            // increment
@@ -1366,7 +1421,7 @@ int stmt() {
     stmt();
     b_w(cont_tgt);
     if (at2 >= 0) patch_b(at2, cpos);
-    chain_patch(brk_fix, cpos, 36864);
+    chain_patch(brk_fix, cpos, I_B_W_2);
     brk_fix = sv_brk; cont_fix = sv_cont; cont_tgt = sv_tgt;
   }
   else if (tk == Switch) {
@@ -1375,7 +1430,7 @@ int stmt() {
     if (tk != '{') die("{ expected"); next();
     sv_brk = brk_fix; brk_fix = -1;
     loc = loc + 4; if (loc > maxloc) maxloc = loc; n = -loc;        // temp slot for the switch value
-    push(); lea_loc(n); pop1(); emit16(24577);                    // str r1,[r0]
+    push(); lea_loc(n); pop1(); emit16(I_STR_R1_R0);
     at = b_w(-1);                                                 // -> first test (case chain head)
     at2 = -1;                                                     // default position
     body = -1;                                                    // fallthrough skip
@@ -1386,8 +1441,8 @@ int stmt() {
         if (tk != ':') die(": expected"); next();
         body = b_w(-1);                                           // previous body falls through over the test
         patch_b(at, cpos);                                        // failed previous test lands here
-        lea_loc(n); emit16(26624); imm(1, t); emit16(17032);      // ldr r0,[r0] ; cmp r0,r1  4288
-        at = bc_w(1);                                             // bne -> next test
+        lea_loc(n); emit16(I_LDR_R0_R0); imm(1, t); emit16(I_CMP_R0_R1);
+        at = bc_w(CC_NE);                                         // -> next test
         patch_b(body, cpos);
       }
       else if (tk == Default) { next(); if (tk != ':') die(": expected"); next(); at2 = cpos; }
@@ -1395,7 +1450,7 @@ int stmt() {
     }
     next();
     if (at2 >= 0) patch_b(at, at2); else patch_b(at, cpos);
-    chain_patch(brk_fix, cpos, 36864);
+    chain_patch(brk_fix, cpos, I_B_W_2);
     brk_fix = sv_brk;
   }
   else if (tk == Break) { next(); if (tk != ';') die("; expected"); next(); brk_fix = chain_add(brk_fix, b_w(-1)); }
@@ -1424,7 +1479,7 @@ int stmt() {
       if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
         n = n * darr;
         newlocal(d, t + PTR, n + 4);
-        lea_loc(d->val); addi12(1, 0, 4); emit16(24577);   // r0=slot; r1=r0+4; str r1,[r0]
+        lea_loc(d->val); addi12(1, 0, 4); emit16(I_STR_R1_R0);   // slot = slot + 4
         if (hi) { ikind = 1; ibase = d->val + 4; init_zero(n); init_array(t, darr, 0); }
       } else {
         newlocal(d, t, n);
@@ -1499,16 +1554,16 @@ int parse_global() {
       // fix param offsets: param i at r7 + 8 + 4*(n-1-i)
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) syms[i].val = 8 + 4 * (n - 1 - syms[i].val); i = i + 1; }
       s->class = CFun; s->val = cpos; nparams = n; fnrty = t;
-      chain_patch(s->fix, cpos, 53248); s->fix = -1;
-      emit16(46464);                            // push {r7,lr}      B580
-      emit16(18031);                            // mov r7,sp         466F
+      chain_patch(s->fix, cpos, I_BL_2); s->fix = -1;
+      emit16(I_PUSH_R7_LR);
+      emit16(I_MOV_R7_SP);
       frame_at = cpos; imm2(1, 0);              // movw+movt r1,#frame (patched)
-      emit32(60333, 3329);                      // sub.w sp,sp,r1    EBAD 0D01
+      emit32(I_SUB_W_SP_SP_R1, I_SUB_W_SP_SP_R1_2);
       ret_fix = -1;
       stmt();
-      chain_patch(ret_fix, cpos, 36864);
-      emit16(18109);                            // mov sp,r7         46BD
-      emit16(48512);                            // pop {r7,pc}       BD80
+      chain_patch(ret_fix, cpos, I_B_W_2);
+      emit16(I_MOV_SP_R7);
+      emit16(I_POP_R7_PC);
       sz = (maxloc + 7) & -8;
       i = cpos; cpos = frame_at; imm2(1, sz); cpos = i;
       // restore shadowed symbols
@@ -1618,10 +1673,10 @@ int main(int argc, char **argv) {
   entry = s->val;
   if (init_head >= 0) {
     entry = cpos;
-    emit16(46352);                            // push {r4,lr}     B510
+    emit16(I_PUSH_R4_LR);
     b_w(init_head);
     patch_b(init_tail, cpos);
-    emit32(59581, 16400);                     // pop.w {r4,lr}    E8BD 4010
+    emit32(I_POP_W_R4_LR, I_POP_W_R4_LR_2);
     b_w(s->val);
   }
   write(fd, &cpos, 4); write(fd, &dpos, 4); write(fd, &hdr, 4); write(fd, &entry, 4);
