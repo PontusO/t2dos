@@ -1,6 +1,7 @@
 # build artifacts (make all / make host regenerate them)
 /cc
 /host_linux
+/build/
 *.bin
 /root/bin/
 /root/src/*
