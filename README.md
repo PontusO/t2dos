@@ -4,8 +4,9 @@ One program at a time, flat memory, kernel in the Arduino sketch, everything
 else is a T2CC program on the SD card (or, without a card, in on-board flash).
 
 ## Layout
-    sys.h             syscall ABI: numbers, flags, structs. Shared by kernel, cc.c, programs
-    cc.c              the compiler (gcc builds it as a PC cross compiler; compiles itself on the board)
+    sys.h             syscall ABI: numbers, flags, structs. Shared by kernel, compiler, programs
+    compiler/cc.c     the compiler (gcc builds it as a PC cross compiler, compiler/cc; compiles itself on the board)
+    compiler/tests/   language tests: test.c test3.c test4.c ...
     kernel/kernel.ino the kernel (arduino-pico; SDFS on SPI, set SD_CS; LittleFS fallback)
     host_linux.c      the same kernel contract on Linux/ARM, run binaries with qemu-arm
     userland/*.c      sh ls cat cp mv rm mkdir rmdir echo hexdump free put write edit blink
@@ -89,7 +90,7 @@ read/write/close; exec closes sockets a child leaked.
 - `cc -I dir` adds an include directory (the Makefile uses `-I lib`).
 - `printf`/`sprintf` are kernel-side: `%[-][0][width]d u x c s %%`.
 
-## Language subset (cc.c)
+## Language subset (compiler/cc.c)
 int char void, pointers, structs (named or anonymous, array members),
 typedef, global/local 1-D arrays, enum, `#define NAME number`,
 `#include "file"` (also searched in /lib), all operators incl. ?: ++/-- and
@@ -103,7 +104,7 @@ sizeof `(int (*)(int))`, `fp = f` / `fp = &f`, calls `fp(x)` / `(*fp)(x)` /
 types of a function pointer are not checked. Builtins (printf, ...) are
 syscalls and cannot be taken as function pointers.
 Not yet: float, initializers, unsigned/short, 2-D arrays, multi-line macros.
-See test.c, test3.c and test4.c (function pointers) for the covered subset.
+See compiler/tests/ for the covered subset (test4.c: function pointers).
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -130,7 +131,7 @@ byte-identical to the PC cross build.
 - `host_linux.c` does not yet free a program's `malloc`s on exit or zero them,
   unlike the board kernel.
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
-- test.c, test3.c and test4.c have no automatic runner: compare their output
-  by hand (test4.c against `gcc test4.c && ./a.out`, except `sizeof`).
+- compiler/tests/ has no automatic runner: compare their output by hand
+  (test4.c against `gcc compiler/tests/test4.c && ./a.out`, except `sizeof`).
 - Under qemu/host_linux the function pointer support has not been run yet
   (qemu-arm is not installed on the development PC).

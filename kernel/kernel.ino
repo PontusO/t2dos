@@ -5,7 +5,7 @@
 // Everything else is a T2CC program on the SD card. Boot runs /bin/sh.bin.
 //
 // Compiled-code contract: r8 = sys(), r9 = data base, args on the stack
-// (argv[n-1] is arg 0), result in r0. See cc.c and sys.h.
+// (argv[n-1] is arg 0), result in r0. See compiler/cc.c and sys.h.
 
 #include <SDFS.h>
 #include <LittleFS.h>

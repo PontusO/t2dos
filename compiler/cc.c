@@ -1,7 +1,7 @@
 // cc.c - a tiny single-pass C compiler emitting Thumb-2 code for Cortex-M33
 // (RP2350). Written in the subset of C it compiles, so it can build itself.
 //
-// Build on a PC as a cross compiler:   gcc -O2 -o cc cc.c
+// Build on a PC as a cross compiler:   gcc -O2 -I . -o compiler/cc compiler/cc.c   (from the repo root)
 // Use:                                 cc -o prog.bin prog.c
 //
 // Generated code model:

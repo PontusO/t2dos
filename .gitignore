@@ -1,5 +1,5 @@
 # build artifacts (make all / make host regenerate them)
-/cc
+/compiler/cc
 /host_linux
 /build/
 *.bin
