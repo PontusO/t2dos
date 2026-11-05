@@ -222,7 +222,20 @@ int next() {
       while (*p && *p != tk) {
         if ((c = *p) == '\\') {
           p = p + 1; c = *p;
-          if (c == 'n') c = '\n'; else if (c == 't') c = '\t'; else if (c == 'r') c = '\r'; else if (c == '0') c = 0;
+          // numeric values only: this file must compile with a cc that lacks these escapes
+          if (c == 'n') c = 10; else if (c == 't') c = 9; else if (c == 'r') c = 13;
+          else if (c == 'b') c = 8; else if (c == 'a') c = 7; else if (c == 'f') c = 12; else if (c == 'v') c = 11;
+          else if (c == 'e') c = 27;
+          else if (c >= '0' && c <= '7') {     // \0 \33 \033: up to 3 octal digits
+            c = c - '0'; i = 1;
+            while (i < 3 && p[1] >= '0' && p[1] <= '7') { p = p + 1; c = c * 8 + *p - '0'; i = i + 1; }
+          }
+          else if (c == 'x') {                 // \x1b: hex digits
+            c = 0;
+            while ((p[1] >= '0' && p[1] <= '9') || (p[1] >= 'a' && p[1] <= 'f') || (p[1] >= 'A' && p[1] <= 'F')) {
+              p = p + 1; c = c * 16 + (*p & 15) + (*p >= 'A' ? 9 : 0);
+            }
+          }
         }
         p = p + 1;
         if (tk == '"') { data[dpos] = c; dpos = dpos + 1; } else ival = c;
