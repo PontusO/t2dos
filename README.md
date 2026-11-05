@@ -103,8 +103,16 @@ sizeof `(int (*)(int))`, `fp = f` / `fp = &f`, calls `fp(x)` / `(*fp)(x)` /
 `s->fn(x)` / `tbl[i](x)`, functions returning function pointers. Parameter
 types of a function pointer are not checked. Builtins (printf, ...) are
 syscalls and cannot be taken as function pointers.
-Not yet: float, initializers, unsigned/short, 2-D arrays, multi-line macros.
-See compiler/tests/ for the covered subset (test4.c: function pointers).
+Initializers, global and local: `int x = 5, y = x * 2;`, `char *s = "hi";`,
+`char buf[] = "abc";`, `char b[8] = "hi";`, `int a[5] = {1, 2};` (rest zero),
+`int t[] = {1, 2, 3,};` (size from the list), structs and arrays of structs
+`{ {1, 2}, {3, 4} }`, function pointer tables `{ add, sub }`, `&var` and
+other expressions. Nested aggregates need their own braces; no designators.
+Constant global initializers go straight into the data image; the others run
+as code before `main`. Array sizes may be `#define`/enum names.
+Not yet: float, unsigned/short, 2-D arrays, multi-line macros.
+See compiler/tests/ for the covered subset (test4.c: function pointers,
+test5.c: initializers).
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -115,8 +123,8 @@ build, and that `cc` rebuilds it again identically. PSRAM is fully returned
 after every program. `edit` works through `screen` (tested with its default
 flow control on) and builds on the board byte-identical to the PC build.
 Backspace erases at the shell and `write` prompts. test4.c (function
-pointers) prints the same as a native gcc build, whether compiled on the PC
-or on the board.
+pointers) and test5.c (initializers) print the same as a native gcc build,
+whether compiled on the PC or on the board.
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
@@ -132,6 +140,7 @@ byte-identical to the PC cross build.
   unlike the board kernel.
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
 - compiler/tests/ has no automatic runner: compare their output by hand
-  (test4.c against `gcc compiler/tests/test4.c && ./a.out`, except `sizeof`).
+  (test4.c and test5.c against `gcc compiler/tests/testN.c && ./a.out`;
+  test4's pointer `sizeof` differs on a 64-bit PC).
 - Under qemu/host_linux the function pointer support has not been run yet
   (qemu-arm is not installed on the development PC).

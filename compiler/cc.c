@@ -32,7 +32,7 @@ enum { TCHAR = 0, TINT = 1, TSTRUCT = 2, PTR = 256, ARR = 1048576, FN = 2097152 
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
              int hclass; int htype; int hval; int fix; int stag; };
-struct Mem { struct Sym *id; int type; int off; int next; };
+struct Mem { struct Sym *id; int type; int off; int next; int cnt; };   // cnt: array member length, else -1
 
 // ------------------------------------------------------------------ state
 char *p;                 // source position
@@ -54,7 +54,11 @@ int nparams;
 
 int *fnret; int nfn;     // function types: return type of each
 int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
-struct Sym *dname; int darr;                       // set by declarator(): name, array size or -1
+struct Sym *dname; int darr;                       // set by declarator(): name, array size, -1 none, -2 for []
+int slen;                                          // bytes of the last string literal, with its 0
+int ikind; int ibase;                              // initializer target: 0 = data offset, 1 = frame offset
+int init_open; int init_head; int init_tail;       // code chunks for global initializers, run before main
+char *sv_p; int sv_tk; int sv_ival; struct Sym *sv_id; int sv_line; int sv_dpos;   // lexer state for lookahead
 
 // include stack
 char **fstack_p; int *fstack_line; int fdepth;
@@ -262,7 +266,7 @@ int next() {
         if (tk == '"') { data[dpos] = c; dpos = dpos + 1; } else ival = c;
       }
       p = p + 1;
-      if (tk == '"') { data[dpos] = 0; dpos = dpos + 1; ival = pp - data; tk = Str; } else tk = Num;
+      if (tk == '"') { data[dpos] = 0; dpos = dpos + 1; ival = pp - data; slen = dpos - ival; tk = Str; } else tk = Num;
       return 0;
     }
     else if (tk == '=') { if (*p == '=') { p = p + 1; tk = Eq; } else tk = Assign; return 0; }
@@ -354,6 +358,8 @@ int parse_type() {
             if (al > 1) off = (off + al - 1) & -al;
             mems[nmems].id = dname; mems[nmems].type = mt; mems[nmems].off = off; mems[nmems].next = stfirst[si];
             stfirst[si] = nmems; nmems = nmems + 1;
+            mems[nmems - 1].cnt = darr;
+            if (darr == -2) die("member array size expected");
             if (darr >= 0) {                    // array member: storage inline, type is "address of element"
               sz = sz * darr;
               mems[nmems - 1].type = (mt + PTR) | ARR;
@@ -395,6 +401,14 @@ int skip_params() {
     next();
   }
 }
+// [N] or [] (size from the initializer: darr = -2)
+int array_dim() {
+  next();
+  if (tk == ']') { darr = -2; next(); return 0; }
+  if (tk == Num) darr = ival; else if (tk == Id && id->class == CNum) darr = id->val; else die("array size expected");
+  next(); if (tk != ']') die("] expected"); next();
+  return 0;
+}
 // Declarator after a base type: stars, then a name (or none, for casts and
 // prototypes) and an optional [N], or a function pointer ( *name[N] )( params ).
 // Returns the type; sets dname (0 if no name) and darr (-1 if not an array).
@@ -407,19 +421,13 @@ int declarator(int t) {
     while (tk == Mul) { next(); ps = ps + 1; }
     if (!ps) die("only function pointers are supported: (*name)(...)");
     if (tk == Id) { dname = id; next(); }
-    if (tk == Brak) {
-      next(); if (tk != Num) die("array size expected"); darr = ival; next();
-      if (tk != ']') die("] expected"); next();
-    }
+    if (tk == Brak) array_dim();
     if (tk != ')') die(") expected in declarator"); next();
     skip_params();
     return fntype(t) + ps * PTR;
   }
   if (tk == Id) { dname = id; next(); }
-  if (tk == Brak) {
-    next(); if (tk != Num) die("array size expected"); darr = ival; next();
-    if (tk != ']') die("] expected"); next();
-  }
+  if (tk == Brak) array_dim();
   return t;
 }
 
@@ -661,6 +669,123 @@ int expr(int lev) {
   return 0;
 }
 
+// ------------------------------------------------------------------ initializers
+// Globals: constants go straight into the data image. Anything else (strings for
+// pointers, addresses, function pointers, expressions) becomes code in a chunk
+// that runs before main: chunks are chained with b.w, see main(). Locals: code at
+// the declaration; arrays and structs are zeroed first. Nested aggregates need
+// their own braces; a char array also takes a string.
+int save_lex() { sv_p = p; sv_tk = tk; sv_ival = ival; sv_id = id; sv_line = line; sv_dpos = dpos; return 0; }
+int restore_lex() {                    // lexing strings wrote to data: clear what lookahead used
+  if (dpos > sv_dpos) memset(data + sv_dpos, 0, dpos - sv_dpos);
+  p = sv_p; tk = sv_tk; ival = sv_ival; id = sv_id; line = sv_line; dpos = sv_dpos;
+  return 0;
+}
+int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_glo(ibase + off); return 0; }
+int init_code() {                      // make sure global initializer code goes into a chunk
+  if (ikind || init_open) return 0;
+  if (init_tail >= 0) patch_b(init_tail, cpos); else init_head = cpos;
+  init_open = 1;
+  return 0;
+}
+int init_close() { if (init_open) { init_tail = b_w(-1); init_open = 0; } return 0; }
+int poke(int off, int v, int t) {
+  data[off] = v;
+  if (t != TCHAR) { data[off + 1] = v >> 8; data[off + 2] = v >> 16; data[off + 3] = v >> 24; }
+  return 0;
+}
+// [-] number | enum or #define name, followed by , } or ;  ->  1, value in ival. Else 0, nothing consumed.
+int const_init() {
+  int neg; int v;
+  save_lex(); neg = 0;
+  if (tk == Sub) { next(); neg = 1; }
+  if (tk == Num) v = ival; else if (tk == Id && id->class == CNum) v = id->val; else { restore_lex(); return 0; }
+  next();
+  if (tk != ',' && tk != '}' && tk != ';') { restore_lex(); return 0; }
+  ival = neg ? -v : v;
+  return 1;
+}
+// number of elements in the { ... } list (or string) that starts here; consumes nothing
+int count_init() {
+  int depth; int paren; int n; int last;
+  if (tk == Str) return slen;
+  if (tk != '{') die("{ expected");
+  save_lex();
+  depth = 0; paren = 0; n = 0; last = 0;
+  while (1) {
+    if (!tk) die("unexpected eof in initializer");
+    if (tk == '{') { depth = depth + 1; if (depth == 1) { next(); if (tk != '}') n = 1; continue; } }
+    else if (tk == '}') { depth = depth - 1; if (!depth) break; }
+    else if (tk == '(') paren = paren + 1;
+    else if (tk == ')') paren = paren - 1;
+    else if (tk == ',' && depth == 1 && !paren) n = n + 1;
+    last = tk; next();
+  }
+  if (last == ',') n = n - 1;          // trailing comma
+  restore_lex();
+  return n;
+}
+int init_elem(int t, int off);
+int init_scalar(int t, int off) {
+  if (tk == '{') {                     // int x = { 5 };
+    next(); init_scalar(t, off); if (tk == ',') next();
+    if (tk != '}') die("} expected"); next();
+    return 0;
+  }
+  if (!ikind && const_init()) { poke(ibase + off, ival, t); return 0; }
+  init_code(); init_addr(off); push(); expr(Assign); pop1(); store(t);
+  return 0;
+}
+int init_array(int et, int cnt, int off) {  // returns the number of elements given
+  int i; int es; int n;
+  es = tysize(et);
+  if (tk == Str && et == TCHAR) {           // char s[N] = "..."
+    n = slen;                               // with the terminating 0
+    if (n - 1 > cnt) die("string longer than the array");
+    if (n > cnt) n = cnt;                   // char s[3] = "abc": no terminator, as in C
+    if (ikind) {                            // memcpy(dst, literal, n)
+      init_addr(off); push(); lea_glo(ival); push(); imm(0, n); push(); call_sys(SYS_memcpy, 3);
+    }
+    else { i = 0; while (i < n) { data[ibase + off + i] = data[ival + i]; i = i + 1; } }
+    next();
+    return n;
+  }
+  if (tk != '{') die("{ expected for array initializer");
+  next(); i = 0;
+  while (tk != '}') {
+    if (i >= cnt) die("too many initializers");
+    init_elem(et, off + i * es);
+    i = i + 1;
+    if (tk == ',') next(); else if (tk != '}') die(", or } expected");
+  }
+  next();
+  return i;
+}
+int init_struct(int t, int off) {
+  int order[256]; int n; int m; int mt;
+  m = stfirst[t - TSTRUCT]; n = 0;            // members are listed last first
+  while (m >= 0) { if (n >= 256) die("struct too big to initialize"); order[n] = m; n = n + 1; m = mems[m].next; }
+  if (tk != '{') die("{ expected for struct initializer");
+  next();
+  while (tk != '}') {
+    if (n <= 0) die("too many initializers");
+    n = n - 1; m = order[n]; mt = mems[m].type;
+    if (mt & ARR) init_array((mt & ~ARR) - PTR, mems[m].cnt, off + mems[m].off);
+    else init_elem(mt, off + mems[m].off);
+    if (tk == ',') next(); else if (tk != '}') die(", or } expected");
+  }
+  next();
+  return 0;
+}
+int init_elem(int t, int off) {
+  if (t >= TSTRUCT && t < PTR) return init_struct(t, off);
+  return init_scalar(t, off);
+}
+int init_zero(int n) {                       // local aggregate: memset(storage, 0, n)
+  init_addr(0); push(); imm(0, 0); push(); imm(0, n); push(); call_sys(SYS_memset, 3);
+  return 0;
+}
+
 // ------------------------------------------------------------------ statements
 int newlocal(struct Sym *s, int t, int size) {
   s->hclass = s->class; s->htype = s->type; s->hval = s->val;
@@ -671,7 +796,7 @@ int newlocal(struct Sym *s, int t, int size) {
 }
 
 int stmt() {
-  int at; int at2; int sv_brk; int sv_cont; int sv_tgt; int body; int t; int bt; int n; struct Sym *d;
+  int at; int at2; int sv_brk; int sv_cont; int sv_tgt; int body; int t; int bt; int n; int hi; struct Sym *d;
   if (tk == If) {
     next(); if (tk != '(') die("( expected"); next();
     expr(Assign); if (tk != ')') die(") expected"); next();
@@ -760,12 +885,22 @@ int stmt() {
     while (tk != ';') {
       t = declarator(bt);
       if (!dname) die("local name expected");
-      n = tysize(t); d = dname;
+      d = dname; hi = 0;
+      if (tk == Assign) { next(); hi = 1; }
+      if (darr == -2) { if (!hi) die("array size expected"); darr = count_init(); }
+      n = tysize(t);
       if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
         n = n * darr;
         newlocal(d, t + PTR, n + 4);
         lea_loc(d->val); addi12(1, 0, 4); emit16(24577);   // r0=slot; r1=r0+4; str r1,[r0]
-      } else newlocal(d, t, n);
+        if (hi) { ikind = 1; ibase = d->val + 4; init_zero(n); init_array(t, darr, 0); }
+      } else {
+        newlocal(d, t, n);
+        if (hi) {
+          ikind = 1; ibase = d->val;
+          if (t >= TSTRUCT && t < PTR) { init_zero(n); init_struct(t, 0); } else init_scalar(t, 0);
+        }
+      }
       if (tk == ',') next();
     }
     next();
@@ -776,7 +911,7 @@ int stmt() {
 
 // ------------------------------------------------------------------ top level
 int parse_global() {
-  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz;
+  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz; int hi;
   if (tk == Enum) {
     next(); if (tk == Id) next();
     if (tk == '{') {
@@ -850,6 +985,9 @@ int parse_global() {
     }
     // global variable
     if (s->class) die("duplicate global");
+    hi = 0;
+    if (tk == Assign) { next(); hi = 1; }
+    if (darr == -2) { if (!hi) die("array size expected"); darr = count_init(); }
     n = tysize(t);
     if (darr >= 0) {
       n = n * darr;
@@ -862,6 +1000,11 @@ int parse_global() {
       s->class = CGlo; s->type = t; s->val = dpos;
       dpos = dpos + n;
     }
+    if (hi) {
+      ikind = 0; ibase = s->val;
+      if (darr >= 0) init_array(t, darr, 0); else init_elem(t, 0);
+      init_close();
+    }
     if (tk == ',') next();
   }
   next();
@@ -869,7 +1012,7 @@ int parse_global() {
 }
 
 int main(int argc, char **argv) {
-  char *out; int fd; int i; int n; int hdr; struct Sym *s; struct Sym *d;
+  char *out; int fd; int i; int n; int hdr; int entry; struct Sym *s; struct Sym *d;
   out = "a.bin"; srcname = 0; incdir = 0;
   i = 1;
   while (i < argc) {
@@ -886,6 +1029,7 @@ int main(int argc, char **argv) {
   data = malloc(1048576); dpos = 0;
   fstack_p = malloc(8 * 4); fstack_line = malloc(8 * 4); fdepth = 0;
   fnret = malloc(512 * 4); nfn = 0;
+  init_open = 0; init_head = -1; init_tail = -1;
   afix_at = malloc(4096 * 4); afix_sym = malloc(4096 * 4); naddr = 0;
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
@@ -923,9 +1067,19 @@ int main(int argc, char **argv) {
   fd = open(out, 577, 420);    // O_WRONLY|O_CREAT|O_TRUNC, 0644
   if (fd < 0) { printf("cannot write %s\n", out); return 1; }
   hdr = 0; write(fd, "T2CC", 4);
-  write(fd, &cpos, 4); write(fd, &dpos, 4); write(fd, &hdr, 4); write(fd, &s->val, 4);
+  // global initializer chunks: entry = push {r4,lr} ; b chunks ; (last chunk) pop {r4,lr} ; b main
+  entry = s->val;
+  if (init_head >= 0) {
+    entry = cpos;
+    emit16(46352);                            // push {r4,lr}     B510
+    b_w(init_head);
+    patch_b(init_tail, cpos);
+    emit32(59581, 16400);                     // pop.w {r4,lr}    E8BD 4010
+    b_w(s->val);
+  }
+  write(fd, &cpos, 4); write(fd, &dpos, 4); write(fd, &hdr, 4); write(fd, &entry, 4);
   write(fd, code, cpos); write(fd, data, dpos);
   close(fd);
-  printf("%s: %d bytes code, %d bytes data, entry %d\n", out, cpos, dpos, s->val);
+  printf("%s: %d bytes code, %d bytes data, entry %d\n", out, cpos, dpos, entry);
   return 0;
 }
