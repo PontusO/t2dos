@@ -1,7 +1,7 @@
 # T2DOS build: cross compiler on the PC, userland binaries into an SD card image tree (root/)
 CC_HOST = compiler/cc
 PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
-BINUTILS = nm ar
+BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
 all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
@@ -52,7 +52,7 @@ ref:
 	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm build/host/ar build/host/as build/host/ld
+check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/ld
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message
@@ -68,6 +68,16 @@ check: build/host/nm build/host/ar build/host/as build/host/ld
 	test "$$(python3 tools/check_asm.py --inits tests/asm/reloc.s | tr '\n' ' ')" = ".Linit lfun "
 	python3 tools/check_asm.py --errors tests/asm/errors/*.s
 	python3 tools/check_link.py --pc
+	@# objdump: exact dumps of the sample object and of reloc.s's object, errors, equality with GNU objdump
+	build/host/objdump build/obj/sample.o | diff - tests/obj/objdump_sample.expected
+	build/host/as -o build/obj/reloc.o tests/asm/reloc.s
+	build/host/objdump build/obj/reloc.o | diff - tests/obj/objdump_reloc.expected
+	@out=$$(build/host/objdump build/obj/bad-magic.o); st=$$?; \
+	  if [ $$st -ne 1 ] || [ "$$out" != "objdump: build/obj/bad-magic.o: not a T2DOS object" ]; then echo "FAIL objdump bad-magic: status $$st, output '$$out'"; exit 1; fi
+	@out=$$(build/host/objdump build/obj/missing.o); st=$$?; \
+	  if [ $$st -ne 1 ] || [ "$$out" != "objdump: cannot read build/obj/missing.o" ]; then echo "FAIL objdump missing: status $$st, output '$$out'"; exit 1; fi
+	@echo objdump error checks ok
+	python3 tools/check_asm.py --objdump-corpus
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin

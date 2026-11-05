@@ -18,6 +18,13 @@
                                    with compiler/cc into build/corpus/), turn it back into
                                    assembly, and require build/host/as and GNU as to reproduce
                                    the original code bytes
+  check_asm.py --objdump-corpus    run build/host/objdump on the corpus programs and on the objects
+                                   build/obj/sample.o (tests/obj/mkobj.py) and of tests/asm/{core,fpu,reloc}.s: every
+                                   instruction line must equal GNU objdump's mnemonic and operands
+                                   for the same bytes (comments dropped); .short only where GNU
+                                   finds no instruction or as does not assemble GNU's text to
+                                   those bytes; and the converter of --corpus applied to our output
+                                   must reassemble with build/host/as to the original bytes
 """
 import glob
 import os
@@ -216,7 +223,7 @@ def check_error(src):
 # ------------------------------------------------------------------ corpus
 LINE_RE = re.compile(r'^\s*([0-9a-f]+):\t([0-9a-f ]+?)\s*\t(\S+)(?:\t(.*))?$')
 FPU_RE = re.compile(r'^(v(add|sub|mul|div|neg|sqrt|cmp)\.f32|vcvt\.(f32\.[su]32|[su]32\.f32)|vmov|vmrs|vldr|vstr|vpush|vpop)$')
-BRANCH_RE = re.compile(r'^(b|bl|b(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al))(\.[nw])?$')
+BRANCH_RE = re.compile(r'^bl?(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)?(\.[nw])?$')
 
 
 def build_corpus():
@@ -235,13 +242,18 @@ def build_corpus():
     return bins
 
 
-def to_asm(code, work):
-    """Disassemble code bytes into assembly; returns (source, instructions, deferred, raw)."""
+def gnu_dis(code, work):
+    """GNU objdump's disassembly text of code bytes (written to work.code)."""
     raw = work + '.code'
     open(raw, 'wb').write(code)
-    dis = subprocess.run([gnu('objdump'), '-D', '-b', 'binary', '-m', 'arm', '-M', 'force-thumb', raw],
-                         capture_output=True, text=True, check=True).stdout
-    insns = []                  # (addr, bytes, mnemonic, operands)
+    return subprocess.run([gnu('objdump'), '-D', '-b', 'binary', '-m', 'arm', '-M', 'force-thumb', raw],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def parse_dis(dis):
+    """Instruction lines of objdump output (GNU's or ours): [(addr, bytes, mnemonic, operands)];
+    comments after @ and our <SYMBOL+0xOFF> branch annotations are dropped."""
+    insns = []
     for l in dis.splitlines():
         m = LINE_RE.match(l)
         if not m:
@@ -250,7 +262,39 @@ def to_asm(code, work):
         hw = m.group(2).split()
         b = b''.join(bytes.fromhex(h)[::-1] for h in hw)    # objdump shows halfwords/words big end first
         ops = (m.group(4) or '').split('@')[0].strip()
+        ops = re.sub(r'\s*<[^<>]*>$', '', ops)
         insns.append((addr, b, m.group(3), ops))
+    return insns
+
+
+COND = r'(eq|ne|cs|cc|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|hs|lo)?'
+REWRITES = [
+    # GNU spelling -> the as spelling of the same encoding
+    (re.compile(r'^ldmia' + COND + r'\.w$'), re.compile(r'^sp!, (\{.*\})$'), lambda m, o: ('pop%s.w' % (m.group(1) or ''), o.group(1))),
+    (re.compile(r'^stmdb' + COND + r'$'), re.compile(r'^sp!, (\{.*\})$'), lambda m, o: ('push%s.w' % (m.group(1) or ''), o.group(1))),
+    (re.compile(r'^str' + COND + r'\.w$'), re.compile(r'^(\w+), \[sp, #-4\]!$'), lambda m, o: ('push%s.w' % (m.group(1) or ''), '{%s}' % o.group(1))),
+    (re.compile(r'^ldr' + COND + r'\.w$'), re.compile(r'^(\w+), \[sp\], #4$'), lambda m, o: ('pop%s.w' % (m.group(1) or ''), '{%s}' % o.group(1))),
+    (re.compile(r'^mov(s?)' + COND + r'\.w$'), re.compile(r'^(\w+), (\w+), (lsl|lsr|asr|ror) #(\d+)$'),
+     lambda m, o: ('%s%s%s.w' % (o.group(3), m.group(1), m.group(2) or ''), '%s, %s, #%s' % (o.group(1), o.group(2), o.group(4)))),
+    (re.compile(r'^rsb(s?)' + COND + r'$'), re.compile(r'^(\w+), (\w+), #0$'),
+     lambda m, o: ('neg%s%s.w' % (m.group(1), m.group(2) or ''), '%s, %s' % (o.group(1), o.group(2)))),
+    (re.compile(r'^orn(s?)' + COND + r'$'), re.compile(r'^(\w+), (\w+), #(\d+)$'),
+     lambda m, o: ('orr%s%s' % (m.group(1), m.group(2) or ''), '%s, %s, #%d' % (o.group(1), o.group(2), ~int(o.group(3)) & 0xffffffff))),
+]
+
+
+def as_form(mn, ops):
+    """An instruction as objdump prints it, in the spelling build/host/as takes."""
+    for mre, ore, f in REWRITES:
+        m = mre.match(mn)
+        o = ore.match(ops) if m else None
+        if o:
+            return f(m, o)
+    return mn, ops
+
+
+def insns_to_asm(insns):
+    """Assembly for disassembled instructions; returns (source, instructions, deferred, raw)."""
     starts = set(a for a, _, _, _ in insns)
     targets = set()
     for a, b, mn, ops in insns:
@@ -258,38 +302,60 @@ def to_asm(code, work):
             t = int(ops, 16)
             if t in starts:
                 targets.add(t)
-    lines = []
-    n = 0
-    deferred = 0
-    raw = 0
+    out = []                         # (raw bytes?, mnemonic, operands) per line
     for a, b, mn, ops in insns:
-        if a in targets:
-            lines.append('L_%x:' % a)
         raw_bytes = False
         if (mn.startswith('v') and not FPU_RE.match(mn)) or mn.startswith('.') or 'UNDEFINED' in mn or mn.startswith('<'):
             raw_bytes = True
-            if mn.startswith('v'):
-                deferred += 1
-            else:
-                raw += 1
         elif BRANCH_RE.match(mn):
             t = int(ops, 16) if re.match(r'^0x[0-9a-f]+$', ops) else None
             if t is None or t not in targets:
                 raw_bytes = True
-                raw += 1
             else:
                 ops = 'L_%x' % t
-        if mn == 'ldmia.w' and ops.startswith('sp!, '):
-            mn, ops = 'pop.w', ops[5:]
-        elif mn == 'stmdb' and ops.startswith('sp!, '):
-            mn, ops = 'push.w', ops[5:]
+        mn, ops = as_form(mn, ops)
+        out.append([raw_bytes, mn, ops])
+    # an IT block with a line as bytes cannot be assembled: then the whole block is bytes (an
+    # instruction is one line, or two .short lines for a 32-bit encoding)
+    def is_it(b):
+        return len(b) == 2 and b[1] == 0xBF and b[0] & 15
+    for i, (a, b, mn, ops) in enumerate(insns):
+        if not is_it(b):
+            continue
+        j = i + 1
+        k = 4
+        while not (b[0] & (1 << (4 - k))):
+            k -= 1
+        for _ in range(k):
+            if j < len(insns) and len(insns[j][1]) == 2 and (insns[j][1][1] >> 3) >= 0x1D:
+                j += 1
+            j += 1
+        if out[i][0] or j > len(insns) or any(out[x][0] or is_it(insns[x][1]) for x in range(i + 1, j)):
+            for x in range(i, min(j, len(insns))):
+                out[x][0] = True
+    lines = []
+    n = 0
+    deferred = 0
+    raw = 0
+    for (a, b, mn0, ops0), (raw_bytes, mn, ops) in zip(insns, out):
+        if a in targets:
+            lines.append('L_%x:' % a)
         if raw_bytes:
+            if mn0.startswith('v') and not FPU_RE.match(mn0):
+                deferred += 1
+            else:
+                raw += 1
             for i in range(0, len(b), 2):
                 lines.append('\t.short\t0x%02x%02x' % (b[i + 1], b[i]) if i + 1 < len(b) else '\t.byte\t0x%02x' % b[i])
         else:
             lines.append('\t%s\t%s' % (mn, ops))
             n += 1
     return '\t.syntax unified\n\t.thumb\n\t.text\n' + '\n'.join(lines) + '\n', n, deferred, raw
+
+
+def to_asm(code, work):
+    """Disassemble code bytes with GNU objdump into assembly; returns (source, instructions, deferred, raw)."""
+    return insns_to_asm(parse_dis(gnu_dis(code, work)))
 
 
 def check_corpus():
@@ -330,7 +396,193 @@ def check_corpus():
     return bad == 0
 
 
+# ------------------------------------------------------------------ objdump
+OBJDUMP = os.path.join(ROOT, 'build', 'host', 'objdump')
+GNU_ANY_RE = re.compile(r'^\s*([0-9a-f]+):\t([0-9a-f]{4}(?: [0-9a-f]{4})?) *\t(.*)$')
+OUR_RE = re.compile(r'^ *([0-9a-f]+):\t([0-9a-f]{4}(?: [0-9a-f]{4})?) *\t(\S+)(?:\t(.*))?$')
+
+
+def norm(ops):
+    """Operands without @ / ; comments and with single spaces."""
+    return ' '.join(re.split('[@;]', ops)[0].split())
+
+
+def gnu_all(code, work):
+    """Every line of GNU's disassembly: {addr: (bytes, mnemonic, operands)}, mnemonic '' for
+    undefined encodings."""
+    out = {}
+    for l in gnu_dis(code, work).splitlines():
+        m = GNU_ANY_RE.match(l)
+        if not m:
+            continue
+        b = b''.join(bytes.fromhex(h)[::-1] for h in m.group(2).split())
+        body = re.split('[@;]', m.group(3))[0].strip()
+        mn, _, ops = body.partition('\t')
+        out[int(m.group(1), 16)] = (b, mn.strip(), norm(ops))
+    return out
+
+
+def our_dis(path):
+    """Our objdump's DISASSEMBLY lines of a file: (source text, [(addr, bytes, mn, ops)], errors)."""
+    r = subprocess.run([OBJDUMP, path], capture_output=True, text=True)
+    errs = []
+    if r.returncode != 0:
+        errs.append('objdump exit status %d: %s' % (r.returncode, r.stdout.strip()[:200]))
+    lines = r.stdout.splitlines()
+    if 'DISASSEMBLY:' not in lines or 'DATA:' not in lines:
+        return '', [], errs + ['no DISASSEMBLY: / DATA: section']
+    part = lines[lines.index('DISASSEMBLY:') + 1:lines.index('DATA:')]
+    insns = []
+    for l in part:
+        m = OUR_RE.match(l)
+        if not m:
+            errs.append('bad line %r' % l)
+            continue
+        addr, hexcol, mn, ops = int(m.group(1), 16), m.group(2), m.group(3), m.group(4) or ''
+        want = '%8x:\t%-10s\t%s' % (addr, hexcol + ' ' if ' ' in hexcol else hexcol, mn) + ('\t' + ops if ops else '')
+        if l != want:
+            errs.append('line format %r, expected %r' % (l, want))
+        b = b''.join(bytes.fromhex(h)[::-1] for h in hexcol.split())
+        insns.append((addr, b, mn, re.sub(r'\s*<[^<>]*>$', '', ops)))
+    return '\n'.join(part) + '\n', insns, errs
+
+
+CONDS = ['eq', 'ne', 'cs', 'cc', 'mi', 'pl', 'vs', 'vc', 'hi', 'ls', 'ge', 'lt', 'gt', 'le', 'al']
+IT_RE = re.compile(r'^it([te]{0,3})$')
+
+
+def it_conds(mn, ops):
+    """The conditions of the instructions of an IT block, from GNU's "itte\tCOND"."""
+    m = IT_RE.match(mn)
+    if not m or ops not in CONDS:
+        return None
+    c = CONDS.index(ops)
+    inv = CONDS[c ^ 1] if c < 14 else ops
+    return [ops] + [ops if x == 't' else inv for x in m.group(1)]
+
+
+def assembles_to(mn, ops, b, work, block=None):
+    """1 if build/host/as assembles the instruction (as GNU prints it) to the bytes b; inside an IT
+    block (block: the conditions of this and the remaining instructions of the block) at the same
+    place in a block of the same conditions, the rest filled with nop."""
+    mn, ops = as_form(mn, ops)
+    t = '\t%s\t%s\n' % (mn, ops)
+    skip = 0
+    if block:
+        t = '\tit%s\t%s\n' % (''.join('t' if c == block[0] else 'e' for c in block[1:]), block[0]) + t
+        t += ''.join('\tnop%s\n' % c for c in block[1:])
+        skip = 2
+    open(work + '.s', 'w').write('\t.syntax unified\n\t.thumb\n\t.text\n' + t)
+    o, err = ours(work + '.s', work + '.o')
+    return o is not None and o[0][skip:skip + len(b)] == b
+
+
+def check_objdump_file(name, path, code, work, stats):
+    """Our objdump of path (whose text/code is code) against GNU's, then the round trip."""
+    ok = True
+    src, mine, errs = our_dis(path)
+    for e in errs[:5]:
+        print('FAIL %s: %s' % (name, e))
+    if errs:
+        return False
+    gnu_lines = gnu_all(code, work)
+    at = {}
+    for a, b, mn, ops in mine:
+        if code[a:a + len(b)] != b:
+            print('FAIL %s: 0x%x: bytes %s, the file has %s' % (name, a, b.hex(), code[a:a + len(b)].hex()))
+            return False
+        at[a] = (b, mn, ops)
+    if sum(len(b) for _, b, _, _ in mine) != len(code):
+        print('FAIL %s: the disassembly covers %d of %d bytes' % (name, sum(len(b) for _, b, _, _ in mine), len(code)))
+        return False
+    bad = 0
+    block = []                       # GNU's IT state: conditions of the rest of the block
+    for a in sorted(gnu_lines):
+        gb, gmn, gops = gnu_lines[a]
+        here = block
+        block = block[1:]
+        if it_conds(gmn, gops):
+            block = it_conds(gmn, gops)
+        if a not in at:
+            print('FAIL %s: 0x%x: no line in our disassembly (GNU: %s %s)' % (name, a, gmn, gops))
+            bad += 1
+            continue
+        b, mn, ops = at[a]
+        if mn == '.short':
+            covered = 0
+            while covered < len(gb) and a + covered in at and at[a + covered][1] == '.short':
+                covered += 2
+            if covered != len(gb):
+                print('FAIL %s: 0x%x: GNU decodes %d bytes (%s %s), ours not as .short' % (name, a, len(gb), gmn, gops))
+                bad += 1
+            elif gmn == '':
+                stats['undefined'] += 1
+            elif BRANCH_RE.match(gmn) or not assembles_to(gmn, gops, gb, work + '-one', here):
+                stats['notas'] += 1
+                stats['notas_mn'][gmn] = stats['notas_mn'].get(gmn, 0) + 1
+            else:
+                print('FAIL %s: 0x%x: .short for %s %s, which as assembles to these bytes' % (name, a, gmn, gops))
+                bad += 1
+            continue
+        if b != gb or mn != gmn or norm(ops) != gops:
+            if bad < 10:
+                print('FAIL %s: 0x%x %s: ours %s %s, GNU %s %s' % (name, a, b.hex(), mn, ops, gmn, gops))
+            bad += 1
+            continue
+        stats['equal'] += 1
+    stats['mismatch'] += bad
+    if bad:
+        ok = False
+    # round trip: the corpus converter on our output, reassembled with build/host/as
+    asm, n, nd, nr = insns_to_asm(mine)
+    open(work + '.rt.s', 'w').write(asm)
+    o, err = ours(work + '.rt.s', work + '.rt.o')
+    if o is None:
+        print('FAIL %s: round trip: build/host/as: %s' % (name, err))
+        ok = False
+    elif not compare(name + ' (round trip)', 'code', o[0], code):
+        ok = False
+    return ok
+
+
+def check_objdump_corpus():
+    bins = build_corpus()
+    work = os.path.join(WORK, 'objdump')
+    os.makedirs(work, exist_ok=True)
+    files = []                       # (name, path, code)
+    for f in bins:
+        d = open(f, 'rb').read()
+        csize = struct.unpack('<i', d[4:8])[0]
+        files.append((f, f, d[20:20 + csize]))
+    sample = os.path.join(ROOT, 'build', 'obj', 'sample.o')
+    if not os.path.exists(sample):
+        subprocess.run([sys.executable, os.path.join(ROOT, 'tests', 'obj', 'mkobj.py'), sample], check=True)
+    objs = [sample]
+    for src in ('core.s', 'fpu.s', 'reloc.s'):
+        obj = os.path.join(work, src[:-2] + '.o')
+        r = subprocess.run([AS, '-o', obj, os.path.join(ROOT, 'tests', 'asm', src)], capture_output=True, text=True)
+        if r.returncode != 0:
+            print('FAIL tests/asm/%s: build/host/as: %s' % (src, (r.stdout + r.stderr).strip()))
+            return False
+        objs.append(obj)
+    for obj in objs:
+        files.append((obj, obj, parse_t2obj(obj)[0]))
+    stats = {'equal': 0, 'notas': 0, 'undefined': 0, 'mismatch': 0, 'notas_mn': {}}
+    failed = 0
+    for name, path, code in files:
+        base = os.path.join(work, os.path.basename(os.path.dirname(path)) + '-' + os.path.basename(path).replace('.', '-'))
+        if not check_objdump_file(os.path.relpath(name, ROOT), path, code, base, stats):
+            failed += 1
+    print('objdump corpus: %d files, %d instructions equal to GNU objdump, %d mismatches; .short: %d '
+          'undefined for GNU, %d that as does not assemble (%s); %d files failed (round trip included)'
+          % (len(files), stats['equal'], stats['mismatch'], stats['undefined'], stats['notas'],
+             ', '.join('%s %d' % kv for kv in sorted(stats['notas_mn'].items())) or 'none', failed))
+    return failed == 0
+
+
 def main(argv):
+    if len(argv) > 1 and argv[1] == '--objdump-corpus':
+        return 0 if check_objdump_corpus() else 1
     if len(argv) > 1 and argv[1] == '--corpus':
         return 0 if check_corpus() else 1
     if len(argv) == 3 and argv[1] == '--relocs':

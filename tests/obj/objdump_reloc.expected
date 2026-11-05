@@ -1,0 +1,146 @@
+build/obj/reloc.o: T2DOS object, text 260 bytes, data 32 bytes, 14 symbols, 44 relocations
+SYMBOLS:
+00000100 t .Linit
+00000000 d .data
+00000000 t .text
+00000064 a CONST
+12344567 a FWD
+0000012c a FWD12
+         U ext
+         U ext2
+         U extd
+0000000c D gdat
+00000032 T gfun
+00000004 d ldat
+00000000 t lfun
+         U puts
+RELOCATIONS:
+text 0000000c R_BL ext+0
+text 00000010 R_BL ext-4
+text 00000014 R_BL puts+0
+text 0000001a R_BW ext+0
+text 0000001e R_BW ext2+8
+text 00000024 R_BCOND ext+0
+text 00000028 R_BCOND ext2+0
+text 0000002e R_BW ext+0
+text 00000050 R_FNADDR ext+0
+text 0000005a R_FNADDR ext2+4
+text 00000064 R_DATA_ADDW ldat+0
+text 00000068 R_DATA_ADDW gdat+4
+text 0000006c R_DATA_ADDW .data+8
+text 00000070 R_DATA_ADDW .data+10
+text 00000074 R_DATA_ADDW extd+0
+text 00000078 R_DATA_ADDW lfun+0
+text 0000007c R_DATA_ADDW .text+98
+text 00000088 R_DATA_MOVW ldat+0
+text 0000008c R_DATA_MOVT ldat+0
+text 00000090 R_DATA_MOVW gdat+6
+text 00000094 R_DATA_MOVT gdat+6
+text 00000098 R_DATA_MOVW .data+12
+text 0000009c R_DATA_MOVT .data+12
+text 000000a0 R_DATA_MOVW extd+0
+text 000000a4 R_DATA_MOVT extd-1
+text 000000a8 R_DATA_MOVW gfun+0
+text 000000ac R_DATA_MOVT .text+100
+text 000000b8 R_DATA_MOVW16 ldat+0
+text 000000bc R_DATA_MOVW16 gdat+2
+text 000000c0 R_DATA_MOVW16 .data+8
+text 000000c4 R_DATA_MOVW16 extd+100
+text 000000c8 R_DATA_MOVW16 lfun+0
+text 000000d4 R_WORD lfun+0
+text 000000d8 R_WORD gfun+4
+text 000000dc R_WORD .text+100
+text 000000e0 R_WORD ldat+0
+text 000000e4 R_WORD gdat+0
+text 000000e8 R_WORD .data+0
+text 000000ec R_WORD ext+0
+text 000000f0 R_WORD .text+240
+data 0000000c R_WORD lfun+0
+data 00000010 R_WORD .text+101
+data 00000014 R_WORD ext+12
+data 00000018 R_WORD .data+8
+DISASSEMBLY:
+       0:	f7ff fffe 	bl	0x0 <lfun>
+       4:	f000 f815 	bl	0x32 <gfun>
+       8:	f000 f82c 	bl	0x64 <gfun+0x32>
+       c:	f000 f800 	bl	0x10
+      10:	f000 f800 	bl	0x14
+      14:	f000 f800 	bl	0x18
+      18:	e7f2      	b.n	0x0 <lfun>
+      1a:	f000 b800 	b.w	0x1e
+      1e:	f000 b800 	b.w	0x22
+      22:	d006      	beq.n	0x32 <gfun>
+      24:	f000 8000 	beq.w	0x28
+      28:	f040 8000 	bne.w	0x2c
+      2c:	bf08      	it	eq
+      2e:	f000 b800 	beq.w	0x32
+      32:	f64f 70c3 	movw	r0, #65475
+      36:	f6cf 70ff 	movt	r0, #65535
+      3a:	4478      	add	r0, pc
+      3c:	f64f 71eb 	movw	r1, #65515
+      40:	f6cf 71ff 	movt	r1, #65535
+      44:	4479      	add	r1, pc
+      46:	f240 0213 	movw	r2, #19
+      4a:	f2c0 0200 	movt	r2, #0
+      4e:	447a      	add	r2, pc
+      50:	f240 0300 	movw	r3, #0
+      54:	f2c0 0300 	movt	r3, #0
+      58:	447b      	add	r3, pc
+      5a:	f240 0c00 	movw	ip, #0
+      5e:	f2c0 0c00 	movt	ip, #0
+      62:	44fc      	add	ip, pc
+      64:	f209 0000 	addw	r0, r9, #0
+      68:	f209 0100 	addw	r1, r9, #0
+      6c:	f209 0200 	addw	r2, r9, #0
+      70:	f209 0300 	addw	r3, r9, #0
+      74:	f209 0400 	addw	r4, r9, #0
+      78:	f209 0500 	addw	r5, r9, #0
+      7c:	f209 0600 	addw	r6, r9, #0
+      80:	f209 0764 	addw	r7, r9, #100
+      84:	f209 182c 	addw	r8, r9, #300
+      88:	f240 0000 	movw	r0, #0
+      8c:	f2c0 0000 	movt	r0, #0
+      90:	f240 0100 	movw	r1, #0
+      94:	f2c0 0100 	movt	r1, #0
+      98:	f240 0200 	movw	r2, #0
+      9c:	f2c0 0200 	movt	r2, #0
+      a0:	f240 0300 	movw	r3, #0
+      a4:	f2c0 0300 	movt	r3, #0
+      a8:	f240 0400 	movw	r4, #0
+      ac:	f2c0 0400 	movt	r4, #0
+      b0:	f240 0564 	movw	r5, #100
+      b4:	f2c1 2534 	movt	r5, #4660
+      b8:	f240 0000 	movw	r0, #0
+      bc:	f240 0100 	movw	r1, #0
+      c0:	f240 0200 	movw	r2, #0
+      c4:	f240 0300 	movw	r3, #0
+      c8:	f240 0400 	movw	r4, #0
+      cc:	f240 0565 	movw	r5, #101
+      d0:	f240 162d 	movw	r6, #301
+      d4:	0000      	movs	r0, r0
+      d6:	0000      	movs	r0, r0
+      d8:	0000      	movs	r0, r0
+      da:	0000      	movs	r0, r0
+      dc:	0000      	movs	r0, r0
+      de:	0000      	movs	r0, r0
+      e0:	0000      	movs	r0, r0
+      e2:	0000      	movs	r0, r0
+      e4:	0000      	movs	r0, r0
+      e6:	0000      	movs	r0, r0
+      e8:	0000      	movs	r0, r0
+      ea:	0000      	movs	r0, r0
+      ec:	0000      	movs	r0, r0
+      ee:	0000      	movs	r0, r0
+      f0:	0000      	movs	r0, r0
+      f2:	0000      	movs	r0, r0
+      f4:	0064      	lsls	r4, r4, #1
+      f6:	0000      	movs	r0, r0
+      f8:	4567      	cmp	r7, ip
+      fa:	1234      	asrs	r4, r6, #8
+      fc:	0032      	movs	r2, r6
+      fe:	0000      	movs	r0, r0
+     100:	4770      	bx	lr
+     102:	bf00      	nop
+DATA:
+00000000  00 00 00 00 01 00 00 00 02 00 00 00 00 00 00 00
+00000010  00 00 00 00 00 00 00 00 00 00 00 00 08 00 00 00

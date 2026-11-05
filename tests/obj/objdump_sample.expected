@@ -1,0 +1,19 @@
+build/obj/sample.o: T2DOS object, text 16 bytes, data 8 bytes, 4 symbols, 1 relocations
+SYMBOLS:
+00000004 D counter
+00000008 t helper
+00000000 T main
+         U puts
+RELOCATIONS:
+text 00000004 R_BL puts+0
+DISASSEMBLY:
+       0:	0000      	movs	r0, r0
+       2:	0000      	movs	r0, r0
+       4:	0000      	movs	r0, r0
+       6:	0000      	movs	r0, r0
+       8:	0000      	movs	r0, r0
+       a:	0000      	movs	r0, r0
+       c:	0000      	movs	r0, r0
+       e:	0000      	movs	r0, r0
+DATA:
+00000000  00 00 00 00 00 00 00 00
