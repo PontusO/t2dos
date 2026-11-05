@@ -1,0 +1,1 @@
+tests/asm/errors/undef-label.s:5: error: undefined symbol '.Lnowhere'

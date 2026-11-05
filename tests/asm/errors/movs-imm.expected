@@ -1,0 +1,1 @@
+tests/asm/errors/movs-imm.s:3: error: immediate out of range

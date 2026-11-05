@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): compiler/cc.c sys.h
 	gcc -O2 -w -I . -o $@ compiler/cc.c
@@ -21,6 +21,13 @@ build/host/%: binutils/%.c lib/t2obj.h lib/t2obj.c
 root/bin/%.bin: binutils/%.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
 	@mkdir -p root/bin
 	./$(CC_HOST) -I lib -o $@ $<
+# the assembler: same pattern, source in assembler/
+build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
+	@mkdir -p build/host
+	gcc -O2 -w -I lib -I . -o $@ assembler/as.c
+root/bin/as.bin: assembler/as.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
+	@mkdir -p root/bin
+	./$(CC_HOST) -I lib -o $@ assembler/as.c
 root/lib/t2obj.h: lib/t2obj.h
 	@mkdir -p root/lib && cp lib/t2obj.h root/lib/
 root/lib/t2obj.c: lib/t2obj.c
@@ -38,7 +45,7 @@ ref:
 	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm
+check: build/host/nm build/host/as
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message
@@ -49,6 +56,8 @@ check: build/host/nm
 	@out=$$(build/host/nm build/obj/missing.o); st=$$?; \
 	  if [ $$st -ne 1 ] || [ "$$out" != "nm: cannot read build/obj/missing.o" ]; then echo "FAIL missing: status $$st, output '$$out'"; exit 1; fi
 	@echo bad-object checks ok
+	python3 tools/check_asm.py tests/asm/core.s
+	python3 tools/check_asm.py --errors tests/asm/errors/*.s
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin

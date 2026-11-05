@@ -1,0 +1,1 @@
+tests/asm/errors/byte-range.s:6: error: value out of range

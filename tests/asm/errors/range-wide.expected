@@ -1,0 +1,1 @@
+tests/asm/errors/range-wide.s:6: error: branch out of range

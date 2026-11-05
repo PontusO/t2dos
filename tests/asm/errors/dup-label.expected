@@ -1,0 +1,1 @@
+tests/asm/errors/dup-label.s:5: error: symbol 'loop' already defined

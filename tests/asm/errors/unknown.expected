@@ -1,0 +1,1 @@
+tests/asm/errors/unknown.s:4: error: unknown instruction 'frob'

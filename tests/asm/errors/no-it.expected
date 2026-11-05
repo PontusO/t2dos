@@ -1,0 +1,1 @@
+tests/asm/errors/no-it.s:3: error: conditional instruction outside an IT block
