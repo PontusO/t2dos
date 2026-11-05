@@ -138,7 +138,7 @@ static int fmt_num(char *out, unsigned v, int base, int neg) {
 }
 // %[-][0][width]d x c s %  ->  returns length written (buffer is limited to max)
 static int k_format(char *out, int max, const char *fmt, int *argv, int n, int first) {
-  int o = 0, ai = first; char tmp[16];
+  int o = 0, ai = first; char tmp[64];
   #define A(i) (argv[n - 1 - (i)])
   #define PUT(c) do { if (o < max - 1) out[o] = (c); o++; } while (0)
   for (const char *f = fmt; *f; f++) {
@@ -148,6 +148,8 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
     if (*f == '-') { left = 1; f++; }
     if (*f == '0') { zero = 1; f++; }
     while (*f >= '0' && *f <= '9') width = width * 10 + *f++ - '0';
+    int prec = -1;
+    if (*f == '.') { f++; prec = 0; while (*f >= '0' && *f <= '9') prec = prec * 10 + *f++ - '0'; }
     const char *s = tmp; int len;
     if (*f == 'd') { int v = A(ai++); len = fmt_num(tmp, v < 0 ? -v : v, 10, v < 0); }
     else if (*f == 'u') { len = fmt_num(tmp, A(ai++), 10, 0); }
@@ -155,7 +157,16 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
     else if (*f == 'c') { tmp[0] = A(ai++); len = 1; }
     else if (*f == 's') { s = (const char *)A(ai++); if (!s) s = "(null)"; len = strlen(s); }
     else if (*f == '%') { tmp[0] = '%'; len = 1; }
+    else if (*f == 'f' || *f == 'e' || *f == 'g') {     // the argument is a float's bits (T2CC floats are 32-bit)
+      union { int i; float v; } u; u.i = A(ai++);
+      char spec[8] = { '%', '.', 0 }; int sp = 2, pr = prec < 0 ? 6 : (prec > 30 ? 30 : prec);
+      if (pr >= 10) spec[sp++] = '0' + pr / 10;
+      spec[sp++] = '0' + pr % 10; spec[sp++] = *f; spec[sp] = 0;
+      len = snprintf(tmp, sizeof tmp, spec, (double)u.v);
+      if (len < 0) len = 0; if (len >= (int)sizeof tmp) len = sizeof tmp - 1;
+    }
     else { PUT('%'); PUT(*f); continue; }
+    if (!left && zero && *f != 's' && s[0] == '-') { PUT('-'); s++; len--; width--; }   // -0005, not 00-5
     if (!left) for (int i = len; i < width; i++) PUT(zero && *f != 's' ? '0' : ' ');
     for (int i = 0; i < len; i++) PUT(s[i]);
     if (left) for (int i = len; i < width; i++) PUT(' ');
@@ -399,6 +410,10 @@ static void recovery(char *line) {
 }
 
 void setup() {
+#if defined(PICO_RP2350)
+  *(volatile uint32_t *)0xE000ED88 |= 0xF << 20;   // CPACR: programs use the FPU (CP10, CP11)
+  asm volatile("dsb\n isb");
+#endif
   Serial.begin(115200);
   while (!Serial) {}
   Wire.begin(); SPI.begin();

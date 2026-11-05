@@ -18,7 +18,7 @@
 // ------------------------------------------------------------------ tokens
 enum { Num = 128, Str, Id,
   Break, Case, Char, Continue, Default, Else, Enum, For, If, Int, Return, Sizeof, Struct, Switch, Typedef, Void, While,
-  Long, Short, Signed, Unsigned,
+  Long, Short, Signed, Unsigned, Float, Double,
   Assign, AddA, SubA, MulA, DivA, ModA, AndA, OrA, XorA, ShlA, ShrA, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr,
   Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak };
 
@@ -27,7 +27,7 @@ enum { CNum = 1, CFun, CSys, CGlo, CLoc };   // 6 = global array, 8 = typedef
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
 // FN marks a function type; bits 22.. index fnret[] (its return type). A function
 // designator has 0 pointer levels, a function pointer 1.
-enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TSTRUCT = 6, PTR = 256, ARR = 1048576, FN = 2097152 };
+enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TFLOAT = 6, TSTRUCT = 7, PTR = 256, ARR = 1048576, FN = 2097152 };
 
 #include "sys.h"
 
@@ -81,14 +81,28 @@ enum {
   I_SDIV_R2_R1_R0 = 0xFB91, I_SDIV_R2_R1_R0_2 = 0xF2F0,
   I_UDIV_R2_R1_R0 = 0xFBB1, I_UDIV_R2_R1_R0_2 = 0xF2F0,
   I_SDIV_R0_R0_R2 = 0xFB90, I_SDIV_R0_R0_R2_2 = 0xF0F2,
-  I_MLS_R0_R2_R0_R1 = 0xFB02, I_MLS_R0_R2_R0_R1_2 = 0x1010   // mls r0,r2,r0,r1: r0 = r1 - r2 * r0
+  I_MLS_R0_R2_R0_R1 = 0xFB02, I_MLS_R0_R2_R0_R1_2 = 0x1010,  // mls r0,r2,r0,r1: r0 = r1 - r2 * r0
+  // single precision FPU (floats live in r0 as bits; s0/s1 only for the operation)
+  I_VMOV_S0_R0 = 0xEE00, I_VMOV_S0_R0_2 = 0x0A10, I_VMOV_S1_R0 = 0xEE00, I_VMOV_S1_R0_2 = 0x0A90,
+  I_VMOV_S0_R1 = 0xEE00, I_VMOV_S0_R1_2 = 0x1A10, I_VMOV_S1_R2 = 0xEE00, I_VMOV_S1_R2_2 = 0x2A90,
+  I_VMOV_R0_S0 = 0xEE10, I_VMOV_R0_S0_2 = 0x0A10, I_VMOV_R2_S0 = 0xEE10, I_VMOV_R2_S0_2 = 0x2A10,
+  I_VADD = 0xEE30, I_VADD_2 = 0x0A20, I_VSUB = 0xEE30, I_VSUB_2 = 0x0A60,      // vadd/vsub.f32 s0,s0,s1
+  I_VMUL = 0xEE20, I_VMUL_2 = 0x0A20, I_VDIV = 0xEE80, I_VDIV_2 = 0x0A20,      // vmul/vdiv.f32 s0,s0,s1
+  I_VNEG = 0xEEB1, I_VNEG_2 = 0x0A40,                                          // vneg.f32 s0,s0
+  I_VCMP = 0xEEB4, I_VCMP_2 = 0x0A60,                                          // vcmp.f32 s0,s1
+  I_VMRS = 0xEEF1, I_VMRS_2 = 0xFA10,                                          // vmrs APSR_nzcv,fpscr
+  I_VCVT_F_S_S0 = 0xEEB8, I_VCVT_F_S_S0_2 = 0x0AC0, I_VCVT_F_U_S0 = 0xEEB8, I_VCVT_F_U_S0_2 = 0x0A40,   // f32 <- s32/u32
+  I_VCVT_F_S_S1 = 0xEEF8, I_VCVT_F_S_S1_2 = 0x0AE0, I_VCVT_F_U_S1 = 0xEEF8, I_VCVT_F_U_S1_2 = 0x0A60,
+  I_VCVT_S_F_S0 = 0xEEBD, I_VCVT_S_F_S0_2 = 0x0AC0, I_VCVT_U_F_S0 = 0xEEBC, I_VCVT_U_F_S0_2 = 0x0AC0,   // s32/u32 <- f32, toward 0
+  I_LSLS_R1_R0_1 = 0x0041                                                       // the float truth test: zero unless +-0
 };
 // condition codes (it, b<cond>)
-enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_HI = 8, CC_LS = 9, CC_GE = 10, CC_LT = 11, CC_GT = 12, CC_LE = 13 };
+enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_MI = 4, CC_HI = 8, CC_LS = 9, CC_GE = 10, CC_LT = 11, CC_GT = 12, CC_LE = 13 };
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
              int hclass; int htype; int hval; int fix; int stag;
-             int mdef; char *mbody; char **margs; int mnargs; int mvar; };   // macro: defined, body, params (-1: object-like), ...
+             int mdef; char *mbody; char **margs; int mnargs; int mvar;
+             int *ptypes; int nptypes; };   // parameter types of a function, for argument conversion   // macro: defined, body, params (-1: object-like), ...
 struct Mem { struct Sym *id; int type; int off; int next; int cnt; };   // cnt: array member length, else -1
 
 // ------------------------------------------------------------------ state
@@ -113,6 +127,7 @@ int nparams;
 int fnrty;               // return type of the function being compiled
 
 int *fnret; int nfn;     // function types: return type of each
+int **fnparams; int *fnnp; // and parameter types (fnnp -1: not known), for argument conversion
 int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
 struct Sym *dname; int darr;                       // set by declarator(): name, array size, -1 none, -2 for []
 int pb; int pb_tk; int pb_ival; struct Sym *pb_id; int pb_numty;   // one token pushed back by next()
@@ -135,7 +150,7 @@ char *incdir;
 
 int preprocess(); int lex(); int expand(struct Sym *m); int expanding(struct Sym *m); int intern(char *s, int n); int idstart(int c); int idchar(int c);
 int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
-int declarator(int t); int die(char *msg); int expr_comma();
+int declarator(int t); int die(char *msg); int expr_comma(); int itcc(int cond); int param_types(int *pl);
 
 // ------------------------------------------------------------------ helpers
 int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); exit(1); return 0; }
@@ -193,23 +208,35 @@ int lea_glo(int off) {
   return 0;
 }
 // function types
-int fntype(int ret) {
-  int k;
-  k = 0; while (k < nfn) { if (fnret[k] == ret) return FN | k << 22; k = k + 1; }
+int fntype_p(int ret, int *pl, int np) {
+  int k; int i; int same;
+  k = 0;
+  while (k < nfn) {
+    if (fnret[k] == ret && fnnp[k] == np) {
+      same = 1; i = 0; while (i < np) { if (fnparams[k][i] != pl[i]) same = 0; i = i + 1; }
+      if (same) return FN | k << 22;
+    }
+    k = k + 1;
+  }
   if (nfn >= 512) die("too many function types");
-  fnret[nfn] = ret; nfn = nfn + 1;
+  fnret[nfn] = ret; fnnp[nfn] = np; fnparams[nfn] = 0;
+  if (np > 0) { fnparams[nfn] = malloc(np * 4); i = 0; while (i < np) { fnparams[nfn][i] = pl[i]; i = i + 1; } }
+  nfn = nfn + 1;
   return FN | k << 22;
 }
+int fntype(int ret) { return fntype_p(ret, 0, -1); }
 int fnlevels(int t) { return (t >> 8) & 4095; }
 int isfn(int t) { return (t & FN) && fnlevels(t) <= 1; }          // designator or pointer: callable
 int isfndes(int t) { return (t & FN) && fnlevels(t) == 0; }       // designator: its value is its address
 int fnret_of(int t) { return fnret[(t >> 22) & 511]; }
+int fnnp_of(int t) { return fnnp[(t >> 22) & 511]; }
+int fnparam_of(int t, int i) { return fnparams[(t >> 22) & 511][i]; }
 
 // load r0 = *r0 according to type
 int load(int t) {
   if (isfndes(t)) return 0;                                  // a function is its own address
   if (t == TCHAR) { emit32(I_LDRSB_W_R0_R0, I_LDRSB_W_R0_R0_2); lastload = 4; }
-  else if (t == TINT || t == TUINT || t >= PTR) { emit16(I_LDR_R0_R0); lastload = 2; }
+  else if (t == TINT || t == TUINT || t == TFLOAT || t >= PTR) { emit16(I_LDR_R0_R0); lastload = 2; }
   else if (t == TUCHAR) { emit16(I_LDRB_R0_R0); lastload = 2; }
   else if (t == TSHORT) { emit32(I_LDRSH_W_R0_R0, I_LDRSH_W_R0_R0_2); lastload = 4; }
   else if (t == TUSHORT) { emit16(I_LDRH_R0_R0); lastload = 2; }
@@ -244,8 +271,41 @@ int conv(int t) {
   return 0;
 }
 // usual arithmetic conversions: small types promote to int; unsigned int wins
-int arith(int a, int b) { if (a == TUINT || b == TUINT) return TUINT; return TINT; }
+int arith(int a, int b) { if (a == TFLOAT || b == TFLOAT) return TFLOAT; if (a == TUINT || b == TUINT) return TUINT; return TINT; }
 int isuns(int a, int b) { return a < PTR && b < PTR && arith(a, b) == TUINT; }
+int isflt(int t) { return t == TFLOAT; }
+// r0 of type from as type to, where one of them is float (vcvt rounds toward zero)
+int cvt(int from, int to) {
+  if (from == to || from >= PTR || to >= PTR) return 0;
+  if (isflt(to) && !isflt(from)) {
+    emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2);
+    if (from == TUINT) emit32(I_VCVT_F_U_S0, I_VCVT_F_U_S0_2); else emit32(I_VCVT_F_S_S0, I_VCVT_F_S_S0_2);
+    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2);
+  }
+  else if (isflt(from) && !isflt(to)) {
+    emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2);
+    if (to == TUINT) emit32(I_VCVT_U_F_S0, I_VCVT_U_F_S0_2); else emit32(I_VCVT_S_F_S0, I_VCVT_S_F_S0_2);
+    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2);
+    conv(to);
+  }
+  return 0;
+}
+// assignment, initializer, argument: convert the value in r0 (type ty) for a t
+int assignconv(int t) { if (isflt(ty) || isflt(t)) cvt(ty, t); return 0; }
+// cast and return: also truncate to small integer types
+int castto(int t) { if (isflt(ty) || isflt(t)) cvt(ty, t); else conv(t); return 0; }
+// left (type t, in r1) and right (type ty, in r0) as floats in s0 and s1
+int fpair(int t) {
+  emit32(I_VMOV_S1_R0, I_VMOV_S1_R0_2);
+  if (!isflt(ty)) { if (ty == TUINT) emit32(I_VCVT_F_U_S1, I_VCVT_F_U_S1_2); else emit32(I_VCVT_F_S_S1, I_VCVT_F_S_S1_2); }
+  emit32(I_VMOV_S0_R1, I_VMOV_S0_R1_2);
+  if (!isflt(t)) { if (t == TUINT) emit32(I_VCVT_F_U_S0, I_VCVT_F_U_S0_2); else emit32(I_VCVT_F_S_S0, I_VCVT_F_S_S0_2); }
+  return 0;
+}
+// set flags for "is r0 true": cmp r0,#0, or for a float lsls r1,r0,#1 (+0 and -0 are false)
+// flags for "is r0 true", with r0 left 0 if it is false (a float -0.0 becomes 0): for && and ||
+int truth() { if (isflt(ty)) { test0(); itcc(CC_NE); } emit16(I_CMP_R0_0); return 0; }
+int test0() { if (isflt(ty)) emit16(I_LSLS_R1_R0_1); else emit16(I_CMP_R0_0); return 0; }
 
 // branches, all 32-bit so they can be patched. returns offset of instruction.
 int b_w(int target) {   // unconditional b.w to target (target<0: fixup later)
@@ -287,6 +347,11 @@ int imm2(int rd, int v) {
 }
 
 // compare r1 ? r0 -> r0 = 0/1 using IT block
+int itcc(int cond) {                     // r0 = cond ? 1 : 0, flags already set
+  emit16(I_IT | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);       // ite cond
+  emit16(I_MOVS_R0_1); emit16(I_MOVS_R0);                   // movs r0,#1 ; movs r0,#0
+  return 0;
+}
 int setcc(int cond) {
   emit16(I_CMP_R1_R0);
   emit16(I_IT | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);       // ite cond
@@ -502,6 +567,117 @@ int expand(struct Sym *m) {
   push_src(subst(m, args), m);
   return 1;
 }
+// ------------------------------------------------------------------ float literals
+// Decimal to IEEE single, correctly rounded, in integer arithmetic only (cc.c
+// itself cannot use float). The digits go into a big number of 16-bit limbs.
+int *bn; int bnl;
+int bn_muladd(int m, int a) {             // bn = bn * m + a, m and a small
+  int i; int c;
+  c = a; i = 0;
+  while (i < bnl) { c = bn[i] * m + c; bn[i] = c & 65535; c = c >> 16; i = i + 1; }
+  while (c) { if (bnl >= 250) die("float literal too long"); bn[bnl] = c & 65535; c = c >> 16; bnl = bnl + 1; }
+  return 0;
+}
+int bn_div10() {                          // bn = bn / 10, returns the remainder
+  int i; int r;
+  r = 0; i = bnl - 1;
+  while (i >= 0) { r = r * 65536 + bn[i]; bn[i] = r / 10; r = r % 10; i = i - 1; }
+  while (bnl > 1 && !bn[bnl - 1]) bnl = bnl - 1;
+  return r;
+}
+int bn_bit(int k) { if (k < 0 || k / 16 >= bnl) return 0; return (bn[k / 16] >> (k % 16)) & 1; }
+int bn_top() {                            // index of the highest set bit, -1 for zero
+  int i; int b;
+  i = bnl - 1; while (i >= 0 && !bn[i]) i = i - 1;
+  if (i < 0) return -1;
+  b = 15; while (!((bn[i] >> b) & 1)) b = b - 1;
+  return i * 16 + b;
+}
+int bn_below(int k) { int i; i = 0; while (i < k) { if (bn_bit(i)) return 1; i = i + 1; } return 0; }
+int bn_field(int at, int n) { int v; int i; v = 0; i = n - 1; while (i >= 0) { v = v * 2 + bn_bit(at + i); i = i - 1; } return v; }
+// bn * 2^-k (plus a nonzero tail if sticky) as float bits, rounded to nearest even
+int bn_float(int k, int sticky) {
+  int h; int at; int mant; int rnd; int e2; int ef;
+  h = bn_top();
+  if (h < 0) return 0;
+  at = h - 23;                            // lowest bit that fits in the 24-bit mantissa
+  if (at - k < -149) at = k - 149;        // subnormal: no bits below 2^-149
+  if (at > 0) {
+    mant = h - at + 1 > 0 ? bn_field(at, h - at + 1) : 0;
+    rnd = bn_bit(at - 1); if (bn_below(at - 1)) sticky = 1;
+  }
+  else { mant = bn_field(0, h + 1) << -at; rnd = 0; }
+  if (rnd && (sticky || (mant & 1))) mant = mant + 1;
+  e2 = at - k;                            // value = mant * 2^e2
+  if (mant == 16777216) { mant = mant >> 1; e2 = e2 + 1; }
+  if (mant >= 8388608) {
+    ef = e2 + 23 + 127;
+    if (ef >= 255) return 2139095040;     // infinity
+    return ef << 23 | (mant - 8388608);
+  }
+  return mant;                            // subnormal or 0
+}
+// the float literal at s: ival = its bits; returns the end (after any f/F/l/L)
+char *fl_parse(char *s) {
+  int e10; int nd; int sticky; int ex; int neg; int k; int n; int c;
+  bn[0] = 0; bnl = 1; e10 = 0; nd = 0; sticky = 0;
+  while (*s >= '0' && *s <= '9') {        // integer part; 200 digits decide even exact halfway cases
+    c = *s - '0';
+    if (nd < 200) { bn_muladd(10, c); if (nd || c) nd = nd + 1; } else { e10 = e10 + 1; if (c) sticky = 1; }
+    s = s + 1;
+  }
+  if (*s == '.') {
+    s = s + 1;
+    while (*s >= '0' && *s <= '9') {
+      c = *s - '0';
+      if (nd < 200) { bn_muladd(10, c); e10 = e10 - 1; if (nd || c) nd = nd + 1; } else if (c) sticky = 1;
+      s = s + 1;
+    }
+  }
+  if (*s == 'e' || *s == 'E') {
+    s = s + 1; neg = 0; ex = 0;
+    if (*s == '+') s = s + 1; else if (*s == '-') { neg = 1; s = s + 1; }
+    if (*s < '0' || *s > '9') die("bad float exponent");
+    while (*s >= '0' && *s <= '9') { if (ex < 10000) ex = ex * 10 + *s - '0'; s = s + 1; }
+    e10 = neg ? e10 - ex : e10 + ex;
+  }
+  while (*s == 'f' || *s == 'F' || *s == 'l' || *s == 'L') s = s + 1;
+  if (bn_top() < 0 || e10 + nd < -50) { ival = 0; return s; }
+  if (e10 + nd > 40) { ival = 2139095040; return s; }
+  k = 0;
+  if (e10 >= 0) { n = 0; while (n < e10) { bn_muladd(10, 0); n = n + 1; } }
+  else {                                  // shift left so the quotient keeps 26+ bits, then divide
+    n = -e10;
+    k = 28 + (n * 3322 + 999) / 1000 - bn_top(); if (k < 0) k = 0;
+    c = 0; while (c < k) { bn_muladd(2, 0); c = c + 1; }
+    while (n > 0) { if (bn_div10()) sticky = 1; n = n - 1; }
+  }
+  ival = bn_float(k, sticky);
+  return s;
+}
+int is_float_lit(char *s) {               // digits followed by . or an exponent (not hex)
+  if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) return 0;
+  while (*s >= '0' && *s <= '9') s = s + 1;
+  return *s == '.' || *s == 'e' || *s == 'E';
+}
+// compile time conversions, for constant initializers
+int int_to_float(int v, int uns) {
+  int neg; int b;
+  neg = 0;
+  if (!uns && v < 0) { neg = 1; v = -v; }   // -2^31 stays 0x80000000: as 16-bit limbs that is 2^31
+  bn[0] = v & 65535; bn[1] = (v >> 16) & 65535; bnl = 2;
+  b = bn_float(0, 0);
+  return neg ? b | (1 << 31) : b;
+}
+int float_to_int(int b) {                 // toward zero, like vcvt
+  int e; int m; int neg;
+  neg = b < 0; e = (b >> 23) & 255; m = (b & 8388607) | 8388608;
+  if (e < 127) return 0;
+  if (e > 157) return neg ? -2147483647 - 1 : 2147483647;
+  e = e - 150;
+  if (e >= 0) m = m << e; else m = m >> -e;
+  return neg ? -m : m;
+}
 int lex() {
   char *pp; int i; int c;
   while ((tk = *p)) {
@@ -517,6 +693,7 @@ int lex() {
       return 0;
     }
     else if (tk >= '0' && tk <= '9') {
+      if (is_float_lit(p - 1)) { p = fl_parse(p - 1); numty = TFLOAT; tk = Num; return 0; }
       if ((ival = tk - '0')) { while (*p >= '0' && *p <= '9') { ival = ival * 10 + *p - '0'; p = p + 1; } }
       else if (*p == 'x' || *p == 'X') {
         p = p + 1;
@@ -576,7 +753,10 @@ int lex() {
     else if (tk == '*') { if (*p == '=') { p = p + 1; tk = MulA; } else tk = Mul; return 0; }
     else if (tk == '[') { tk = Brak; return 0; }
     else if (tk == '?') { tk = Cond; return 0; }
-    else if (tk == '.') { tk = Dot; return 0; }
+    else if (tk == '.') {
+      if (*p >= '0' && *p <= '9') { p = fl_parse(p - 1); numty = TFLOAT; tk = Num; return 0; }   // .5
+      tk = Dot; return 0;
+    }
     else if (tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == ']' || tk == ',' || tk == ':') return 0;
   }
   // end of this file or macro expansion: pop the input stack
@@ -786,12 +966,12 @@ int tysize(int t) {
   if (t >= PTR) return 4;
   if (t == TCHAR || t == TUCHAR) return 1;
   if (t == TSHORT || t == TUSHORT) return 2;
-  if (t == TINT || t == TUINT) return 4;
+  if (t == TINT || t == TUINT || t == TFLOAT) return 4;
   return stsize[t - TSTRUCT];
 }
 
 // parse a base type (optionally with struct definition) and pointer stars
-int is_type() { return tk == Int || tk == Char || tk == Void || tk == Struct || tk == Long || tk == Short || tk == Signed || tk == Unsigned || (tk == Id && id->class == 8); }
+int is_type() { return tk == Int || tk == Char || tk == Void || tk == Struct || tk == Long || tk == Short || tk == Signed || tk == Unsigned || tk == Float || tk == Double || (tk == Id && id->class == 8); }
 
 int parse_type() {
   int bt; int mt; int si; int off; int sz; int al;
@@ -804,6 +984,7 @@ int parse_type() {
     if (al) bt = off ? TUCHAR : TCHAR; else if (sz) bt = off ? TUSHORT : TSHORT; else bt = off ? TUINT : TINT;
   }
   else if (tk == Void) { bt = TCHAR; next(); }
+  else if (tk == Float || tk == Double) { bt = TFLOAT; next(); }   // double is the 32-bit float too
   else if (tk == Id && id->class == 8) { bt = id->type; next(); }   // typedef name
   else if (tk == Struct) {
     next();
@@ -876,7 +1057,7 @@ int skip_params() {
 int cexpr();
 int cunary() {
   int v; int t;
-  if (tk == Num) { v = ival; next(); return v; }
+  if (tk == Num) { if (numty == TFLOAT) die("integer constant expected"); v = ival; next(); return v; }
   if (tk == Id && id->class == CNum) { v = id->val; next(); return v; }
   if (tk == Id && pp_if) { next(); return 0; }          // #if FOO with FOO not a macro
   if (tk == '(') { next(); v = cexpr(); if (tk != ')') die(") expected"); next(); return v; }
@@ -963,13 +1144,34 @@ int array_dim() {
   if (tk != ']') die("] expected"); next();
   return 0;
 }
+// ( types ) of a function pointer into pl[]; returns how many, -1 for ( )
+int param_types(int *pl) {
+  struct Sym *sv_name; int sv_arr; int n; int t; int isvoid;
+  if (tk != '(') die("( expected");
+  sv_name = dname; sv_arr = darr;           // declarator() is used for the parameters too
+  next(); n = 0;
+  if (tk == ')') { next(); dname = sv_name; darr = sv_arr; return -1; }
+  while (tk != ')') {
+    if (!is_type()) die("parameter type expected");
+    isvoid = tk == Void;
+    t = declarator(parse_type());
+    if (darr != -1) t = t + PTR;
+    if (isvoid && t == TCHAR && tk == ')' && !n) break;   // (void)
+    if (n < 16) pl[n] = t;
+    n = n + 1;
+    if (tk == ',') next(); else if (tk != ')') die(", or ) expected");
+  }
+  next();
+  dname = sv_name; darr = sv_arr;
+  return n < 16 ? n : 16;
+}
 // Declarator after a base type: stars, then a name (or none, for casts and
 // prototypes) and optional [N][M]..., or ( *name[N] ) followed by ( params ) for
 // a function pointer or by [M]... for a pointer to an array.
 // Returns the type (of an element, for arrays); sets dname (0 if no name) and
 // darr (outermost length, -1 if not an array, -2 for []).
 int declarator(int t) {
-  int ps; int inner;
+  int ps; int inner; int pl[16];
   while (tk == Mul) { next(); t = t + PTR; }
   dname = 0; darr = -1;
   if (tk == '(') {
@@ -983,8 +1185,8 @@ int declarator(int t) {
       inner = darr; parse_dims(); darr = inner;
       return rows_of(t, 0) + ps * PTR;
     }
-    skip_params();
-    return fntype(t) + ps * PTR;
+    inner = param_types(pl);
+    return fntype_p(t, pl, inner) + ps * PTR;
   }
   if (tk == Id) { dname = id; next(); }
   if (tk == Brak) { parse_dims(); t = rows_of(t, 1); darr = dims[0]; }
@@ -1017,7 +1219,7 @@ int fn_addr(struct Sym *f) {
 int call_ind(int t) {
   int n;
   push(); next(); n = 0;
-  while (tk != ')') { expr(Assign); push(); n = n + 1; if (tk == ',') next(); }
+  while (tk != ')') { expr(Assign); if (n < fnnp_of(t)) assignconv(fnparam_of(t, n)); push(); n = n + 1; if (tk == ',') next(); }
   next();
   if (n > 126) die("too many arguments");
   emit16(I_LDR_R1_SP | n);                      // the address, under the n args
@@ -1064,8 +1266,35 @@ int scale1(int n) {
 }
 
 // r0 = r1 op r0 where r1 has type t and r0 has type ty; sets ty to the result type
+// r0 = r1 op r0 for == != < > <= >= (left type t, right type ty)
+int relop(int op, int t) {
+  if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR) {          // vcmp; with a NaN only != is true
+    fpair(t); emit32(I_VCMP, I_VCMP_2); emit32(I_VMRS, I_VMRS_2);
+    if (op == Eq) itcc(CC_EQ); else if (op == Ne) itcc(CC_NE); else if (op == Lt) itcc(CC_MI);
+    else if (op == Gt) itcc(CC_GT); else if (op == Le) itcc(CC_LS); else itcc(CC_GE);
+    return 0;
+  }
+  if (op == Eq) setcc(CC_EQ); else if (op == Ne) setcc(CC_NE);
+  else if (op == Lt) setcc(isuns(t, ty) ? CC_LO : CC_LT); else if (op == Gt) setcc(isuns(t, ty) ? CC_HI : CC_GT);
+  else if (op == Le) setcc(isuns(t, ty) ? CC_LS : CC_LE); else setcc(isuns(t, ty) ? CC_HS : CC_GE);
+  return 0;
+}
+// s0 = r0 + 1.0 or r0 - 1.0 (float ++ and --)
+int fstep(int up) {
+  emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2); imm(2, 1065353216); emit32(I_VMOV_S1_R2, I_VMOV_S1_R2_2);   // 1.0f
+  if (up) emit32(I_VADD, I_VADD_2); else emit32(I_VSUB, I_VSUB_2);
+  return 0;
+}
 int binop(int op, int t) {
   int u;
+  if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR) {          // float arithmetic
+    fpair(t);
+    if (op == Add) emit32(I_VADD, I_VADD_2); else if (op == Sub) emit32(I_VSUB, I_VSUB_2);
+    else if (op == Mul) emit32(I_VMUL, I_VMUL_2); else if (op == Div) emit32(I_VDIV, I_VDIV_2);
+    else die("invalid operator for float");
+    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); ty = TFLOAT;
+    return 0;
+  }
   u = isuns(t, ty);
   if (op == Or)  { emit16(I_ORRS_R0_R1); ty = arith(t, ty); }
   else if (op == Xor) { emit16(I_EORS_R0_R1); ty = arith(t, ty); }
@@ -1111,7 +1340,7 @@ int expr(int lev) {
     d = id; next();
     if (tk == '(' && (d->class == CSys || d->class == CFun || d->class == 0)) {   // direct call
       next(); n = 0;
-      while (tk != ')') { expr(Assign); push(); n = n + 1; if (tk == ',') next(); }
+      while (tk != ')') { expr(Assign); if (n < d->nptypes) assignconv(d->ptypes[n]); push(); n = n + 1; if (tk == ',') next(); }
       next();
       if (d->class == CSys) call_sys(d->val, n);
       else if (d->class == CFun || d->class == 0) call_fn(d, n);
@@ -1120,7 +1349,7 @@ int expr(int lev) {
     }
     else if (d->class == CNum) { imm(0, d->val); ty = d->type; }
     else if (d->class == 6) { lea_glo(d->val); ty = d->type; }   // global array: address
-    else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype(d->type); }   // function as a value
+    else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype_p(d->type, d->ptypes, d->ptypes ? d->nptypes : -1); }   // function as a value
     else {
       if (d->class == CLoc) lea_loc(d->val);
       else if (d->class == CGlo) lea_glo(d->val);
@@ -1134,7 +1363,7 @@ int expr(int lev) {
     if (is_type()) {                          // cast
       t = declarator(parse_type());
       if (tk != ')') die(") expected in cast"); next();
-      expr(Inc); conv(t); ty = t;
+      expr(Inc); castto(t); ty = t;
     } else { expr_comma(); if (tk != ')') die(") expected"); next(); }
   }
   else if (tk == Mul) {                         // dereference
@@ -1150,21 +1379,29 @@ int expr(int lev) {
     if (isfndes(ty)) ty = ty + PTR;             // &f: the address is already in r0
     else { lvalue(); ty = ty + PTR; }
   }
-  else if (tk == '!') { next(); expr(Inc); emit16(I_CMP_R0_0); emit16(I_ITE_EQ); emit16(I_MOVS_R0_1); emit16(I_MOVS_R0); ty = TINT; }
-  else if (tk == '~') { next(); expr(Inc); emit16(I_MVNS_R0); ty = arith(ty, ty); }
+  else if (tk == '!') { next(); expr(Inc); test0(); emit16(I_ITE_EQ); emit16(I_MOVS_R0_1); emit16(I_MOVS_R0); ty = TINT; }
+  else if (tk == '~') { next(); expr(Inc); if (isflt(ty)) die("~ on a float"); emit16(I_MVNS_R0); ty = arith(ty, ty); }
   else if (tk == Add) { next(); expr(Inc); ty = arith(ty, ty); }
   else if (tk == Sub) {
     next();
-    if (tk == Num) { imm(0, -ival); ty = numty; next(); } else { expr(Inc); emit16(I_NEGS_R0); ty = arith(ty, ty); }
+    if (tk == Num) { imm(0, numty == TFLOAT ? ival ^ (1 << 31) : -ival); ty = numty; next(); }   // a float flips its sign bit
+    else {
+      expr(Inc);
+      if (isflt(ty)) { emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2); emit32(I_VNEG, I_VNEG_2); emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); }
+      else { emit16(I_NEGS_R0); ty = arith(ty, ty); }
+    }
   }
   else if (tk == Inc || tk == Dec) {            // prefix
     t = tk; next(); expr(Inc); lvalue();
-    sz = ty >= PTR ? tysize(ty - PTR) : 1;
-    emit16(I_MOV_R1_R0);
-    load_r1(ty);
-    if (t == Dec) sz = -sz;
-    if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R0_R0_R2); }
-    store(ty);
+    if (isflt(ty)) { emit16(I_MOV_R1_R0); load_r1(ty); fstep(t == Inc); emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); store(ty); }
+    else {
+      sz = ty >= PTR ? tysize(ty - PTR) : 1;
+      emit16(I_MOV_R1_R0);
+      load_r1(ty);
+      if (t == Dec) sz = -sz;
+      if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R0_R0_R2); }
+      store(ty);
+    }
   }
   else die("bad expression");
 
@@ -1173,33 +1410,34 @@ int expr(int lev) {
     t = ty;
     if (tk == '(') call_ind(t);
     else if (tk == Assign) {
-      next(); lvalue(); push(); expr(Assign); pop1(); store(t); ty = t;
+      next(); lvalue(); push(); expr(Assign); assignconv(t); pop1(); store(t); ty = t;
     }
     else if (tk == Cond) {
-      next(); emit16(I_CMP_R0_0); at = bc_w(CC_EQ);
+      next(); test0(); at = bc_w(CC_EQ);
       expr_comma();
       if (tk != ':') die(": expected"); next();
-      at2 = b_w(-1); patch_b(at, cpos);
-      expr(Cond); patch_b(at2, cpos);
+      t = ty; at2 = b_w(-1); patch_b(at, cpos);
+      expr(Cond);
+      if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR && t != ty) {   // the int branch becomes float
+        if (!isflt(ty)) cvt(ty, TFLOAT);
+        if (!isflt(t)) { m = b_w(-1); patch_b(at2, cpos); cvt(t, TFLOAT); at2 = m; }
+        ty = TFLOAT;
+      }
+      patch_b(at2, cpos);
     }
-    else if (tk == Lor) { next(); emit16(I_CMP_R0_0); at = bc_w(CC_NE); expr(Lan); patch_b(at, cpos); ty = TINT; }
-    else if (tk == Lan) { next(); emit16(I_CMP_R0_0); at = bc_w(CC_EQ); expr(Or); patch_b(at, cpos); ty = TINT; }
+    else if (tk == Lor) { next(); truth(); at = bc_w(CC_NE); expr(Lan); truth(); patch_b(at, cpos); itcc(CC_NE); ty = TINT; }
+    else if (tk == Lan) { next(); truth(); at = bc_w(CC_EQ); expr(Or); truth(); patch_b(at, cpos); itcc(CC_NE); ty = TINT; }
     else if (tk >= AddA && tk <= ShrA) {        // compound assignment
       n = tk; next(); lvalue(); push(); load(t); push(); expr(Assign); pop1();
       if (n == AddA) n = Add; else if (n == SubA) n = Sub; else if (n == MulA) n = Mul; else if (n == DivA) n = Div; else if (n == ModA) n = Mod;
       else if (n == AndA) n = And; else if (n == OrA) n = Or; else if (n == XorA) n = Xor; else if (n == ShlA) n = Shl; else n = Shr;
       binop(n, t);                              // r0 = old op rhs
-      pop1(); store(t); ty = t;
+      assignconv(t); pop1(); store(t); ty = t;
     }
     else if (tk == Or)  { next(); push(); expr(Xor); pop1(); binop(Or, t); }
     else if (tk == Xor) { next(); push(); expr(And); pop1(); binop(Xor, t); }
     else if (tk == And) { next(); push(); expr(Eq);  pop1(); binop(And, t); }
-    else if (tk == Eq)  { next(); push(); expr(Lt);  pop1(); setcc(CC_EQ); ty = TINT; }
-    else if (tk == Ne)  { next(); push(); expr(Lt);  pop1(); setcc(CC_NE); ty = TINT; }
-    else if (tk == Lt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_LO : CC_LT); ty = TINT; }
-    else if (tk == Gt)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_HI : CC_GT); ty = TINT; }
-    else if (tk == Le)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_LS : CC_LE); ty = TINT; }
-    else if (tk == Ge)  { next(); push(); expr(Shl); pop1(); setcc(isuns(t, ty) ? CC_HS : CC_GE); ty = TINT; }
+    else if (tk >= Eq && tk <= Ge) { n = tk; next(); push(); expr(n <= Ne ? Lt : Shl); pop1(); relop(n, t); ty = TINT; }
     else if (tk == Shl) { next(); push(); expr(Add); pop1(); binop(Shl, t); }
     else if (tk == Shr) { next(); push(); expr(Add); pop1(); binop(Shr, t); }
     else if (tk == Add) { next(); push(); expr(Mul); pop1(); binop(Add, t); }
@@ -1207,6 +1445,9 @@ int expr(int lev) {
     else if (tk == Mul) { next(); push(); expr(Inc); pop1(); binop(Mul, t); }
     else if (tk == Div) { next(); push(); expr(Inc); pop1(); binop(Div, t); }
     else if (tk == Mod) { next(); push(); expr(Inc); pop1(); binop(Mod, t); }
+    else if ((tk == Inc || tk == Dec) && isflt(ty)) {   // postfix on a float: r0 keeps the old value
+      lvalue(); emit16(I_MOV_R1_R0); load_r1(ty); fstep(tk == Inc); emit32(I_VMOV_R2_S0, I_VMOV_R2_S0_2); store_r2(ty); next();
+    }
     else if (tk == Inc || tk == Dec) {          // postfix
       lvalue();
       sz = ty >= PTR ? tysize(ty - PTR) : 1;
@@ -1281,14 +1522,17 @@ int poke(int off, int v, int t) {
   return 0;
 }
 // [-] number | enum or #define name, followed by , } or ;  ->  1, value in ival. Else 0, nothing consumed.
-int const_init() {
-  int neg; int v;
+int const_init(int t) {
+  int neg; int v; int vt;
   save_lex(); neg = 0;
   if (tk == Sub) { next(); neg = 1; }
-  if (tk == Num) v = ival; else if (tk == Id && id->class == CNum) v = id->val; else { restore_lex(); return 0; }
+  if (tk == Num) { v = ival; vt = numty; } else if (tk == Id && id->class == CNum) { v = id->val; vt = TINT; } else { restore_lex(); return 0; }
   next();
   if (tk != ',' && tk != '}' && tk != ';') { restore_lex(); return 0; }
-  ival = neg ? -v : v;
+  if (neg) { if (vt == TFLOAT) v = v ^ (1 << 31); else v = -v; }
+  if (isflt(t) && vt != TFLOAT) v = int_to_float(v, vt == TUINT);   // float f = 3;
+  else if (!isflt(t) && t < PTR && vt == TFLOAT) v = float_to_int(v);  // int i = 2.5;
+  ival = v;
   return 1;
 }
 // number of elements in the { ... } list (or string) that starts here; consumes nothing
@@ -1318,8 +1562,8 @@ int init_scalar(int t, int off) {
     if (tk != '}') die("} expected"); next();
     return 0;
   }
-  if (!ikind && const_init()) { poke(ibase + off, ival, t); return 0; }
-  init_code(); init_addr(off); push(); expr(Assign); pop1(); store(t);
+  if (!ikind && const_init(t)) { poke(ibase + off, ival, t); return 0; }
+  init_code(); init_addr(off); push(); expr(Assign); assignconv(t); pop1(); store(t);
   return 0;
 }
 int init_array(int et, int cnt, int off) {  // returns the number of elements given
@@ -1387,7 +1631,7 @@ int stmt() {
   if (tk == If) {
     next(); if (tk != '(') die("( expected"); next();
     expr_comma(); if (tk != ')') die(") expected"); next();
-    emit16(I_CMP_R0_0); at = bc_w(CC_EQ);       // false: to the else
+    test0(); at = bc_w(CC_EQ);                  // false: to the else
     stmt();
     if (tk == Else) { next(); at2 = b_w(-1); patch_b(at, cpos); stmt(); patch_b(at2, cpos); }
     else patch_b(at, cpos);
@@ -1397,7 +1641,7 @@ int stmt() {
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1; cont_tgt = cpos;
     expr_comma(); if (tk != ')') die(") expected"); next();
-    emit16(I_CMP_R0_0); at = bc_w(CC_EQ);
+    test0(); at = bc_w(CC_EQ);
     stmt();
     b_w(cont_tgt); patch_b(at, cpos);
     chain_patch(brk_fix, cpos, I_B_W_2);
@@ -1410,7 +1654,7 @@ int stmt() {
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1;
     at = cpos;                                  // condition
-    if (tk != ';') { expr_comma(); emit16(I_CMP_R0_0); at2 = bc_w(CC_EQ); } else at2 = -1;
+    if (tk != ';') { expr_comma(); test0(); at2 = bc_w(CC_EQ); } else at2 = -1;
     if (tk != ';') die("; expected"); next();
     body = b_w(-1);                             // skip increment first time
     cont_tgt = cpos;                            // increment
@@ -1457,7 +1701,7 @@ int stmt() {
   else if (tk == Continue) { next(); if (tk != ';') die("; expected"); next(); b_w(cont_tgt); }
   else if (tk == Return) {
     next();
-    if (tk != ';') { expr_comma(); conv(fnrty); }   // unsigned char f() { return 300; } gives 44
+    if (tk != ';') { expr_comma(); castto(fnrty); }   // unsigned char f() { return 300; } gives 44
     if (tk != ';') die("; expected"); next();
     ret_fix = chain_add(ret_fix, b_w(-1));
   }
@@ -1532,6 +1776,7 @@ int parse_global() {
       s->type = t; next();
       // prototype or definition? parse params either way
       n = 0; loc = 0; maxloc = 0;
+      if (!s->ptypes) s->ptypes = malloc(32 * 4);
       while (tk != ')') {
         bt = declarator(parse_type());
         if (darr != -1) bt = bt + PTR;          // int a[N] or a[] as a parameter is int *a
@@ -1540,10 +1785,12 @@ int parse_global() {
           dname->hclass = dname->class; dname->htype = dname->type; dname->hval = dname->val;
           dname->class = CLoc; dname->type = bt; dname->val = n;   // index, fixed up below
         }
+        if (n < 32) s->ptypes[n] = bt;
         n = n + 1;
         if (tk == ',') next();
       }
       next();
+      s->nptypes = n < 32 ? n : 32;
       if (tk == ';') {                          // prototype
         next();
         i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
@@ -1618,15 +1865,15 @@ int main(int argc, char **argv) {
   data = malloc(1048576); dpos = 0;
   fstack_p = malloc(64 * 4); fstack_line = malloc(64 * 4); fstack_mac = malloc(64 * 4); fdepth = 0;
   sv_fp = malloc(64 * 4); sv_fl = malloc(64 * 4); sv_fm = malloc(64 * 4); mbuf = malloc(65536);
-  tstack = malloc(64 * 4); tdepth = 0;
-  fnret = malloc(512 * 4); nfn = 0;
+  tstack = malloc(64 * 4); tdepth = 0; bn = malloc(256 * 4); bnl = 1;
+  fnret = malloc(512 * 4); fnparams = malloc(512 * 4); fnnp = malloc(512 * 4); nfn = 0;
   init_open = 0; init_head = -1; init_tail = -1;
   afix_at = malloc(4096 * 4); afix_sym = malloc(4096 * 4); naddr = 0;
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
   // keywords, in token enum order
-  p = "break case char continue default else enum for if int return sizeof struct switch typedef void while long short signed unsigned";
-  i = Break; while (i <= Unsigned) { next(); id->tk = i; i = i + 1; }
+  p = "break case char continue default else enum for if int return sizeof struct switch typedef void while long short signed unsigned float double";
+  i = Break; while (i <= Double) { next(); id->tk = i; i = i + 1; }
   // builtin host functions: name, syscall number (see sys.h)
   p = "exit 0 exec 1 millis 2 sleep 3 sysinfo 4 putchar 16 getchar 17 kbhit 18 conctl 19 redirect 20 open 32 close 33 read 34 write 35 seek 36 stat 37 unlink 38 rename 39 mkdir 40 rmdir 41 opendir 42 readdir 43 closedir 44 chdir 45 getcwd 46 malloc 64 free 65 memset 66 memcmp 67 memcpy 68 strlen 69 strcmp 70 strcpy 71 printf 72 sprintf 73 atoi 74 strncmp 75 strchr 76 net_join 80 net_status 81 net_ip 82 connect 83 send 84 recv 85 listen 86 accept 87 sock_avail 88 gpio_mode 96 gpio_write 97 gpio_read 98 analog_read 99 pwm_write 100 i2c_write 101 i2c_read 102 spi_transfer 103 delay_us 104";
   next();

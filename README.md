@@ -88,11 +88,12 @@ read/write/close; exec closes sockets a child leaked.
 - Console is a driver interface (`putc/getc/kbhit/ctl/width/height`); the serial
   driver is in; a display+keyboard driver is the same five methods.
 - `cc -I dir` adds an include directory (the Makefile uses `-I lib`); `cc -D NAME[=value]` defines a macro.
-- `printf`/`sprintf` are kernel-side: `%[-][0][width]d u x c s %%`.
+- `printf`/`sprintf` are kernel-side: `%[-][0][width][.prec]d u x c s f e g %%`; `%f %e %g` take a float.
 
 ## Language subset (compiler/cc.c)
 int char short void, unsigned and signed (`unsigned char`, `unsigned short`,
-`unsigned`), long (= int, 32 bits), pointers, structs (named or anonymous,
+`unsigned`), long (= int, 32 bits), float (and double, which is the same
+32-bit float: see below), pointers, structs (named or anonymous,
 array members),
 typedef, global/local arrays of any dimension, enum, `#include "file"` (also
 searched in /lib), macros (see below), all operators incl. ?: ++/--,
@@ -133,11 +134,17 @@ Conditional compilation: `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`
 (nested), `defined(X)` / `defined X`, `#error`. `#if` expressions are
 macro-expanded constant expressions; unknown names are 0. `__T2CC__` is
 predefined, and `cc -D NAME[=value]` defines a macro (value 1 by default).
-Not yet: float.
+Float: single precision on the RP2350's FPU. Literals `1.5`, `.5`, `1e-3`,
+`2.5f` are decoded at compile time, correctly rounded. C's conversions apply on
+assignment, casts, `return`, initializers and arguments (also through function
+pointers); arithmetic mixing int and float is float; comparisons follow IEEE
+(NaN compares unequal), and `-0.0` is false. `double` is accepted but is the
+same 32-bit float, so unsuffixed literals are float too (in C they are double).
+Not yet: 64-bit integers or doubles, `long long`.
 See compiler/tests/ for the covered subset (test4.c: function pointers,
 test5.c: initializers, test6.c: multi-dimensional arrays, test7.c:
 unsigned/short, test8.c: the comma operator, test9.c: macros, test10.c:
-conditional compilation).
+conditional compilation, test11.c: float).
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -149,9 +156,11 @@ after every program. `edit` works through `screen` (tested with its default
 flow control on) and builds on the board byte-identical to the PC build.
 Backspace erases at the shell and `write` prompts. test4.c (function
 pointers), test5.c (initializers), test6.c (multi-dimensional arrays),
-test7.c (unsigned/short), test8.c (comma operator), test9.c (macros) and
-test10.c (conditional compilation, built with -D FROM_CMDLINE=7) print the same
-as a native gcc build, whether compiled on the PC or on the board.
+test7.c (unsigned/short), test8.c (comma operator), test9.c (macros),
+test10.c (conditional compilation, built with -D FROM_CMDLINE=7) and test11.c
+(float) print the same as a native gcc build, whether compiled on the PC or on
+the board. Float literals decode to the same bits as gcc's for 2841 test values
+(with an f suffix; without one gcc rounds through double).
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
@@ -164,10 +173,10 @@ byte-identical to the PC cross build.
   expects it on SPI0 with CS on GP17, `SD_CS SS`).
 - Network tools on real hardware: only tested under qemu so far.
 - `host_linux.c` does not yet free a program's `malloc`s on exit or zero them,
-  unlike the board kernel.
+  unlike the board kernel. Its new `%f %e %g` formatting is untested (no qemu here).
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
 - compiler/tests/ has no automatic runner: compare their output by hand
-  (test4.c to test10.c against `gcc compiler/tests/testN.c && ./a.out`;
+  (test4.c to test11.c against `gcc compiler/tests/testN.c && ./a.out`;
   test4's pointer `sizeof` differs on a 64-bit PC).
 - Under qemu/host_linux the function pointer support has not been run yet
   (qemu-arm is not installed on the development PC).
