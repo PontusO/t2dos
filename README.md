@@ -8,7 +8,7 @@ else is a T2CC program on the SD card (or, without a card, in on-board flash).
     cc.c              the compiler (gcc builds it as a PC cross compiler; compiles itself on the board)
     kernel/kernel.ino the kernel (arduino-pico; SDFS on SPI, set SD_CS; LittleFS fallback)
     host_linux.c      the same kernel contract on Linux/ARM, run binaries with qemu-arm
-    userland/*.c      sh ls cat cp mv rm mkdir rmdir echo hexdump free put write blink
+    userland/*.c      sh ls cat cp mv rm mkdir rmdir echo hexdump free put write edit blink
                       wifi get send rls nc (network)
     lib/net.c         client helpers for the file protocol, #include "net.c"
     tools/fileserver.py  Linux side: python3 fileserver.py dir [port]
@@ -39,6 +39,24 @@ filesystem 7 MB. Reflashing the kernel keeps the filesystem.
    `put` works from the shell too; from a PC:
    `(printf 'put cc.bin %d\n' $(stat -c%s cc.bin); cat cc.bin) > /dev/ttyACM0`
 4. `/autoexec.sh` runs at shell start; `sh script` runs any script.
+
+## Editor
+`edit file` is a full-screen editor for an ANSI/VT100 terminal, e.g.
+`screen /dev/ttyACM0 115200`. It reads the window size from the terminal
+(falls back to 80x24) and uses the alternate screen, so the shell output
+comes back when it quits.
+
+    arrows Home End PgUp PgDn   move          Backspace Del Enter Tab   edit
+    ^O (or ^S)                  save          ^X (or ^C, ^Q)            quit, twice if unsaved
+    ^F                          find (Enter = next match, Esc cancels)
+
+Enter keeps the current line's indentation, except while text is pasted.
+Use ^O to save under `screen`: it has flow control on for serial lines, so ^S
+freezes its output until ^Q (or turn it off with `defflow off` in ~/.screenrc).
+Closing the terminal window detaches `screen` but keeps the port open; quit
+it with Ctrl-A k, or `screen -r` to get back in.
+Long lines scroll horizontally; tabs are 8 columns. The edit buffer is the
+file size plus 256 KB, so one session can add up to 256 KB of text.
 
 ## Network
     wifi ssid password        join (kernel: WiFi.begin, 15 s timeout);  wifi  -> status and IP
@@ -77,6 +95,7 @@ typedef, global/local 1-D arrays, enum, `#define NAME number`,
 `#include "file"` (also searched in /lib), all operators incl. ?: ++/-- and
 compound assignment (+= -= *= /= %= &= |= ^= <<= >>=), sizeof(type), casts,
 if/else while for switch/case/default break continue return, prototypes.
+String and char escapes: `\n \t \r \b \a \f \v \e \\ \' \"`, octal `\033`, hex `\x1b`.
 Not yet: float, initializers, function pointers, unsigned/short, 2-D arrays,
 multi-line macros. See test.c and test3.c for the covered subset.
 
