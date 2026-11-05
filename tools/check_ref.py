@@ -52,11 +52,21 @@ def has_init_stub(path):
 
 
 def main():
+    os.chdir(ROOT)                   # the globs in sources() are relative to the repo root
+    srcs = sources()
+    for d in ('userland', 'compiler/tests', 'binutils'):
+        if not any(s.startswith(d + '/') for s, _ in srcs):
+            print('check_ref: no sources found in %s/' % d)
+            return 1
+    for f in ('compiler/cc.c', 'assembler/as.c', 'linker/ld.c'):
+        if not os.path.exists(f):
+            print('check_ref: %s is missing' % f)
+            return 1
     os.makedirs(WORK, exist_ok=True)
     same = []
     excluded = []
     diff = []
-    for src, flags in sources():
+    for src, flags in srcs:
         name = src.replace('/', '-')[:-2]
         ref = os.path.join(WORK, name + '.ref.bin')
         s = os.path.join(WORK, name + '.s')

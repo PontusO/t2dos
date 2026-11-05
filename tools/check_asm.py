@@ -227,18 +227,21 @@ BRANCH_RE = re.compile(r'^bl?(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al
 
 
 def build_corpus():
-    """root/bin/*.bin plus compiler/tests/*.c compiled with compiler/cc into build/corpus/."""
+    """root/bin/*.bin plus compiler/tests/*.c built with compiler/cc -S, build/host/as and
+    build/host/ld into build/corpus/. A program that does not build fails the check."""
     out = os.path.join(ROOT, 'build', 'corpus')
     os.makedirs(out, exist_ok=True)
     bins = sorted(glob.glob(os.path.join(ROOT, 'root', 'bin', '*.bin')))
     for t in sorted(glob.glob(os.path.join(ROOT, 'compiler', 'tests', '*.c'))):
-        b = os.path.join(out, os.path.basename(t)[:-2] + '.bin')
-        r = subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.dirname(t), '-o', b, t],
-                           capture_output=True, text=True, cwd=ROOT)
-        if r.returncode != 0:
-            print('corpus: cannot compile %s: %s' % (t, r.stdout.strip()))
-            continue
-        bins.append(b)
+        base = os.path.join(out, os.path.basename(t)[:-2])
+        for cmd in ([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-I', os.path.dirname(t), '-o', base + '.s', t],
+                    [os.path.join(ROOT, 'build', 'host', 'as'), '-o', base + '.o', base + '.s'],
+                    [os.path.join(ROOT, 'build', 'host', 'ld'), '-o', base + '.bin', base + '.o']):
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+            if r.returncode != 0:
+                print('corpus: cannot build %s: %s' % (t, (r.stdout + r.stderr).strip()))
+                sys.exit(1)
+        bins.append(base + '.bin')
     return bins
 
 
