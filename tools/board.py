@@ -122,19 +122,24 @@ class Board:
         return data
 
     def expect_gcc(self, test_c, flags=''):
-        """Compare the board's run of test_c (built by compiler/cc) with a native gcc run."""
+        """Compare the board's run of test_c (built by compiler/cc -S, as and ld) with a native
+        gcc run; flags (e.g. -D NAME=1) go to both compilers. Trailing white space is ignored."""
         name = os.path.splitext(os.path.basename(test_c))[0]
         bdir = os.path.join(ROOT, 'build', 'expect')
         os.makedirs(bdir, exist_ok=True)
         native = os.path.join(bdir, name + '.native')
-        subprocess.run(['gcc', '-w', '-o', native, test_c], check=True)
-        want = subprocess.run([native], capture_output=True, text=True).stdout.split('\n')
+        subprocess.run(['gcc', '-w'] + flags.split() + ['-o', native, test_c], check=True)
+        want = [l.rstrip() for l in subprocess.run([native], capture_output=True, text=True).stdout.split('\n')]
         while want and not want[-1]:
             want.pop()
         binp = os.path.join(bdir, name + '.bin')
-        subprocess.run([os.path.join(ROOT, 'compiler', 'cc')] + flags.split() + ['-o', binp, test_c], check=True)
+        asm = os.path.join(bdir, name + '.s')
+        obj = os.path.join(bdir, name + '.o')
+        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S'] + flags.split() + ['-o', asm, test_c], check=True)
+        subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', obj, asm], check=True)
+        subprocess.run([os.path.join(ROOT, 'build', 'host', 'ld'), '-o', binp, obj], check=True)
         self.put(binp, '/src/%s.bin' % name)
-        got = self.run('/src/%s.bin' % name, 10.0)
+        got = [l.rstrip() for l in self.run('/src/%s.bin' % name, 10.0)]
         if got == want:
             return True
         print('MISMATCH %s' % name)

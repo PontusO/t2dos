@@ -1,13 +1,14 @@
-// cc.c - a tiny single-pass C compiler emitting Thumb-2 code for Cortex-M33
+// cc.c - a tiny single-pass C compiler emitting Thumb-2 assembly for Cortex-M33
 // (RP2350). Written in the subset of C it compiles, so it can build itself.
 //
 // Build on a PC as a cross compiler:   gcc -O2 -I . -o compiler/cc compiler/cc.c   (from the repo root)
-// Use:                                 cc -o prog.bin prog.c
+// Use:                                 cc -S [-o prog.s] prog.c ; as -o prog.o prog.s ; ld -o prog.bin prog.o
 //
 // Generated code model:
 //   r7 = frame pointer, r8 = host syscall entry, r9 = data/bss base.
 //   Expression results in r0.  All args passed on the stack, left to right
-//   (first arg deepest), caller pops.  Position independent, no relocations.
+//   (first arg deepest), caller pops.  Position independent: data is addressed
+//   from r9 (.Ldata+offset), function addresses PC relative (fnaddr).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,76 +32,11 @@ enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TFLO
 
 #include "sys.h"
 
-// ------------------------------------------------------------------ Thumb-2 encodings
-// Instructions as the ARMv8-M manual writes them. A 32-bit instruction is two
-// halfwords, I_X then I_X_2. Bases (marked +) get register or immediate fields
-// ORed in by the helpers that use them. Plain numbers: older cc must build this.
-enum {
-  I_PUSH_R0 = 0xB401, I_POP_R1 = 0xBC02,                      // push {r0} / pop {r1}
-  I_PUSH_R4 = 0xB410, I_POP_R4 = 0xBC10,                      // push {r4} / pop {r4}
-  I_PUSH_R4_LR = 0xB510, I_PUSH_R7_LR = 0xB580, I_POP_R7_PC = 0xBD80,
-  I_POP_W_R4_LR = 0xE8BD, I_POP_W_R4_LR_2 = 0x4010,           // pop.w {r4,lr}  (ldmia.w sp!)
-  I_MOVW = 0xF240, I_MOVT = 0xF2C0,                           // + movw/movt rd,#imm16 (T3)
-  I_ADDW = 0xF200, I_SUBW = 0xF2A0,                           // + addw/subw rd,rn,#imm12 (T4)
-  I_ADDS_R0_R7_R1 = 0x18B8, I_SUBS_R0_R7_R1 = 0x1A78,
-  I_ADD_W_R0_R9_R1 = 0xEB09, I_ADD_W_R0_R9_R1_2 = 0x0001,     // add.w r0,r9,r1
-  I_LDR_R0_R0 = 0x6800, I_LDRB_R0_R0 = 0x7800, I_LDRH_R0_R0 = 0x8800,
-  I_LDRSB_W_R0_R0 = 0xF990, I_LDRSB_W_R0_R0_2 = 0x0000,      // ldrsb.w r0,[r0]
-  I_LDRSH_W_R0_R0 = 0xF9B0, I_LDRSH_W_R0_R0_2 = 0x0000,      // ldrsh.w r0,[r0]
-  I_LDR_R0_R1 = 0x6808, I_LDRB_R0_R1 = 0x7808, I_LDRH_R0_R1 = 0x8808,
-  I_LDRSB_W_R0_R1 = 0xF991, I_LDRSB_W_R0_R1_2 = 0x0000,      // ldrsb.w r0,[r1]
-  I_LDRSH_W_R0_R1 = 0xF9B1, I_LDRSH_W_R0_R1_2 = 0x0000,      // ldrsh.w r0,[r1]
-  I_STR_R0_R1 = 0x6008, I_STRB_R0_R1 = 0x7008, I_STRH_R0_R1 = 0x8008,
-  I_STR_R2_R1 = 0x600A, I_STRB_R2_R1 = 0x700A, I_STRH_R2_R1 = 0x800A,
-  I_STR_R1_R0 = 0x6001,                                       // str r1,[r0]
-  I_SXTB_R0 = 0xB240, I_UXTB_R0 = 0xB2C0, I_SXTH_R0 = 0xB200, I_UXTH_R0 = 0xB280,
-  I_B_W = 0xF000,                                             // + first half of b.w, bl and b<cond>.w
-  I_B_W_2 = 0x9000, I_BL_2 = 0xD000, I_BCOND_2 = 0x8000,      // + second halves (T4 b.w, bl, T3 b<cond>.w)
-  I_BCOND_KEEP = 0xFBC0,                                      // opcode and cond bits of a T3 first half
-  I_CMP_R1_R0 = 0x4281, I_CMP_R0_R1 = 0x4288, I_CMP_R0_0 = 0x2800,
-  I_IT = 0xBF00, I_ITE_EQ = 0xBF0C,                           // + it<cond>, firstcond << 4 | mask
-  I_MOVS_R0 = 0x2000, I_MOVS_R1 = 0x2100,                     // + movs r0/r1,#imm8
-  I_MOVS_R0_1 = 0x2001,                                       // movs r0,#1 (cc does not fold constants: keep it one number)
-  I_ADD_SP = 0xB000,                                          // + add sp,#4*imm7
-  I_LDR_R1_SP = 0x9900,                                       // + ldr r1,[sp,#4*imm8]
-  I_ADD_R0_PC = 0x4478, I_BLX_R1 = 0x4788, I_BLX_R8 = 0x47C0,
-  I_MOV_R1_R0 = 0x4601, I_MOV_R2_SP = 0x466A, I_MOV_R3_SP = 0x466B, I_MOV_R4_SP = 0x466C, I_MOV_R7_SP = 0x466F,
-  I_MOV_SP_R3 = 0x469D, I_MOV_SP_R4 = 0x46A5, I_MOV_SP_R7 = 0x46BD,
-  I_BIC_W_R3_R3_7 = 0xF023, I_BIC_W_R3_R3_7_2 = 0x0307,      // bic.w r3,r3,#7
-  I_SUB_W_SP_SP_R1 = 0xEBAD, I_SUB_W_SP_SP_R1_2 = 0x0D01,    // sub.w sp,sp,r1
-  I_LSLS_R0_R0_2 = 0x0080, I_LSLS_R1_R1_2 = 0x0089,           // lsls rd,rd,#2
-  I_MULS_R0_R1 = 0x4348, I_MULS_R0_R2 = 0x4350, I_MULS_R1_R2 = 0x4351,
-  I_ORRS_R0_R1 = 0x4308, I_EORS_R0_R1 = 0x4048, I_ANDS_R0_R1 = 0x4008,
-  I_MVNS_R0 = 0x43C0, I_NEGS_R0 = 0x4240,
-  I_ADDS_R0_R1_R0 = 0x1808, I_SUBS_R0_R1_R0 = 0x1A08, I_ADDS_R0_R0_R2 = 0x1880, I_ADDS_R2_R0_R2 = 0x1882,
-  I_LSL_W_R0_R1_R0 = 0xFA01, I_LSL_W_R0_R1_R0_2 = 0xF000,
-  I_LSR_W_R0_R1_R0 = 0xFA21, I_LSR_W_R0_R1_R0_2 = 0xF000,
-  I_ASR_W_R0_R1_R0 = 0xFA41, I_ASR_W_R0_R1_R0_2 = 0xF000,
-  I_SDIV_R0_R1_R0 = 0xFB91, I_SDIV_R0_R1_R0_2 = 0xF0F0,
-  I_UDIV_R0_R1_R0 = 0xFBB1, I_UDIV_R0_R1_R0_2 = 0xF0F0,
-  I_SDIV_R2_R1_R0 = 0xFB91, I_SDIV_R2_R1_R0_2 = 0xF2F0,
-  I_UDIV_R2_R1_R0 = 0xFBB1, I_UDIV_R2_R1_R0_2 = 0xF2F0,
-  I_SDIV_R0_R0_R2 = 0xFB90, I_SDIV_R0_R0_R2_2 = 0xF0F2,
-  I_MLS_R0_R2_R0_R1 = 0xFB02, I_MLS_R0_R2_R0_R1_2 = 0x1010,  // mls r0,r2,r0,r1: r0 = r1 - r2 * r0
-  // single precision FPU (floats live in r0 as bits; s0/s1 only for the operation)
-  I_VMOV_S0_R0 = 0xEE00, I_VMOV_S0_R0_2 = 0x0A10, I_VMOV_S1_R0 = 0xEE00, I_VMOV_S1_R0_2 = 0x0A90,
-  I_VMOV_S0_R1 = 0xEE00, I_VMOV_S0_R1_2 = 0x1A10, I_VMOV_S1_R2 = 0xEE00, I_VMOV_S1_R2_2 = 0x2A90,
-  I_VMOV_R0_S0 = 0xEE10, I_VMOV_R0_S0_2 = 0x0A10, I_VMOV_R2_S0 = 0xEE10, I_VMOV_R2_S0_2 = 0x2A10,
-  I_VADD = 0xEE30, I_VADD_2 = 0x0A20, I_VSUB = 0xEE30, I_VSUB_2 = 0x0A60,      // vadd/vsub.f32 s0,s0,s1
-  I_VMUL = 0xEE20, I_VMUL_2 = 0x0A20, I_VDIV = 0xEE80, I_VDIV_2 = 0x0A20,      // vmul/vdiv.f32 s0,s0,s1
-  I_VNEG = 0xEEB1, I_VNEG_2 = 0x0A40,                                          // vneg.f32 s0,s0
-  I_VCMP = 0xEEB4, I_VCMP_2 = 0x0A60,                                          // vcmp.f32 s0,s1
-  I_VMRS = 0xEEF1, I_VMRS_2 = 0xFA10,                                          // vmrs APSR_nzcv,fpscr
-  I_VCVT_F_S_S0 = 0xEEB8, I_VCVT_F_S_S0_2 = 0x0AC0, I_VCVT_F_U_S0 = 0xEEB8, I_VCVT_F_U_S0_2 = 0x0A40,   // f32 <- s32/u32
-  I_VCVT_F_S_S1 = 0xEEF8, I_VCVT_F_S_S1_2 = 0x0AE0, I_VCVT_F_U_S1 = 0xEEF8, I_VCVT_F_U_S1_2 = 0x0A60,
-  I_VCVT_S_F_S0 = 0xEEBD, I_VCVT_S_F_S0_2 = 0x0AC0, I_VCVT_U_F_S0 = 0xEEBC, I_VCVT_U_F_S0_2 = 0x0AC0,   // s32/u32 <- f32, toward 0
-  I_LSLS_R1_R0_1 = 0x0041                                                       // the float truth test: zero unless +-0
-};
 // condition codes (it, b<cond>)
 enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_MI = 4, CC_HI = 8, CC_LS = 9, CC_GE = 10, CC_LT = 11, CC_GT = 12, CC_LE = 13 };
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
-             int hclass; int htype; int hval; int fix; int stag;
+             int hclass; int htype; int hval; int stag;
              int mdef; char *mbody; char **margs; int mnargs; int mvar;
              int *ptypes; int nptypes; };   // parameter types of a function, for argument conversion   // macro: defined, body, params (-1: object-like), ...
 struct Mem { struct Sym *id; int type; int off; int next; int cnt; };   // cnt: array member length, else -1
@@ -115,27 +51,25 @@ int *stsize; int *stfirst; int nstructs;
 int *starr; int *stcnt;  // array rows (int[4] in int m[3][4]) are struct-like types: element type, length; -1 for structs
 int *dims; int ndims;    // set by parse_dims()
 
-char *code; int cpos;    // code segment
 char *data; int dpos;    // data segment (strings + globals)
-int lastload;            // bytes of the load instruction just emitted (for lvalues)
+int lastload;            // lines of the load instruction just emitted (for lvalues), 0 if none
 
 int ty;                  // type of last parsed expression
 int loc;                 // current local frame depth
 int maxloc;
-int ret_fix, brk_fix, cont_fix, cont_tgt;  // fixup chains / targets
+int ret_fix, brk_fix, cont_fix, cont_tgt;  // fixup chains (branch lines) / targets (labels)
 int nparams;
 int fnrty;               // return type of the function being compiled
 
 int *fnret; int nfn;     // function types: return type of each
 int **fnparams; int *fnnp; // and parameter types (fnnp -1: not known), for argument conversion
-int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
 struct Sym *dname; int darr;                       // set by declarator(): name, array size, -1 none, -2 for []
 int pb; int pb_tk; int pb_ival; struct Sym *pb_id; int pb_numty;   // one token pushed back by next()
 int sv_pb; int sv_pb_tk; int sv_pb_ival; struct Sym *sv_pb_id; int sv_pb_numty; int sv_numty; int sv_slen;
 int numty;                                         // type of the last number token: TINT or TUINT
 int slen;                                          // bytes of the last string literal, with its 0
 int ikind; int ibase;                              // initializer target: 0 = data offset, 1 = frame offset
-int init_open; int init_head; int init_tail;       // code chunks for global initializers, run before main
+int init_open;                                     // global initializer code is being compiled (into .Linit)
 char *sv_p; int sv_tk; int sv_ival; struct Sym *sv_id; int sv_line; int sv_dpos;   // lexer state for lookahead
 
 // include stack
@@ -147,13 +81,15 @@ int ifdepth;             // #if levels whose taken branch is being compiled
 int pp_if;               // evaluating an #if: unknown identifiers are 0
 char *srcname;
 char *incdir;
+int ofd; char *outname;  // the output file, removed again when compiling fails
 
 int preprocess(); int lex(); int expand(struct Sym *m); int expanding(struct Sym *m); int intern(char *s, int n); int idstart(int c); int idchar(int c);
 int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
 int declarator(int t); int die(char *msg); int expr_comma(); int itcc(int cond); int param_types(int *pl);
 
 // ------------------------------------------------------------------ helpers
-int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); exit(1); return 0; }
+int quit() { if (ofd >= 0) { close(ofd); unlink(outname); } exit(1); return 0; }
+int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); quit(); return 0; }
 
 char *readfile(char *name) {
   int fd; char *buf; int n; int total; char *alt;
@@ -166,7 +102,7 @@ char *readfile(char *name) {
     alt = malloc(strlen(name) + 6); strcpy(alt, "/lib/"); strcpy(alt + 5, name);
     fd = open(alt, 0, 0);
   }
-  if (fd < 0) { printf("cannot open %s\n", name); exit(1); }
+  if (fd < 0) { printf("cannot open %s\n", name); quit(); }
   buf = malloc(1048576);
   total = 0;
   while ((n = read(fd, buf + total, 65536)) > 0) total = total + n;
@@ -175,36 +111,127 @@ char *readfile(char *name) {
   return buf;
 }
 
-// ------------------------------------------------------------------ emitter
-int emit16(int x) { code[cpos] = x; code[cpos + 1] = x >> 8; cpos = cpos + 2; lastload = 0; return 0; }
-int emit32(int hi, int lo) { emit16(hi); emit16(lo); return 0; }
-int put16(int at, int x) { code[at] = x; code[at + 1] = x >> 8; return 0; }
-int get16(int at) { return (code[at] & 255) | ((code[at + 1] & 255) << 8); }
+// ------------------------------------------------------------------ assembly output
+// The function being compiled is a list of lines, written out when it ends (global
+// initializer code goes to .Linit instead): instructions as text, labels .L<n>, and
+// branches b.w / b<cond>.w whose label is filled in once the target is known. Each
+// instruction is spelled so that as picks the encoding cc has always used: .w where a
+// 16-bit form exists but the 32-bit one is meant, addw/subw for the T4 add/sub, and
+// mov<cond> inside an IT block. Label numbers are unique in the file.
+enum { L_INS = 1, L_LAB, L_BR, L_DEL };
+char *lpool; int lppos;                          // text of the lines, 0-terminated
+int *lkind; int *ltext; int *llab; int *lcond; int *lnext; int nlines;
+                                                 // per line: L_*, text, label (a branch's target, or the
+                                                 // number of a label), branch cond (-1: b.w), fixup chain
+int nlabels;                                     // .L numbers used so far
+char *ccname; char *ccbuf;                       // condition names, two letters each
+char *obuf; int opos;                            // the output file's buffer
+char *ibuf; int ipos; int tobuf;                 // .Linit's code; tobuf: flush() appends to it
+char *numbuf;
+struct Sym **gsym; int *goff; int nglob;         // global variables: their data offsets, for the labels
 
-int push() { return emit16(I_PUSH_R0); }
-int pop1() { return emit16(I_POP_R1); }
+int oflush() { if (opos) write(ofd, obuf, opos); opos = 0; return 0; }
+int oput(char *s) {
+  if (tobuf) {
+    while (*s) { ibuf[ipos] = *s; ipos = ipos + 1; s = s + 1; }
+    if (ipos > 258000) die("initializer code too big");
+    return 0;
+  }
+  while (*s) { obuf[opos] = *s; opos = opos + 1; s = s + 1; }
+  if (opos > 60000) oflush();
+  return 0;
+}
+char *dec(int v) {                               // decimal text of v, valid until the next call
+  char *q; int neg;
+  q = numbuf + 15; *q = 0; neg = v < 0; if (neg) v = -v;
+  while (1) { q = q - 1; *q = '0' + v % 10; v = v / 10; if (!v) break; }
+  if (neg) { q = q - 1; *q = '-'; }
+  return q;
+}
+char *ccn(int c) { ccbuf[0] = ccname[2 * c]; ccbuf[1] = ccname[2 * c + 1]; ccbuf[2] = 0; return ccbuf; }
+int oname(struct Sym *s) {                       // a symbol's name (built past the end of the line text)
+  int k;
+  k = 0; while (k < s->len) { lpool[lppos + k] = s->name[k]; k = k + 1; }
+  lpool[lppos + k] = 0;
+  return oput(lpool + lppos);
+}
 
-// movw/movt rd, #imm32
+// a new line; every line but a label ends lvalue()'s chance to drop a load
+int lnew(int kind) {
+  if (nlines >= 16384 || lppos > 258000) die("function too long");
+  lkind[nlines] = kind; ltext[nlines] = lppos; llab[nlines] = -1; lcond[nlines] = -1; lnext[nlines] = -1;
+  nlines = nlines + 1;
+  if (kind != L_LAB) lastload = 0;
+  return nlines - 1;
+}
+int ls(char *s) { while (*s) { lpool[lppos] = *s; lppos = lppos + 1; s = s + 1; } return 0; }
+int lsym(struct Sym *s) { int k; k = 0; while (k < s->len) { lpool[lppos] = s->name[k]; lppos = lppos + 1; k = k + 1; } return 0; }
+int lend() { lpool[lppos] = 0; lppos = lppos + 1; return 0; }
+int ins(char *s) { lnew(L_INS); ls(s); lend(); return 0; }
+int ins_ri(char *mn, int rd, int v) {            // mn rd, #v
+  lnew(L_INS); ls(mn); ls("\tr"); ls(dec(rd)); ls(", #"); ls(dec(v)); lend();
+  return 0;
+}
+int ins_rri(char *mn, int rd, int rn, int v) {   // mn rd, rn, #v
+  lnew(L_INS); ls(mn); ls("\tr"); ls(dec(rd)); ls(", r"); ls(dec(rn)); ls(", #"); ls(dec(v)); lend();
+  return 0;
+}
+int addsp(int n) { lnew(L_INS); ls("add\tsp, #"); ls(dec(4 * n)); lend(); return 0; }   // pop n words
+
+// write the lines out (to the file, or to .Linit's code) and start a new list
+int flush() {
+  int i; int k;
+  i = 0;
+  while (i < nlines) {
+    k = lkind[i];
+    if (k == L_INS) { oput("\t"); oput(lpool + ltext[i]); oput("\n"); }
+    else if (k == L_LAB) { oput(".L"); oput(dec(llab[i])); oput(":\n"); }
+    else if (k == L_BR) {
+      if (llab[i] < 0) die("internal error: branch without a target");
+      oput("\tb"); if (lcond[i] >= 0) oput(ccn(lcond[i])); oput(".w\t.L"); oput(dec(llab[i])); oput("\n");
+    }
+    i = i + 1;
+  }
+  nlines = 0; lppos = 0;
+  return 0;
+}
+
+int push() { return ins("push\t{r0}"); }
+int pop1() { return ins("pop\t{r1}"); }
+
+// movw/movt rd, #imm32 (no movt when the high half is 0)
 int imm(int rd, int v) {
   int lo; int hi;
   lo = v & 65535; hi = (v >> 16) & 65535;
-  emit32(I_MOVW | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
-  if (hi) emit32(I_MOVT | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
+  ins_ri("movw", rd, lo);
+  if (hi) ins_ri("movt", rd, hi);
   return 0;
 }
-// add.w/sub.w rd, rn, #imm12 (T4 encodings)
-int addi12(int rd, int rn, int v) { return emit32(I_ADDW | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
-int subi12(int rd, int rn, int v) { return emit32(I_SUBW | ((v >> 11) & 1) << 10 | rn, ((v >> 8) & 7) << 12 | rd << 8 | (v & 255)); }
+// movw+movt, always both halves
+int imm2(int rd, int v) {
+  ins_ri("movw", rd, v & 65535);
+  ins_ri("movt", rd, (v >> 16) & 65535);
+  return 0;
+}
+// addw/subw rd, rn, #imm12 (T4 encodings)
+int addi12(int rd, int rn, int v) { return ins_rri("addw", rd, rn, v); }
+int subi12(int rd, int rn, int v) { return ins_rri("subw", rd, rn, v); }
 
 // r0 = address of local/param at signed frame offset off
 int lea_loc(int off) {
-  if (off < 0) { off = -off; if (off < 4096) subi12(0, 7, off); else { imm(1, off); emit16(I_SUBS_R0_R7_R1); } }
-  else { if (off < 4096) addi12(0, 7, off); else { imm(1, off); emit16(I_ADDS_R0_R7_R1); } }
+  if (off < 0) { off = -off; if (off < 4096) subi12(0, 7, off); else { imm(1, off); ins("subs\tr0, r7, r1"); } }
+  else { if (off < 4096) addi12(0, 7, off); else { imm(1, off); ins("adds\tr0, r7, r1"); } }
   return 0;
 }
-// r0 = r9 + off
+// r0 = r9 + off: the data at .Ldata+off
 int lea_glo(int off) {
-  if (off < 4096) addi12(0, 9, off); else { imm(1, off); emit32(I_ADD_W_R0_R9_R1, I_ADD_W_R0_R9_R1_2); }
+  if (off < 4096) { lnew(L_INS); ls("addw\tr0, r9, #.Ldata+"); ls(dec(off)); lend(); return 0; }
+  if (off < 65536) { lnew(L_INS); ls("movw.16\tr1, #.Ldata+"); ls(dec(off)); lend(); }
+  else {
+    lnew(L_INS); ls("movw\tr1, #:lower16:.Ldata+"); ls(dec(off)); lend();
+    lnew(L_INS); ls("movt\tr1, #:upper16:.Ldata+"); ls(dec(off)); lend();
+  }
+  ins("add.w\tr0, r9, r1");
   return 0;
 }
 // function types
@@ -236,39 +263,39 @@ int fnparam_of(int t, int i) { return fnparams[(t >> 22) & 511][i]; }
 int load(int t) {
   lastload = 0;                                              // set again below only when a load is emitted
   if (isfndes(t)) return 0;                                  // a function is its own address
-  if (t == TCHAR) { emit32(I_LDRSB_W_R0_R0, I_LDRSB_W_R0_R0_2); lastload = 4; }
-  else if (t == TINT || t == TUINT || t == TFLOAT || t >= PTR) { emit16(I_LDR_R0_R0); lastload = 2; }
-  else if (t == TUCHAR) { emit16(I_LDRB_R0_R0); lastload = 2; }
-  else if (t == TSHORT) { emit32(I_LDRSH_W_R0_R0, I_LDRSH_W_R0_R0_2); lastload = 4; }
-  else if (t == TUSHORT) { emit16(I_LDRH_R0_R0); lastload = 2; }
+  if (t == TCHAR) { ins("ldrsb.w\tr0, [r0]"); lastload = 1; }
+  else if (t == TINT || t == TUINT || t == TFLOAT || t >= PTR) { ins("ldr\tr0, [r0]"); lastload = 1; }
+  else if (t == TUCHAR) { ins("ldrb\tr0, [r0]"); lastload = 1; }
+  else if (t == TSHORT) { ins("ldrsh.w\tr0, [r0]"); lastload = 1; }
+  else if (t == TUSHORT) { ins("ldrh\tr0, [r0]"); lastload = 1; }
   // struct: keep address
   return 0;
 }
 // store *r1 = r0
 int store(int t) {
-  if (t == TCHAR || t == TUCHAR) emit16(I_STRB_R0_R1); else if (t == TSHORT || t == TUSHORT) emit16(I_STRH_R0_R1); else emit16(I_STR_R0_R1);
+  if (t == TCHAR || t == TUCHAR) ins("strb\tr0, [r1]"); else if (t == TSHORT || t == TUSHORT) ins("strh\tr0, [r1]"); else ins("str\tr0, [r1]");
   return 0;
 }
 // r0 = *r1 according to type (for ++ and --)
 int load_r1(int t) {
-  if (t == TCHAR) emit32(I_LDRSB_W_R0_R1, I_LDRSB_W_R0_R1_2);
-  else if (t == TUCHAR) emit16(I_LDRB_R0_R1);
-  else if (t == TSHORT) emit32(I_LDRSH_W_R0_R1, I_LDRSH_W_R0_R1_2);
-  else if (t == TUSHORT) emit16(I_LDRH_R0_R1);
-  else emit16(I_LDR_R0_R1);
+  if (t == TCHAR) ins("ldrsb.w\tr0, [r1]");
+  else if (t == TUCHAR) ins("ldrb\tr0, [r1]");
+  else if (t == TSHORT) ins("ldrsh.w\tr0, [r1]");
+  else if (t == TUSHORT) ins("ldrh\tr0, [r1]");
+  else ins("ldr\tr0, [r1]");
   return 0;
 }
 // *r1 = r2 according to type
 int store_r2(int t) {
-  if (t == TCHAR || t == TUCHAR) emit16(I_STRB_R2_R1); else if (t == TSHORT || t == TUSHORT) emit16(I_STRH_R2_R1); else emit16(I_STR_R2_R1);
+  if (t == TCHAR || t == TUCHAR) ins("strb\tr2, [r1]"); else if (t == TSHORT || t == TUSHORT) ins("strh\tr2, [r1]"); else ins("str\tr2, [r1]");
   return 0;
 }
 // convert r0 to type t (casts, return values): sign or zero extend the small types
 int conv(int t) {
-  if (t == TCHAR) emit16(I_SXTB_R0);
-  else if (t == TUCHAR) emit16(I_UXTB_R0);
-  else if (t == TSHORT) emit16(I_SXTH_R0);
-  else if (t == TUSHORT) emit16(I_UXTH_R0);
+  if (t == TCHAR) ins("sxtb\tr0, r0");
+  else if (t == TUCHAR) ins("uxtb\tr0, r0");
+  else if (t == TSHORT) ins("sxth\tr0, r0");
+  else if (t == TUSHORT) ins("uxth\tr0, r0");
   return 0;
 }
 // usual arithmetic conversions: small types promote to int; unsigned int wins
@@ -279,14 +306,14 @@ int isflt(int t) { return t == TFLOAT; }
 int cvt(int from, int to) {
   if (from == to || from >= PTR || to >= PTR) return 0;
   if (isflt(to) && !isflt(from)) {
-    emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2);
-    if (from == TUINT) emit32(I_VCVT_F_U_S0, I_VCVT_F_U_S0_2); else emit32(I_VCVT_F_S_S0, I_VCVT_F_S_S0_2);
-    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2);
+    ins("vmov\ts0, r0");
+    if (from == TUINT) ins("vcvt.f32.u32\ts0, s0"); else ins("vcvt.f32.s32\ts0, s0");
+    ins("vmov\tr0, s0");
   }
   else if (isflt(from) && !isflt(to)) {
-    emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2);
-    if (to == TUINT) emit32(I_VCVT_U_F_S0, I_VCVT_U_F_S0_2); else emit32(I_VCVT_S_F_S0, I_VCVT_S_F_S0_2);
-    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2);
+    ins("vmov\ts0, r0");
+    if (to == TUINT) ins("vcvt.u32.f32\ts0, s0"); else ins("vcvt.s32.f32\ts0, s0");
+    ins("vmov\tr0, s0");
     conv(to);
   }
   return 0;
@@ -297,68 +324,42 @@ int assignconv(int t) { if (isflt(ty) || isflt(t)) cvt(ty, t); return 0; }
 int castto(int t) { if (isflt(ty) || isflt(t)) cvt(ty, t); else conv(t); return 0; }
 // left (type t, in r1) and right (type ty, in r0) as floats in s0 and s1
 int fpair(int t) {
-  emit32(I_VMOV_S1_R0, I_VMOV_S1_R0_2);
-  if (!isflt(ty)) { if (ty == TUINT) emit32(I_VCVT_F_U_S1, I_VCVT_F_U_S1_2); else emit32(I_VCVT_F_S_S1, I_VCVT_F_S_S1_2); }
-  emit32(I_VMOV_S0_R1, I_VMOV_S0_R1_2);
-  if (!isflt(t)) { if (t == TUINT) emit32(I_VCVT_F_U_S0, I_VCVT_F_U_S0_2); else emit32(I_VCVT_F_S_S0, I_VCVT_F_S_S0_2); }
+  ins("vmov\ts1, r0");
+  if (!isflt(ty)) { if (ty == TUINT) ins("vcvt.f32.u32\ts1, s1"); else ins("vcvt.f32.s32\ts1, s1"); }
+  ins("vmov\ts0, r1");
+  if (!isflt(t)) { if (t == TUINT) ins("vcvt.f32.u32\ts0, s0"); else ins("vcvt.f32.s32\ts0, s0"); }
   return 0;
 }
 // set flags for "is r0 true": cmp r0,#0, or for a float lsls r1,r0,#1 (+0 and -0 are false)
 // flags for "is r0 true", with r0 left 0 if it is false (a float -0.0 becomes 0): for && and ||
-int truth() { if (isflt(ty)) { test0(); itcc(CC_NE); } emit16(I_CMP_R0_0); return 0; }
-int test0() { if (isflt(ty)) emit16(I_LSLS_R1_R0_1); else emit16(I_CMP_R0_0); return 0; }
+int truth() { if (isflt(ty)) { test0(); itcc(CC_NE); } ins("cmp\tr0, #0"); return 0; }
+int test0() { if (isflt(ty)) ins("lsls\tr1, r0, #1"); else ins("cmp\tr0, #0"); return 0; }
 
-// branches, all 32-bit so they can be patched. returns offset of instruction.
-int b_w(int target) {   // unconditional b.w to target (target<0: fixup later)
-  int at; at = cpos; emit32(I_B_W, I_B_W_2); if (target >= 0) patch_b(at, target); return at;
-}
-int bl_w() { int at; at = cpos; emit32(I_B_W, I_BL_2); return at; }
-int bc_w(int cond) { int at; at = cpos; emit32(I_B_W | cond << 6, I_BCOND_2); return at; }
-
-int patch_b(int at, int target) {
-  int off; int s; int j1; int j2; int h1; int h2; int i1; int i2;
-  off = target - (at + 4);
-  h1 = get16(at); h2 = get16(at + 2);
-  if ((h2 & I_B_W_2) == I_B_W_2 || (h2 & I_BL_2) == I_BL_2) {   // T4 b.w / bl (24-bit)
-    s = (off >> 24) & 1; i1 = (off >> 23) & 1; i2 = (off >> 22) & 1;
-    j1 = (i1 ^ 1) ^ s; j2 = (i2 ^ 1) ^ s;
-    put16(at, I_B_W | s << 10 | ((off >> 12) & 1023));
-    put16(at + 2, (h2 & I_BL_2) | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
-  } else {                                                    // T3 conditional (20-bit)
-    s = (off >> 20) & 1; j2 = (off >> 19) & 1; j1 = (off >> 18) & 1;
-    put16(at, (h1 & I_BCOND_KEEP) | s << 10 | ((off >> 12) & 63));
-    put16(at + 2, I_BCOND_2 | j1 << 13 | j2 << 11 | ((off >> 1) & 2047));
-  }
-  return 0;
-}
-// fixup chains: an unpatched branch slot holds the previous chain entry (or -1)
-int chain_add(int head, int at) { put16(at + 2, head & 65535); put16(at, (head >> 16) & 65535); return at; }
-int chain_patch(int head, int target, int kind) {   // kind: I_B_W_2 = b.w, I_BL_2 = bl
-  int nxt;
-  while (head >= 0) { nxt = (get16(head) << 16) | get16(head + 2); put16(head + 2, kind); patch_b(head, target); head = nxt; }
-  return 0;
-}
-// movw+movt, always both halves (fixed size, patchable)
-int imm2(int rd, int v) {
-  int lo; int hi;
-  lo = v & 65535; hi = (v >> 16) & 65535;
-  emit32(I_MOVW | ((lo >> 11) & 1) << 10 | (lo >> 12), ((lo >> 8) & 7) << 12 | rd << 8 | (lo & 255));
-  emit32(I_MOVT | ((hi >> 11) & 1) << 10 | (hi >> 12), ((hi >> 8) & 7) << 12 | rd << 8 | (hi & 255));
+// branches, all b.w / b<cond>.w. A branch is a line; its target label is set when known.
+int here() { int k; k = lnew(L_LAB); llab[k] = nlabels; nlabels = nlabels + 1; return llab[k]; }   // a label here
+int b_w(int target) { int at; at = lnew(L_BR); llab[at] = target; return at; }   // target: a label, -1 for later
+int bc_w(int cond) { int at; at = lnew(L_BR); lcond[at] = cond; return at; }
+int patch_b(int at, int label) { llab[at] = label; return 0; }
+int patch_here(int at) { return patch_b(at, here()); }
+// fixup chains of branches (break, return) through lnext
+int chain_add(int head, int at) { lnext[at] = head; return at; }
+int chain_here(int head) {
+  int nxt; int lab;
+  if (head < 0) return 0;
+  lab = here();
+  while (head >= 0) { nxt = lnext[head]; llab[head] = lab; head = nxt; }
   return 0;
 }
 
-// compare r1 ? r0 -> r0 = 0/1 using IT block
-int itcc(int cond) {                     // r0 = cond ? 1 : 0, flags already set
-  emit16(I_IT | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);       // ite cond
-  emit16(I_MOVS_R0_1); emit16(I_MOVS_R0);                   // movs r0,#1 ; movs r0,#0
+// r0 = cond ? 1 : 0, flags already set: ite cond ; mov<cond> r0,#1 ; mov<!cond> r0,#0
+int itcc(int cond) {
+  lnew(L_INS); ls("ite\t"); ls(ccn(cond)); lend();
+  lnew(L_INS); ls("mov"); ls(ccn(cond)); ls("\tr0, #1"); lend();
+  lnew(L_INS); ls("mov"); ls(ccn(cond ^ 1)); ls("\tr0, #0"); lend();
   return 0;
 }
-int setcc(int cond) {
-  emit16(I_CMP_R1_R0);
-  emit16(I_IT | cond << 4 | ((cond & 1) ^ 1) << 3 | 4);       // ite cond
-  emit16(I_MOVS_R0_1); emit16(I_MOVS_R0);                   // movs r0,#1 ; movs r0,#0
-  return 0;
-}
+// compare r1 ? r0 -> r0 = 0/1
+int setcc(int cond) { ins("cmp\tr1, r0"); return itcc(cond); }
 
 // ------------------------------------------------------------------ lexer
 int lookup(char *s, int len, int hash) {
@@ -384,7 +385,7 @@ int intern(char *s, int n) {
     if (nsyms >= 8192) die("too many symbols");
     i = nsyms; nsyms = nsyms + 1;
     syms[i].name = s; syms[i].len = n; syms[i].hash = hash; syms[i].tk = Id;
-    syms[i].class = 0; syms[i].fix = -1;
+    syms[i].class = 0;
   }
   return i;
 }
@@ -932,7 +933,7 @@ int preprocess() {
     ifdepth = ifdepth - 1;
   }
   else if (pp_word("error")) {
-    p = p + 5; printf("%s:%d: #error %s\n", srcname, line, line_body()); exit(1);
+    p = p + 5; printf("%s:%d: #error %s\n", srcname, line, line_body()); quit();
   }
   else if (!memcmp(p, "undef", 5)) {
     p = p + 5;
@@ -1197,22 +1198,17 @@ int declarator(int t) {
 // ------------------------------------------------------------------ expressions
 // Emit a user function call: args already pushed, n args.
 int call_fn(struct Sym *f, int n) {
-  int at;
-  at = bl_w();
-  if (f->class == CFun && f->val >= 0) patch_b(at, f->val);
-  else { f->fix = chain_add(f->fix, at); if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; } }
-  if (n) emit16(I_ADD_SP | n);                  // pop the args
+  if (n > 127) die("too many arguments");
+  lnew(L_INS); ls("bl\t"); lsym(f); lend();    // as resolves it, or ld when f is in another file
+  if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; }
+  if (n) addsp(n);                              // pop the args
   return 0;
 }
-// r0 = address of function f (Thumb bit set), PC relative: movw/movt r0,#off ; add r0,pc.
-// The offset is patched at the end, when every function has an address.
+// r0 = address of function f (Thumb bit set), PC relative: fnaddr is movw/movt r0,#off ; add r0,pc
 int fn_addr(struct Sym *f) {
   if (f->class == CSys) die("cannot take the address of a builtin");
   if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; }
-  if (naddr >= 4096) die("too many function addresses");
-  afix_at[naddr] = cpos; afix_sym[naddr] = f; naddr = naddr + 1;
-  imm2(0, 0);
-  emit16(I_ADD_R0_PC);
+  lnew(L_INS); ls("fnaddr\tr0, "); lsym(f); lend();
   return 0;
 }
 // Call through a function address in r0: keep it on the stack under the args,
@@ -1223,54 +1219,58 @@ int call_ind(int t) {
   while (tk != ')') { expr(Assign); if (n < fnnp_of(t)) assignconv(fnparam_of(t, n)); push(); n = n + 1; if (tk == ',') next(); }
   next();
   if (n > 126) die("too many arguments");
-  emit16(I_LDR_R1_SP | n);                      // the address, under the n args
-  emit16(I_BLX_R1);
-  emit16(I_ADD_SP | (n + 1));                   // args and the address
+  lnew(L_INS); ls("ldr\tr1, [sp, #"); ls(dec(4 * n)); ls("]"); lend();   // the address, under the n args
+  ins("blx\tr1");
+  addsp(n + 1);                                 // args and the address
   ty = fnret_of(t);
   return 0;
 }
 // Emit a host syscall: r0 = num, r1 = nargs, r2 = argv (argv[n-1] is arg 0)
 int call_sys(int num, int n) {
-  emit16(I_MOV_R2_SP);                          // r2 = argv
-  emit16(I_PUSH_R4);
-  emit16(I_MOV_R4_SP);
-  emit16(I_MOV_R3_SP);
-  emit32(I_BIC_W_R3_R3_7, I_BIC_W_R3_R3_7_2);   // 8-byte aligned sp for the kernel
-  emit16(I_MOV_SP_R3);
-  emit16(I_MOVS_R1 | n);
-  emit16(I_MOVS_R0 | num);
-  emit16(I_BLX_R8);
-  emit16(I_MOV_SP_R4);
-  emit16(I_POP_R4);
-  if (n) emit16(I_ADD_SP | n);                  // pop the args
+  ins("mov\tr2, sp");                           // r2 = argv
+  ins("push\t{r4}");
+  ins("mov\tr4, sp");
+  ins("mov\tr3, sp");
+  ins("bic.w\tr3, r3, #7");                     // 8-byte aligned sp for the kernel
+  ins("mov\tsp, r3");
+  ins_ri("movs", 1, n);
+  ins_ri("movs", 0, num);
+  ins("blx\tr8");
+  ins("mov\tsp, r4");
+  ins("pop\t{r4}");
+  if (n) addsp(n);                              // pop the args
   return 0;
 }
 
 // scale r0 by n (for pointer arithmetic)
 int scale(int n) {
   if (n == 1) return 0;
-  if (n == 4) return emit16(I_LSLS_R0_R0_2);
-  imm(2, n); return emit16(I_MULS_R0_R2);
+  if (n == 4) return ins("lsls\tr0, r0, #2");
+  imm(2, n); return ins("muls\tr0, r2");
 }
 
 // Roll back the last load so r0 holds an address, for lvalue use.
 int lvalue() {
-  if (lastload) { cpos = cpos - lastload; lastload = 0; }
+  int k;
+  if (lastload) {                               // drop that many instruction lines (labels stay)
+    k = nlines - 1;
+    while (lastload > 0) { if (lkind[k] == L_INS) { lkind[k] = L_DEL; lastload = lastload - 1; } k = k - 1; }
+  }
   else if (!(ty >= TSTRUCT && ty < PTR)) die("lvalue expected");
   return 0;
 }
 // scale r1 by n
 int scale1(int n) {
   if (n == 1) return 0;
-  if (n == 4) return emit16(I_LSLS_R1_R1_2);
-  imm(2, n); return emit16(I_MULS_R1_R2);
+  if (n == 4) return ins("lsls\tr1, r1, #2");
+  imm(2, n); return ins("muls\tr1, r2");
 }
 
 // r0 = r1 op r0 where r1 has type t and r0 has type ty; sets ty to the result type
 // r0 = r1 op r0 for == != < > <= >= (left type t, right type ty)
 int relop(int op, int t) {
   if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR) {          // vcmp; with a NaN only != is true
-    fpair(t); emit32(I_VCMP, I_VCMP_2); emit32(I_VMRS, I_VMRS_2);
+    fpair(t); ins("vcmp.f32\ts0, s1"); ins("vmrs\tAPSR_nzcv, fpscr");
     if (op == Eq) itcc(CC_EQ); else if (op == Ne) itcc(CC_NE); else if (op == Lt) itcc(CC_MI);
     else if (op == Gt) itcc(CC_GT); else if (op == Le) itcc(CC_LS); else itcc(CC_GE);
     return 0;
@@ -1282,44 +1282,44 @@ int relop(int op, int t) {
 }
 // s0 = r0 + 1.0 or r0 - 1.0 (float ++ and --)
 int fstep(int up) {
-  emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2); imm(2, 1065353216); emit32(I_VMOV_S1_R2, I_VMOV_S1_R2_2);   // 1.0f
-  if (up) emit32(I_VADD, I_VADD_2); else emit32(I_VSUB, I_VSUB_2);
+  ins("vmov\ts0, r0"); imm(2, 1065353216); ins("vmov\ts1, r2");   // 1.0f
+  if (up) ins("vadd.f32\ts0, s0, s1"); else ins("vsub.f32\ts0, s0, s1");
   return 0;
 }
 int binop(int op, int t) {
   int u;
   if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR) {          // float arithmetic
     fpair(t);
-    if (op == Add) emit32(I_VADD, I_VADD_2); else if (op == Sub) emit32(I_VSUB, I_VSUB_2);
-    else if (op == Mul) emit32(I_VMUL, I_VMUL_2); else if (op == Div) emit32(I_VDIV, I_VDIV_2);
+    if (op == Add) ins("vadd.f32\ts0, s0, s1"); else if (op == Sub) ins("vsub.f32\ts0, s0, s1");
+    else if (op == Mul) ins("vmul.f32\ts0, s0, s1"); else if (op == Div) ins("vdiv.f32\ts0, s0, s1");
     else die("invalid operator for float");
-    emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); ty = TFLOAT;
+    ins("vmov\tr0, s0"); ty = TFLOAT;
     return 0;
   }
   u = isuns(t, ty);
-  if (op == Or)  { emit16(I_ORRS_R0_R1); ty = arith(t, ty); }
-  else if (op == Xor) { emit16(I_EORS_R0_R1); ty = arith(t, ty); }
-  else if (op == And) { emit16(I_ANDS_R0_R1); ty = arith(t, ty); }
-  else if (op == Shl) { emit32(I_LSL_W_R0_R1_R0, I_LSL_W_R0_R1_R0_2); ty = arith(t, t); }
+  if (op == Or)  { ins("orrs\tr0, r1"); ty = arith(t, ty); }
+  else if (op == Xor) { ins("eors\tr0, r1"); ty = arith(t, ty); }
+  else if (op == And) { ins("ands\tr0, r1"); ty = arith(t, ty); }
+  else if (op == Shl) { ins("lsl.w\tr0, r1, r0"); ty = arith(t, t); }
   else if (op == Shr) {                                            // the left operand decides
-    if (t == TUINT) emit32(I_LSR_W_R0_R1_R0, I_LSR_W_R0_R1_R0_2); else emit32(I_ASR_W_R0_R1_R0, I_ASR_W_R0_R1_R0_2);
+    if (t == TUINT) ins("lsr.w\tr0, r1, r0"); else ins("asr.w\tr0, r1, r0");
     ty = arith(t, t);
   }
   else if (op == Add) {
     if (t >= PTR && ty < PTR) { scale(tysize(t - PTR)); ty = t; }
     else if (ty >= PTR && t < PTR) scale1(tysize(ty - PTR));
     else if (t < PTR && ty < PTR) ty = arith(t, ty);
-    emit16(I_ADDS_R0_R1_R0);
+    ins("adds\tr0, r1, r0");
   }
   else if (op == Sub) {
-    if (t >= PTR && ty >= PTR) { emit16(I_SUBS_R0_R1_R0); imm(2, tysize(t - PTR)); emit32(I_SDIV_R0_R0_R2, I_SDIV_R0_R0_R2_2); ty = TINT; }   // pointer difference
-    else { if (t >= PTR) scale(tysize(t - PTR)); emit16(I_SUBS_R0_R1_R0); ty = t < PTR ? arith(t, ty) : t; }
+    if (t >= PTR && ty >= PTR) { ins("subs\tr0, r1, r0"); imm(2, tysize(t - PTR)); ins("sdiv\tr0, r0, r2"); ty = TINT; }   // pointer difference
+    else { if (t >= PTR) scale(tysize(t - PTR)); ins("subs\tr0, r1, r0"); ty = t < PTR ? arith(t, ty) : t; }
   }
-  else if (op == Mul) { emit16(I_MULS_R0_R1); ty = arith(t, ty); }
-  else if (op == Div) { if (u) emit32(I_UDIV_R0_R1_R0, I_UDIV_R0_R1_R0_2); else emit32(I_SDIV_R0_R1_R0, I_SDIV_R0_R1_R0_2); ty = arith(t, ty); }
+  else if (op == Mul) { ins("muls\tr0, r1"); ty = arith(t, ty); }
+  else if (op == Div) { if (u) ins("udiv\tr0, r1, r0"); else ins("sdiv\tr0, r1, r0"); ty = arith(t, ty); }
   else if (op == Mod) {                                            // r1 - (r1 / r0) * r0
-    if (u) emit32(I_UDIV_R2_R1_R0, I_UDIV_R2_R1_R0_2); else emit32(I_SDIV_R2_R1_R0, I_SDIV_R2_R1_R0_2);
-    emit32(I_MLS_R0_R2_R0_R1, I_MLS_R0_R2_R0_R1_2); ty = arith(t, ty);
+    if (u) ins("udiv\tr2, r1, r0"); else ins("sdiv\tr2, r1, r0");
+    ins("mls\tr0, r2, r0, r1"); ty = arith(t, ty);
   }
   return 0;
 }
@@ -1380,27 +1380,27 @@ int expr(int lev) {
     if (isfndes(ty)) ty = ty + PTR;             // &f: the address is already in r0
     else { lvalue(); ty = ty + PTR; }
   }
-  else if (tk == '!') { next(); expr(Inc); test0(); emit16(I_ITE_EQ); emit16(I_MOVS_R0_1); emit16(I_MOVS_R0); ty = TINT; }
-  else if (tk == '~') { next(); expr(Inc); if (isflt(ty)) die("~ on a float"); emit16(I_MVNS_R0); ty = arith(ty, ty); }
+  else if (tk == '!') { next(); expr(Inc); test0(); itcc(CC_EQ); ty = TINT; }
+  else if (tk == '~') { next(); expr(Inc); if (isflt(ty)) die("~ on a float"); ins("mvns\tr0, r0"); ty = arith(ty, ty); }
   else if (tk == Add) { next(); expr(Inc); ty = arith(ty, ty); }
   else if (tk == Sub) {
     next();
     if (tk == Num) { imm(0, numty == TFLOAT ? ival ^ (1 << 31) : -ival); ty = numty; next(); }   // a float flips its sign bit
     else {
       expr(Inc);
-      if (isflt(ty)) { emit32(I_VMOV_S0_R0, I_VMOV_S0_R0_2); emit32(I_VNEG, I_VNEG_2); emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); }
-      else { emit16(I_NEGS_R0); ty = arith(ty, ty); }
+      if (isflt(ty)) { ins("vmov\ts0, r0"); ins("vneg.f32\ts0, s0"); ins("vmov\tr0, s0"); }
+      else { ins("negs\tr0, r0"); ty = arith(ty, ty); }
     }
   }
   else if (tk == Inc || tk == Dec) {            // prefix
     t = tk; next(); expr(Inc); lvalue();
-    if (isflt(ty)) { emit16(I_MOV_R1_R0); load_r1(ty); fstep(t == Inc); emit32(I_VMOV_R0_S0, I_VMOV_R0_S0_2); store(ty); }
+    if (isflt(ty)) { ins("mov\tr1, r0"); load_r1(ty); fstep(t == Inc); ins("vmov\tr0, s0"); store(ty); }
     else {
       sz = ty >= PTR ? tysize(ty - PTR) : 1;
-      emit16(I_MOV_R1_R0);
+      ins("mov\tr1, r0");
       load_r1(ty);
       if (t == Dec) sz = -sz;
-      if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R0_R0_R2); }
+      if (sz >= 0 && sz < 4096) addi12(0, 0, sz); else if (sz < 0 && -sz < 4096) subi12(0, 0, -sz); else { imm(2, sz); ins("adds\tr0, r0, r2"); }
       store(ty);
     }
   }
@@ -1417,17 +1417,17 @@ int expr(int lev) {
       next(); test0(); at = bc_w(CC_EQ);
       expr_comma();
       if (tk != ':') die(": expected"); next();
-      t = ty; at2 = b_w(-1); patch_b(at, cpos);
+      t = ty; at2 = b_w(-1); patch_here(at);
       expr(Cond);
       if ((isflt(t) || isflt(ty)) && t < PTR && ty < PTR && t != ty) {   // the int branch becomes float
         if (!isflt(ty)) cvt(ty, TFLOAT);
-        if (!isflt(t)) { m = b_w(-1); patch_b(at2, cpos); cvt(t, TFLOAT); at2 = m; }
+        if (!isflt(t)) { m = b_w(-1); patch_here(at2); cvt(t, TFLOAT); at2 = m; }
         ty = TFLOAT;
       }
-      patch_b(at2, cpos);
+      patch_here(at2);
     }
-    else if (tk == Lor) { next(); truth(); at = bc_w(CC_NE); expr(Lan); truth(); patch_b(at, cpos); itcc(CC_NE); ty = TINT; }
-    else if (tk == Lan) { next(); truth(); at = bc_w(CC_EQ); expr(Or); truth(); patch_b(at, cpos); itcc(CC_NE); ty = TINT; }
+    else if (tk == Lor) { next(); truth(); at = bc_w(CC_NE); expr(Lan); truth(); patch_here(at); itcc(CC_NE); ty = TINT; }
+    else if (tk == Lan) { next(); truth(); at = bc_w(CC_EQ); expr(Or); truth(); patch_here(at); itcc(CC_NE); ty = TINT; }
     else if (tk >= AddA && tk <= ShrA) {        // compound assignment
       n = tk; next(); lvalue(); push(); load(t); push(); expr(Assign); pop1();
       if (n == AddA) n = Add; else if (n == SubA) n = Sub; else if (n == MulA) n = Mul; else if (n == DivA) n = Div; else if (n == ModA) n = Mod;
@@ -1447,15 +1447,15 @@ int expr(int lev) {
     else if (tk == Div) { next(); push(); expr(Inc); pop1(); binop(Div, t); }
     else if (tk == Mod) { next(); push(); expr(Inc); pop1(); binop(Mod, t); }
     else if ((tk == Inc || tk == Dec) && isflt(ty)) {   // postfix on a float: r0 keeps the old value
-      lvalue(); emit16(I_MOV_R1_R0); load_r1(ty); fstep(tk == Inc); emit32(I_VMOV_R2_S0, I_VMOV_R2_S0_2); store_r2(ty); next();
+      lvalue(); ins("mov\tr1, r0"); load_r1(ty); fstep(tk == Inc); ins("vmov\tr2, s0"); store_r2(ty); next();
     }
     else if (tk == Inc || tk == Dec) {          // postfix
       lvalue();
       sz = ty >= PTR ? tysize(ty - PTR) : 1;
       if (tk == Dec) sz = -sz;
-      emit16(I_MOV_R1_R0);
+      ins("mov\tr1, r0");
       load_r1(ty);
-      if (sz >= 0 && sz < 4096) addi12(2, 0, sz); else if (sz < 0 && -sz < 4096) subi12(2, 0, -sz); else { imm(2, sz); emit16(I_ADDS_R2_R0_R2); }
+      if (sz >= 0 && sz < 4096) addi12(2, 0, sz); else if (sz < 0 && -sz < 4096) subi12(2, 0, -sz); else { imm(2, sz); ins("adds\tr2, r0, r2"); }
       store_r2(ty);
       next();
     }
@@ -1473,7 +1473,7 @@ int expr(int lev) {
       if (tk != ']') die("] expected"); next();
       if (t < PTR) die("indexing a non-pointer");
       scale(tysize(t - PTR));
-      emit16(I_ADDS_R0_R1_R0);
+      ins("adds\tr0, r1, r0");
       ty = t - PTR; load(ty); decay();
     }
     else die("bad operator");
@@ -1492,8 +1492,8 @@ int expr_comma() {
 
 // ------------------------------------------------------------------ initializers
 // Globals: constants go straight into the data image. Anything else (strings for
-// pointers, addresses, function pointers, expressions) becomes code in a chunk
-// that runs before main: chunks are chained with b.w, see main(). Locals: code at
+// pointers, addresses, function pointers, expressions) becomes code in .Linit, the
+// file's run-before-main function (.t2init; ld's entry stub calls it). Locals: code at
 // the declaration; arrays and structs are zeroed first. Nested aggregates need
 // their own braces; a char array also takes a string.
 int save_lex() {
@@ -1510,13 +1510,8 @@ int restore_lex() {                    // lexing strings wrote to data: clear wh
   return 0;
 }
 int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_glo(ibase + off); return 0; }
-int init_code() {                      // make sure global initializer code goes into a chunk
-  if (ikind || init_open) return 0;
-  if (init_tail >= 0) patch_b(init_tail, cpos); else init_head = cpos;
-  init_open = 1;
-  return 0;
-}
-int init_close() { if (init_open) { init_tail = b_w(-1); init_open = 0; } return 0; }
+int init_code() { if (!ikind) init_open = 1; return 0; }   // global initializer code: it goes to .Linit
+int init_close() { if (init_open) { tobuf = 1; flush(); tobuf = 0; init_open = 0; } return 0; }
 int poke(int off, int v, int t) {
   data[off] = v;
   if (tysize(t) >= 2) data[off + 1] = v >> 8;
@@ -1635,18 +1630,18 @@ int stmt() {
     expr_comma(); if (tk != ')') die(") expected"); next();
     test0(); at = bc_w(CC_EQ);                  // false: to the else
     stmt();
-    if (tk == Else) { next(); at2 = b_w(-1); patch_b(at, cpos); stmt(); patch_b(at2, cpos); }
-    else patch_b(at, cpos);
+    if (tk == Else) { next(); at2 = b_w(-1); patch_here(at); stmt(); patch_here(at2); }
+    else patch_here(at);
   }
   else if (tk == While) {
     next(); if (tk != '(') die("( expected"); next();
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
-    brk_fix = -1; cont_fix = -1; cont_tgt = cpos;
+    brk_fix = -1; cont_fix = -1; cont_tgt = here();
     expr_comma(); if (tk != ')') die(") expected"); next();
     test0(); at = bc_w(CC_EQ);
     stmt();
-    b_w(cont_tgt); patch_b(at, cpos);
-    chain_patch(brk_fix, cpos, I_B_W_2);
+    b_w(cont_tgt); patch_here(at);
+    chain_here(brk_fix);
     brk_fix = sv_brk; cont_fix = sv_cont; cont_tgt = sv_tgt;
   }
   else if (tk == For) {
@@ -1655,19 +1650,19 @@ int stmt() {
     if (tk != ';') die("; expected"); next();
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1;
-    at = cpos;                                  // condition
+    at = here();                                // condition
     if (tk != ';') { expr_comma(); test0(); at2 = bc_w(CC_EQ); } else at2 = -1;
     if (tk != ';') die("; expected"); next();
     body = b_w(-1);                             // skip increment first time
-    cont_tgt = cpos;                            // increment
+    cont_tgt = here();                          // increment
     if (tk != ')') expr_comma();
     if (tk != ')') die(") expected"); next();
     b_w(at);
-    patch_b(body, cpos);
+    patch_here(body);
     stmt();
     b_w(cont_tgt);
-    if (at2 >= 0) patch_b(at2, cpos);
-    chain_patch(brk_fix, cpos, I_B_W_2);
+    if (at2 >= 0) patch_here(at2);
+    chain_here(brk_fix);
     brk_fix = sv_brk; cont_fix = sv_cont; cont_tgt = sv_tgt;
   }
   else if (tk == Switch) {
@@ -1676,7 +1671,7 @@ int stmt() {
     if (tk != '{') die("{ expected"); next();
     sv_brk = brk_fix; brk_fix = -1;
     loc = loc + 4; if (loc > maxloc) maxloc = loc; n = -loc;        // temp slot for the switch value
-    push(); lea_loc(n); pop1(); emit16(I_STR_R1_R0);
+    push(); lea_loc(n); pop1(); ins("str\tr1, [r0]");
     at = b_w(-1);                                                 // -> first test (case chain head)
     at2 = -1;                                                     // default position
     body = -1;                                                    // fallthrough skip
@@ -1686,17 +1681,17 @@ int stmt() {
         t = cexpr();
         if (tk != ':') die(": expected"); next();
         body = b_w(-1);                                           // previous body falls through over the test
-        patch_b(at, cpos);                                        // failed previous test lands here
-        lea_loc(n); emit16(I_LDR_R0_R0); imm(1, t); emit16(I_CMP_R0_R1);
+        patch_here(at);                                           // failed previous test lands here
+        lea_loc(n); ins("ldr\tr0, [r0]"); imm(1, t); ins("cmp\tr0, r1");
         at = bc_w(CC_NE);                                         // -> next test
-        patch_b(body, cpos);
+        patch_here(body);
       }
-      else if (tk == Default) { next(); if (tk != ':') die(": expected"); next(); at2 = cpos; }
+      else if (tk == Default) { next(); if (tk != ':') die(": expected"); next(); at2 = here(); }
       else { if (!tk) die("unexpected eof"); stmt(); }
     }
     next();
-    if (at2 >= 0) patch_b(at, at2); else patch_b(at, cpos);
-    chain_patch(brk_fix, cpos, I_B_W_2);
+    if (at2 >= 0) patch_b(at, at2); else patch_here(at);
+    chain_here(brk_fix);
     brk_fix = sv_brk;
   }
   else if (tk == Break) { next(); if (tk != ';') die("; expected"); next(); brk_fix = chain_add(brk_fix, b_w(-1)); }
@@ -1725,7 +1720,7 @@ int stmt() {
       if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
         n = n * darr;
         newlocal(d, t + PTR, n + 4);
-        lea_loc(d->val); addi12(1, 0, 4); emit16(I_STR_R1_R0);   // slot = slot + 4
+        lea_loc(d->val); addi12(1, 0, 4); ins("str\tr1, [r0]");   // slot = slot + 4
         if (hi) { ikind = 1; ibase = d->val + 4; init_zero(n); init_array(t, darr, 0); }
       } else {
         newlocal(d, t, n);
@@ -1802,25 +1797,27 @@ int parse_global() {
       if (tk != '{') die("{ expected");
       // fix param offsets: param i at r7 + 8 + 4*(n-1-i)
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) syms[i].val = 8 + 4 * (n - 1 - syms[i].val); i = i + 1; }
-      s->class = CFun; s->val = cpos; nparams = n; fnrty = t;
-      chain_patch(s->fix, cpos, I_BL_2); s->fix = -1;
-      emit16(I_PUSH_R7_LR);
-      emit16(I_MOV_R7_SP);
-      frame_at = cpos; imm2(1, 0);              // movw+movt r1,#frame (patched)
-      emit32(I_SUB_W_SP_SP_R1, I_SUB_W_SP_SP_R1_2);
+      s->class = CFun; s->val = 0; nparams = n; fnrty = t;   // val >= 0: defined
+      oput("\t.global\t"); oname(s); oput("\n"); oname(s); oput(":\n");
+      ins("push\t{r7, lr}");
+      ins("mov\tr7, sp");
+      frame_at = nlines; imm2(1, 0);            // movw+movt r1,#frame (filled in below)
+      ins("sub.w\tsp, sp, r1");
       ret_fix = -1;
       stmt();
-      chain_patch(ret_fix, cpos, I_B_W_2);
-      emit16(I_MOV_SP_R7);
-      emit16(I_POP_R7_PC);
+      chain_here(ret_fix);
+      ins("mov\tsp, r7");
+      ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
-      i = cpos; cpos = frame_at; imm2(1, sz); cpos = i;
+      i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
+      flush();
       // restore shadowed symbols
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
       return 0;
     }
     // global variable
     if (s->class) die("duplicate global");
+    if (nglob >= 8192) die("too many globals");
     hi = 0;
     if (tk == Assign) { next(); hi = 1; }
     if (darr == -2) { if (!hi) die("array size expected"); darr = count_init(); }
@@ -1830,10 +1827,12 @@ int parse_global() {
       // global array: the symbol is the storage itself; treat name as pointer constant
       dpos = (dpos + 3) & -4;
       s->class = 6; s->type = t + PTR; s->val = dpos;     // val = address of storage
+      gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1;
       dpos = dpos + n;
     } else {
       dpos = (dpos + 3) & -4;
       s->class = CGlo; s->type = t; s->val = dpos;
+      gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1;
       dpos = dpos + n;
     }
     if (hi) {
@@ -1847,30 +1846,60 @@ int parse_global() {
   return 0;
 }
 
+// the data image: .Ldata at its start, a global label at each variable, 16 bytes a line
+int write_data() {
+  int i; int g; int n;
+  oput("\t.data\n.Ldata:\n");
+  i = 0; g = 0; n = 0;
+  while (1) {
+    while (g < nglob && goff[g] <= i) {
+      if (n) { oput("\n"); n = 0; }
+      oput("\t.global\t"); oname(gsym[g]); oput("\n"); oname(gsym[g]); oput(":\n");
+      g = g + 1;
+    }
+    if (i >= dpos) break;
+    if (n) oput(", "); else oput("\t.byte\t");
+    oput(dec(data[i] & 255)); n = n + 1;
+    if (n == 16) { oput("\n"); n = 0; }
+    i = i + 1;
+  }
+  if (n) oput("\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
-  char *out; int fd; int i; int n; int hdr; int entry; int ndefs; char *dn; char *dv; struct Sym *s; struct Sym *d;
-  out = "a.bin"; srcname = 0; incdir = 0; ndefs = 0;
+  int i; int n; int sflag; int ndefs; char *dn; char *dv; struct Sym *s;
+  ofd = -1; outname = 0; srcname = 0; incdir = 0; ndefs = 0; sflag = 0;
   i = 1;
   while (i < argc) {
-    if (!strcmp(argv[i], "-o")) { out = argv[i + 1]; i = i + 2; }
+    if (!strcmp(argv[i], "-o")) { outname = argv[i + 1]; i = i + 2; }
+    else if (!strcmp(argv[i], "-S")) { sflag = 1; i = i + 1; }
     else if (!strcmp(argv[i], "-I")) { incdir = argv[i + 1]; i = i + 2; }
     else if (!strcmp(argv[i], "-D")) { ndefs = ndefs + 1; i = i + 2; }   // defined below, once syms exist
     else { srcname = argv[i]; i = i + 1; }
   }
-  if (!srcname) { printf("usage: cc [-o out.bin] [-I incdir] [-D name[=value]] file.c\n"); return 1; }
+  if (!sflag) { printf("cc: use -S (the driver comes with the next change)\n"); return 1; }
+  if (!srcname) { printf("usage: cc -S [-o out.s] [-I incdir] [-D name[=value]] file.c\n"); return 1; }
+  if (!outname) {                               // file.c -> file.s
+    n = strlen(srcname); outname = malloc(n + 3); strcpy(outname, srcname);
+    if (n > 2 && srcname[n - 2] == '.' && srcname[n - 1] == 'c') outname[n - 1] = 's'; else strcpy(outname + n, ".s");
+  }
 
   syms = malloc(8192 * sizeof(struct Sym)); nsyms = 0;
   mems = malloc(2048 * sizeof(struct Mem)); nmems = 0;
   stsize = malloc(256 * 4); stfirst = malloc(256 * 4); nstructs = 0;
   starr = malloc(256 * 4); stcnt = malloc(256 * 4); dims = malloc(8 * 4);
-  code = malloc(1048576); cpos = 0;
   data = malloc(1048576); dpos = 0;
   fstack_p = malloc(64 * 4); fstack_line = malloc(64 * 4); fstack_mac = malloc(64 * 4); fdepth = 0;
   sv_fp = malloc(64 * 4); sv_fl = malloc(64 * 4); sv_fm = malloc(64 * 4); mbuf = malloc(65536);
   tstack = malloc(64 * 4); tdepth = 0; bn = malloc(256 * 4); bnl = 1;
   fnret = malloc(512 * 4); fnparams = malloc(512 * 4); fnnp = malloc(512 * 4); nfn = 0;
-  init_open = 0; init_head = -1; init_tail = -1;
-  afix_at = malloc(4096 * 4); afix_sym = malloc(4096 * 4); naddr = 0;
+  init_open = 0;
+  lpool = malloc(262144); lppos = 0; nlines = 0; nlabels = 0;
+  lkind = malloc(16384 * 4); ltext = malloc(16384 * 4); llab = malloc(16384 * 4); lcond = malloc(16384 * 4); lnext = malloc(16384 * 4);
+  obuf = malloc(65536); opos = 0; ibuf = malloc(262144); ipos = 0; tobuf = 0;
+  numbuf = malloc(16); ccbuf = malloc(4); ccname = "eqnecsccmiplvsvchilsgeltgtle";
+  gsym = malloc(8192 * sizeof(struct Sym *)); goff = malloc(8192 * 4); nglob = 0;
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
   // keywords, in token enum order
@@ -1884,7 +1913,6 @@ int main(int argc, char **argv) {
     if (ival == SYS_malloc || ival == SYS_strcpy || ival == SYS_strchr || ival == SYS_getcwd || ival == SYS_net_ip) s->type = TCHAR + PTR;
     next();
   }
-  p = "main"; next(); s = id;
   // predefined macro and -D NAME[=value]
   define_macro("__T2CC__", "1");
   i = 1;
@@ -1897,40 +1925,21 @@ int main(int argc, char **argv) {
   }
 
   p = readfile(srcname); line = 1;
+  ofd = open(outname, 577, 420);                // O_WRONLY|O_CREAT|O_TRUNC, 0644
+  if (ofd < 0) { printf("cannot write %s\n", outname); return 1; }
+  oput("\t.syntax unified\n\t.thumb\n\t.text\n");
   next();
   while (tk) parse_global();
   if (ifdepth) die("#endif missing");
 
-  // check for unresolved functions
-  i = 0; while (i < nsyms) { if (syms[i].class == CFun && syms[i].val < 0 && syms[i].fix >= 0) { printf("undefined function: %s\n", syms[i].name); exit(1); } i = i + 1; }
-  if (s->class != CFun || s->val < 0) die("no main()");
-  // function addresses: movw/movt r0,#off at afix_at, then add r0,pc; pc reads as afix_at + 12
-  i = 0;
-  while (i < naddr) {
-    d = afix_sym[i];
-    if (d->class != CFun || d->val < 0) {
-      printf("undefined function: "); n = 0; while (n < d->len) { putchar(d->name[n]); n = n + 1; } printf("\n"); exit(1);
-    }
-    n = cpos; cpos = afix_at[i]; imm2(0, d->val + 1 - (afix_at[i] + 12)); cpos = n;
-    i = i + 1;
+  // global initializer code: one run-before-main function (ld calls it from its entry stub)
+  if (ipos) {
+    oput(".Linit:\n\tpush\t{r4, lr}\n"); oflush();
+    write(ofd, ibuf, ipos);
+    oput("\tpop\t{r4, pc}\n\t.t2init\t.Linit\n");
   }
-
-  fd = open(out, 577, 420);    // O_WRONLY|O_CREAT|O_TRUNC, 0644
-  if (fd < 0) { printf("cannot write %s\n", out); return 1; }
-  hdr = 0; write(fd, "T2CC", 4);
-  // global initializer chunks: entry = push {r4,lr} ; b chunks ; (last chunk) pop {r4,lr} ; b main
-  entry = s->val;
-  if (init_head >= 0) {
-    entry = cpos;
-    emit16(I_PUSH_R4_LR);
-    b_w(init_head);
-    patch_b(init_tail, cpos);
-    emit32(I_POP_W_R4_LR, I_POP_W_R4_LR_2);
-    b_w(s->val);
-  }
-  write(fd, &cpos, 4); write(fd, &dpos, 4); write(fd, &hdr, 4); write(fd, &entry, 4);
-  write(fd, code, cpos); write(fd, data, dpos);
-  close(fd);
-  printf("%s: %d bytes code, %d bytes data, entry %d\n", out, cpos, dpos, entry);
+  write_data();
+  oflush();
+  close(ofd); ofd = -1;
   return 0;
 }

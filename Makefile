@@ -5,36 +5,42 @@ BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
 all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
+# Board binaries: compiler/cc -S writes assembly, build/host/as and build/host/ld turn it into
+# the .bin (intermediates in build/s/). TOOLS is what every such build needs.
+TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
+# CCBIN source flags: one C file to $@ through build/s/NAME.s and build/s/NAME.o
+define CCBIN
+	@mkdir -p root/bin build/s
+	./$(CC_HOST) -S $(2) -o build/s/$(basename $(notdir $@)).s $(1)
+	build/host/as -o build/s/$(basename $(notdir $@)).o build/s/$(basename $(notdir $@)).s
+	build/host/ld -o $@ build/s/$(basename $(notdir $@)).o
+endef
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): compiler/cc.c sys.h
 	gcc -O2 -w -I . -o $@ compiler/cc.c
-root/bin/cc.bin: $(CC_HOST) compiler/cc.c sys.h
-	@mkdir -p root/bin root/lib root/src
-	./$(CC_HOST) -o $@ compiler/cc.c
-root/bin/%.bin: userland/%.c $(CC_HOST) sys.h lib/net.c
-	@mkdir -p root/bin
-	./$(CC_HOST) -I lib -o $@ $<
+root/bin/cc.bin: compiler/cc.c $(TOOLS)
+	@mkdir -p root/lib root/src
+	$(call CCBIN,compiler/cc.c,)
+root/bin/%.bin: userland/%.c $(TOOLS) lib/net.c
+	$(call CCBIN,$<,-I lib)
 # binutils: host builds for the PC (tests) and board builds with compiler/cc
 build/host/%: binutils/%.c lib/t2obj.h lib/t2obj.c
 	@mkdir -p build/host
 	gcc -O2 -w -I lib -I . -o $@ $<
-root/bin/%.bin: binutils/%.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
-	@mkdir -p root/bin
-	./$(CC_HOST) -I lib -o $@ $<
+root/bin/%.bin: binutils/%.c $(TOOLS) lib/t2obj.h lib/t2obj.c
+	$(call CCBIN,$<,-I lib)
 # the assembler: same pattern, source in assembler/
 build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
 	@mkdir -p build/host
 	gcc -O2 -w -I lib -I . -o $@ assembler/as.c
-root/bin/as.bin: assembler/as.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
-	@mkdir -p root/bin
-	./$(CC_HOST) -I lib -o $@ assembler/as.c
+root/bin/as.bin: assembler/as.c $(TOOLS) lib/t2obj.h lib/t2obj.c
+	$(call CCBIN,assembler/as.c,-I lib)
 # the linker: same pattern, source in linker/
 build/host/ld: linker/ld.c lib/t2obj.h lib/t2obj.c
 	@mkdir -p build/host
 	gcc -O2 -w -I lib -I . -o $@ linker/ld.c
-root/bin/ld.bin: linker/ld.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
-	@mkdir -p root/bin
-	./$(CC_HOST) -I lib -o $@ linker/ld.c
+root/bin/ld.bin: linker/ld.c $(TOOLS) lib/t2obj.h lib/t2obj.c
+	$(call CCBIN,linker/ld.c,-I lib)
 root/lib/t2obj.h: lib/t2obj.h
 	@mkdir -p root/lib && cp lib/t2obj.h root/lib/
 root/lib/t2obj.c: lib/t2obj.c
@@ -49,10 +55,10 @@ host: host_linux.c sys.h
 # Reference compiler: gcc build of compiler/cc.c at the commit in build/ref/COMMIT (byte-identity reference)
 ref:
 	@mkdir -p build/ref
-	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
+	@test -f build/ref/COMMIT || echo e4fb427 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/ld
+check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/ld $(CC_HOST)
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message
@@ -78,6 +84,8 @@ check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/l
 	  if [ $$st -ne 1 ] || [ "$$out" != "objdump: cannot read build/obj/missing.o" ]; then echo "FAIL objdump missing: status $$st, output '$$out'"; exit 1; fi
 	@echo objdump error checks ok
 	python3 tools/check_asm.py --objdump-corpus
+	@# cc -S + as + ld against the reference compiler (make ref): identical .bin files
+	python3 tools/check_ref.py
 .PHONY: ref check
 clean:
-	rm -rf $(CC_HOST) host_linux root/bin/*.bin
+	rm -rf $(CC_HOST) host_linux root/bin/*.bin build/s
