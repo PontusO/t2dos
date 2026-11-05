@@ -73,6 +73,8 @@ char *sv_p; int sv_tk; int sv_ival; struct Sym *sv_id; int sv_line; int sv_dpos;
 char **fstack_p; int *fstack_line; struct Sym **fstack_mac; int fdepth;
 char **sv_fp; int *sv_fl; struct Sym **sv_fm; int sv_fdepth;
 char *mbuf;              // macro expansion is built here
+int ifdepth;             // #if levels whose taken branch is being compiled
+int pp_if;               // evaluating an #if: unknown identifiers are 0
 char *srcname;
 char *incdir;
 
@@ -558,8 +560,74 @@ char *line_body() {
   r = sdup(mbuf, o);
   return trim(r);
 }
+// is the directive word w at p (and not just the start of a longer word)?
+int pp_word(char *w) { int n; n = strlen(w); return !memcmp(p, w, n) && !idchar(p[n]); }
+int pp_skip_ws() { while (*p == ' ' || *p == '\t') p = p + 1; return 0; }
+// Skip a block whose condition is false: lines up to the #elif, #else or #endif of
+// this level (only #endif if to_endif). Nested #if blocks are skipped whole.
+// Returns 1 #elif, 2 #else, 3 #endif, with p after the word.
+int skip_cond(int to_endif) {
+  int depth;
+  depth = 0;
+  while (1) {
+    while (*p && *p != '\n') { if (*p == '\\' && p[1] == '\n') { p = p + 1; line = line + 1; } p = p + 1; }
+    if (!*p) die("#endif missing");
+    p = p + 1; line = line + 1;
+    pp_skip_ws();
+    if (*p != '#') continue;
+    p = p + 1; pp_skip_ws();
+    if (pp_word("if") || pp_word("ifdef") || pp_word("ifndef")) depth = depth + 1;
+    else if (pp_word("endif")) { if (!depth) { p = p + 5; return 3; } depth = depth - 1; }
+    else if (!depth && !to_endif && pp_word("elif")) { p = p + 4; return 1; }
+    else if (!depth && !to_endif && pp_word("else")) { p = p + 4; return 2; }
+  }
+}
+// the value of an #if or #elif expression (the rest of the line)
+int pp_eval() {
+  char *t; char *b; char *o; char *w; struct Sym *m; int v; int paren;
+  int s_tk; int s_ival; struct Sym *s_id; int s_numty; int s_slen; int s_pb;
+  t = line_body();
+  b = malloc(strlen(t) * 2 + 16); o = b;     // defined(X) and defined X become 1 or 0, before expansion
+  while (*t) {
+    if (t[0] == '/' && t[1] == '/') break;      // comments go
+    if (t[0] == '/' && t[1] == '*') { t = t + 2; while (*t && !(t[0] == '*' && t[1] == '/')) t = t + 1; if (*t) t = t + 2; *o = ' '; o = o + 1; }
+    else if (idstart(*t)) {
+      w = t; while (idchar(*t)) t = t + 1;
+      if (t - w == 7 && !memcmp(w, "defined", 7)) {
+        while (*t == ' ' || *t == '\t') t = t + 1;
+        paren = *t == '(';
+        if (paren) { t = t + 1; while (*t == ' ' || *t == '\t') t = t + 1; }
+        w = t; while (idchar(*t)) t = t + 1;
+        if (t == w) die("defined needs a name");
+        m = find_sym(w, t - w);
+        *o = m && m->mdef ? '1' : '0'; o = o + 1;
+        if (paren) { while (*t == ' ' || *t == '\t') t = t + 1; if (*t != ')') die(") expected after defined"); t = t + 1; }
+      }
+      else while (w < t) { *o = *w; o = o + 1; w = w + 1; }
+    }
+    else { *o = *t; o = o + 1; t = t + 1; }
+  }
+  *o = 0;
+  t = expand_text(b); free(b);
+  b = malloc(strlen(t) + 4); strcpy(b, t); strcpy(b + strlen(b), " ;"); free(t);   // ; ends it
+  s_tk = tk; s_ival = ival; s_id = id; s_numty = numty; s_slen = slen; s_pb = pb;   // we are inside lex()
+  push_src(b, 0); pb = 0; pp_if = 1;
+  next(); v = cexpr();
+  if (tk != ';') die("bad #if expression");
+  pp_if = 0;
+  fdepth = fdepth - 1; p = fstack_p[fdepth]; line = fstack_line[fdepth];
+  tk = s_tk; ival = s_ival; id = s_id; numty = s_numty; slen = s_slen; pb = s_pb;
+  return v;
+}
+// #define NAME body from C (-D and predefined macros)
+int define_macro(char *name, char *body) {
+  struct Sym *d;
+  d = syms + intern(name, strlen(name));
+  d->mdef = 1; d->mnargs = -1; d->mvar = 0; d->mbody = body;
+  return 0;
+}
 int preprocess() {
-  char *name; char *q; int n; struct Sym *d; char **names;
+  char *name; char *q; int n; struct Sym *d; char **names; int r;
   while (*p == ' ' || *p == '\t') p = p + 1;
   if (!memcmp(p, "include", 7)) {
     p = p + 7;
@@ -599,6 +667,36 @@ int preprocess() {
     }
     d->mbody = line_body(); d->mdef = 1;   // the symbol keeps its class: a name can be a macro and a variable
     return 0;
+  }
+  else if (pp_word("ifdef") || pp_word("ifndef") || pp_word("if")) {
+    if (pp_word("if")) { p = p + 2; n = pp_eval(); }
+    else {
+      r = pp_word("ifndef"); p = p + (r ? 6 : 5); pp_skip_ws();
+      name = p; while (idchar(*p)) p = p + 1;
+      if (p == name) die("#ifdef needs a name");
+      d = find_sym(name, p - name);
+      n = d && d->mdef; if (r) n = !n;
+    }
+    if (n) ifdepth = ifdepth + 1;
+    else {
+      while (1) {                               // find the branch to compile, if any
+        r = skip_cond(0);
+        if (r == 3) break;
+        if (r == 2) { ifdepth = ifdepth + 1; break; }
+        if (pp_eval()) { ifdepth = ifdepth + 1; break; }
+      }
+    }
+  }
+  else if (pp_word("elif") || pp_word("else")) {  // the branch before was taken: skip the rest
+    if (!ifdepth) die("#elif or #else without #if");
+    skip_cond(1); ifdepth = ifdepth - 1;
+  }
+  else if (pp_word("endif")) {
+    if (!ifdepth) die("#endif without #if");
+    ifdepth = ifdepth - 1;
+  }
+  else if (pp_word("error")) {
+    p = p + 5; printf("%s:%d: #error %s\n", srcname, line, line_body()); exit(1);
   }
   else if (!memcmp(p, "undef", 5)) {
     p = p + 5;
@@ -725,6 +823,7 @@ int cunary() {
   int v; int t;
   if (tk == Num) { v = ival; next(); return v; }
   if (tk == Id && id->class == CNum) { v = id->val; next(); return v; }
+  if (tk == Id && pp_if) { next(); return 0; }          // #if FOO with FOO not a macro
   if (tk == '(') { next(); v = cexpr(); if (tk != ')') die(") expected"); next(); return v; }
   if (tk == Sub) { next(); return -cunary(); }
   if (tk == Add) { next(); return cunary(); }
@@ -1445,15 +1544,16 @@ int parse_global() {
 }
 
 int main(int argc, char **argv) {
-  char *out; int fd; int i; int n; int hdr; int entry; struct Sym *s; struct Sym *d;
-  out = "a.bin"; srcname = 0; incdir = 0;
+  char *out; int fd; int i; int n; int hdr; int entry; int ndefs; char *dn; char *dv; struct Sym *s; struct Sym *d;
+  out = "a.bin"; srcname = 0; incdir = 0; ndefs = 0;
   i = 1;
   while (i < argc) {
     if (!strcmp(argv[i], "-o")) { out = argv[i + 1]; i = i + 2; }
     else if (!strcmp(argv[i], "-I")) { incdir = argv[i + 1]; i = i + 2; }
+    else if (!strcmp(argv[i], "-D")) { ndefs = ndefs + 1; i = i + 2; }   // defined below, once syms exist
     else { srcname = argv[i]; i = i + 1; }
   }
-  if (!srcname) { printf("usage: cc [-o out.bin] [-I incdir] file.c\n"); return 1; }
+  if (!srcname) { printf("usage: cc [-o out.bin] [-I incdir] [-D name[=value]] file.c\n"); return 1; }
 
   syms = malloc(8192 * sizeof(struct Sym)); nsyms = 0;
   mems = malloc(2048 * sizeof(struct Mem)); nmems = 0;
@@ -1481,10 +1581,21 @@ int main(int argc, char **argv) {
     next();
   }
   p = "main"; next(); s = id;
+  // predefined macro and -D NAME[=value]
+  define_macro("__T2CC__", "1");
+  i = 1;
+  while (i < argc) {
+    if (!strcmp(argv[i], "-D") && i + 1 < argc) {
+      dn = argv[i + 1]; dv = strchr(dn, '=');
+      if (dv) { *dv = 0; define_macro(dn, dv + 1); } else define_macro(dn, "1");
+    }
+    i = i + 1;
+  }
 
   p = readfile(srcname); line = 1;
   next();
   while (tk) parse_global();
+  if (ifdepth) die("#endif missing");
 
   // check for unresolved functions
   i = 0; while (i < nsyms) { if (syms[i].class == CFun && syms[i].val < 0 && syms[i].fix >= 0) { printf("undefined function: %s\n", syms[i].name); exit(1); } i = i + 1; }

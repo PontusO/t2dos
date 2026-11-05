@@ -87,7 +87,7 @@ read/write/close; exec closes sockets a child leaked.
   shell implements `> file` and `>> file` with it). cwd lives in the kernel.
 - Console is a driver interface (`putc/getc/kbhit/ctl/width/height`); the serial
   driver is in; a display+keyboard driver is the same five methods.
-- `cc -I dir` adds an include directory (the Makefile uses `-I lib`).
+- `cc -I dir` adds an include directory (the Makefile uses `-I lib`); `cc -D NAME[=value]` defines a macro.
 - `printf`/`sprintf` are kernel-side: `%[-][0][width]d u x c s %%`.
 
 ## Language subset (compiler/cc.c)
@@ -129,10 +129,15 @@ arguments are macro-expanded before substitution except next to `#` and `##`,
 results are rescanned, and a macro is not expanded inside its own expansion. Adjacent string literals join
 (`"T2DOS " VERSION`). Array sizes, case labels and enum values take constant
 expressions (`#define SIZE (4 * 2)`, `sizeof(type)`, `?:`).
-Not yet: float, conditional compilation (`#if`, `#ifdef` lines are ignored).
+Conditional compilation: `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`
+(nested), `defined(X)` / `defined X`, `#error`. `#if` expressions are
+macro-expanded constant expressions; unknown names are 0. `__T2CC__` is
+predefined, and `cc -D NAME[=value]` defines a macro (value 1 by default).
+Not yet: float.
 See compiler/tests/ for the covered subset (test4.c: function pointers,
 test5.c: initializers, test6.c: multi-dimensional arrays, test7.c:
-unsigned/short, test8.c: the comma operator, test9.c: macros).
+unsigned/short, test8.c: the comma operator, test9.c: macros, test10.c:
+conditional compilation).
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -144,8 +149,9 @@ after every program. `edit` works through `screen` (tested with its default
 flow control on) and builds on the board byte-identical to the PC build.
 Backspace erases at the shell and `write` prompts. test4.c (function
 pointers), test5.c (initializers), test6.c (multi-dimensional arrays),
-test7.c (unsigned/short), test8.c (comma operator) and test9.c (macros) print
-the same as a native gcc build, whether compiled on the PC or on the board.
+test7.c (unsigned/short), test8.c (comma operator), test9.c (macros) and
+test10.c (conditional compilation, built with -D FROM_CMDLINE=7) print the same
+as a native gcc build, whether compiled on the PC or on the board.
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
@@ -161,7 +167,7 @@ byte-identical to the PC cross build.
   unlike the board kernel.
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
 - compiler/tests/ has no automatic runner: compare their output by hand
-  (test4.c to test9.c against `gcc compiler/tests/testN.c && ./a.out`;
+  (test4.c to test10.c against `gcc compiler/tests/testN.c && ./a.out`;
   test4's pointer `sizeof` differs on a 64-bit PC).
 - Under qemu/host_linux the function pointer support has not been run yet
   (qemu-arm is not installed on the development PC).
