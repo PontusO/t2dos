@@ -41,19 +41,22 @@ class Board:
     def __init__(self, port=None):
         self.port = port or find_port()
         try:
-            self.s = serial.Serial(self.port, 115200, timeout=0.05, write_timeout=5)
+            self.s = serial.Serial(self.port, 115200, timeout=0.05, write_timeout=5, exclusive=True)
         except serial.SerialException as e:
-            raise BoardError('cannot open %s: %s' % (self.port, e))
+            msg = str(e)
+            if 'lock' in msg or 'busy' in msg.lower() or 'Resource temporarily' in msg:
+                raise BoardError('port busy: %s is in use by another process (%s)' % (self.port, msg))
+            raise BoardError('cannot open %s: %s' % (self.port, msg))
 
     def _write(self, data):
         try:
-            self.s.write(data)
-            self.s.flush()
+            self.s.write(data)  # bounded by write_timeout; no flush (tcdrain has no timeout)
         except serial.SerialTimeoutException:
             raise BoardError('write timeout: the board has hung, reset it')
 
-    def _read(self, wait=3.0, quiet=0.3):
-        """Read until quiet seconds pass with no new bytes, or wait seconds total."""
+    def _read(self, wait=3.0, quiet=0.3, until_prompt=False):
+        """Read until quiet seconds pass with no new bytes, or wait seconds total.
+        With until_prompt, quiet only counts once the output ends in a shell prompt."""
         buf = b''
         start = time.time()
         last = start
@@ -64,7 +67,8 @@ class Board:
                 buf += d
                 last = now
             if now - last >= quiet and now - start >= 0.1:
-                break
+                if not until_prompt or PROMPT_RE.match(buf.replace(b'\r', b'\n').split(b'\n')[-1].decode('latin-1')):
+                    break
             if now - start >= wait:
                 break
         return buf
@@ -82,15 +86,16 @@ class Board:
             raise BoardError('put %s failed: %r' % (remote, out[-200:]))
 
     def run(self, cmd, wait=3.0):
-        """Run a shell command; return output lines without echo, prompt and exit line."""
+        """Run a shell command; return output lines without echo, prompt and exit line.
+        Raises BoardError if the echoed command and a final prompt do not come back."""
         self.s.reset_input_buffer()
         self._write(cmd.encode() + b'\r')
-        raw = self._read(wait, 0.3).decode('latin-1')
+        raw = self._read(wait, 0.3, True).decode('latin-1')
         lines = [l.rstrip() for l in raw.replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+        if not lines or not lines[0].strip().endswith(cmd.strip()) or not PROMPT_RE.match(lines[-1]):
+            raise BoardError('no answer from the board: it may have hung, reset it (got %r)' % raw[-120:])
         out = []
-        for i, l in enumerate(lines):
-            if i == 0 and l.strip().endswith(cmd.strip()):
-                continue  # echoed command line
+        for l in lines[1:]:
             if PROMPT_RE.match(l) or EXIT_RE.match(l):
                 continue
             out.append(l)
@@ -98,12 +103,22 @@ class Board:
             out.pop()
         return out
 
-    def fetch(self, remote):
+    def fetch(self, remote, local=None, size=None):
+        """Read a remote file via hexdump; check contiguous offsets and the optional size."""
         data = b''
-        for l in self.run('hexdump ' + remote, 10.0):
+        for l in self.run('hexdump ' + remote, 300.0):
             m = HEX_RE.match(l)
             if m:
+                if int(m.group(1), 16) != len(data):
+                    raise BoardError('fetch %s: gap at offset %d (next line says %s)' % (remote, len(data), m.group(1)))
                 data += bytes.fromhex(m.group(2).replace(' ', ''))
+        if not data:
+            raise BoardError('fetch %s: no data' % remote)
+        if size is not None and len(data) != size:
+            raise BoardError('fetch %s: got %d bytes, expected %d' % (remote, len(data), size))
+        if local:
+            with open(local, 'wb') as f:
+                f.write(data)
         return data
 
     def expect_gcc(self, test_c, flags=''):
@@ -136,11 +151,7 @@ def main(argv):
             for l in Board().run(argv[2], float(argv[3]) if len(argv) > 3 else 3.0):
                 print(l)
         elif len(argv) >= 4 and argv[1] == 'fetch':
-            d = Board().fetch(argv[2])
-            if not d:
-                raise BoardError('fetch %s: no data' % argv[2])
-            with open(argv[3], 'wb') as f:
-                f.write(d)
+            Board().fetch(argv[2], argv[3])
         else:
             print(__doc__)
             return 1
