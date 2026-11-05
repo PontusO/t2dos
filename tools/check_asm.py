@@ -408,17 +408,18 @@ def norm(ops):
 
 
 def gnu_all(code, work):
-    """Every line of GNU's disassembly: {addr: (bytes, mnemonic, operands)}, mnemonic '' for
-    undefined encodings."""
+    """Every line of GNU's disassembly: {addr: (bytes, mnemonic, operands, comment)}, mnemonic ''
+    for undefined encodings."""
     out = {}
     for l in gnu_dis(code, work).splitlines():
         m = GNU_ANY_RE.match(l)
         if not m:
             continue
         b = b''.join(bytes.fromhex(h)[::-1] for h in m.group(2).split())
-        body = re.split('[@;]', m.group(3))[0].strip()
-        mn, _, ops = body.partition('\t')
-        out[int(m.group(1), 16)] = (b, mn.strip(), norm(ops))
+        parts = re.split('[@;]', m.group(3), 1)
+        mn, _, ops = parts[0].strip().partition('\t')
+        comment = parts[1].strip() if len(parts) > 1 else ''
+        out[int(m.group(1), 16)] = (b, mn.strip(), norm(ops), comment)
     return out
 
 
@@ -461,20 +462,39 @@ def it_conds(mn, ops):
     return [ops] + [ops if x == 't' else inv for x in m.group(1)]
 
 
-def assembles_to(mn, ops, b, work, block=None):
-    """1 if build/host/as assembles the instruction (as GNU prints it) to the bytes b; inside an IT
-    block (block: the conditions of this and the remaining instructions of the block) at the same
-    place in a block of the same conditions, the rest filled with nop."""
+def assembles_to(mn, ops, b, work, block=None, at=0):
+    """1 if build/host/as assembles the instruction (as GNU prints it, at offset at) to the bytes b;
+    inside an IT block (block: the conditions of this and the remaining instructions of the block)
+    at the same place in a block of the same conditions, the rest filled with nop. A branch to
+    0xT goes to a label at offset T (.space fills the gaps)."""
     mn, ops = as_form(mn, ops)
-    t = '\t%s\t%s\n' % (mn, ops)
-    skip = 0
+    items = []                       # (offset, size, text)
     if block:
-        t = '\tit%s\t%s\n' % (''.join('t' if c == block[0] else 'e' for c in block[1:]), block[0]) + t
-        t += ''.join('\tnop%s\n' % c for c in block[1:])
-        skip = 2
+        items.append((at - 2, 2, '\tit%s\t%s' % (''.join('t' if c == block[0] else 'e' for c in block[1:]), block[0])))
+    label = None
+    if BRANCH_RE.match(mn) and re.match(r'^0x[0-9a-f]+$', ops):
+        label = int(ops, 16)
+        ops = 'L_target'
+    items.append((at, len(b), '\t%s\t%s' % (mn, ops)))
+    for i, c in enumerate(block[1:] if block else []):
+        items.append((at + len(b) + 2 * i, 2, '\tnop%s' % c))
+    if label is not None:
+        items.append((label, 0, 'L_target:'))
+    items.sort(key=lambda x: (x[0], x[1]))
+    if items[0][0] < 0:
+        return False
+    t = ''
+    pos = 0
+    for off, size, text in items:
+        if off < pos:
+            return False             # a label inside an instruction
+        if off > pos:
+            t += '\t.space\t%d\n' % (off - pos)
+        t += text + '\n'
+        pos = off + size
     open(work + '.s', 'w').write('\t.syntax unified\n\t.thumb\n\t.text\n' + t)
     o, err = ours(work + '.s', work + '.o')
-    return o is not None and o[0][skip:skip + len(b)] == b
+    return o is not None and o[0][at:at + len(b)] == b
 
 
 def check_objdump_file(name, path, code, work, stats):
@@ -498,7 +518,7 @@ def check_objdump_file(name, path, code, work, stats):
     bad = 0
     block = []                       # GNU's IT state: conditions of the rest of the block
     for a in sorted(gnu_lines):
-        gb, gmn, gops = gnu_lines[a]
+        gb, gmn, gops, gcomment = gnu_lines[a]
         here = block
         block = block[1:]
         if it_conds(gmn, gops):
@@ -517,12 +537,16 @@ def check_objdump_file(name, path, code, work, stats):
                 bad += 1
             elif gmn == '':
                 stats['undefined'] += 1
-            elif BRANCH_RE.match(gmn) or not assembles_to(gmn, gops, gb, work + '-one', here):
-                stats['notas'] += 1
-                stats['notas_mn'][gmn] = stats['notas_mn'].get(gmn, 0) + 1
-            else:
+            elif assembles_to(gmn, gops, gb, work + '-one', here, a):
                 print('FAIL %s: 0x%x: .short for %s %s, which as assembles to these bytes' % (name, a, gmn, gops))
                 bad += 1
+            elif BRANCH_RE.match(gmn) and 'unpredictable' not in gcomment and not here:
+                # a branch as bytes only where GNU calls it unpredictable or inside an IT block
+                print('FAIL %s: 0x%x: .short for the branch %s %s' % (name, a, gmn, gops))
+                bad += 1
+            else:
+                stats['notas'] += 1
+                stats['notas_mn'][gmn] = stats['notas_mn'].get(gmn, 0) + 1
             continue
         if b != gb or mn != gmn or norm(ops) != gops:
             if bad < 10:
