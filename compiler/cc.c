@@ -234,6 +234,7 @@ int fnparam_of(int t, int i) { return fnparams[(t >> 22) & 511][i]; }
 
 // load r0 = *r0 according to type
 int load(int t) {
+  lastload = 0;                                              // set again below only when a load is emitted
   if (isfndes(t)) return 0;                                  // a function is its own address
   if (t == TCHAR) { emit32(I_LDRSB_W_R0_R0, I_LDRSB_W_R0_R0_2); lastload = 4; }
   else if (t == TINT || t == TUINT || t == TFLOAT || t >= PTR) { emit16(I_LDR_R0_R0); lastload = 2; }

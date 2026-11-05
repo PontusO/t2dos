@@ -30,6 +30,17 @@ int main() {
   printf("sum7 %d\n", sum7(&p->h));
   hp = &p->h; hp->b = 5; printf("via hp %d %d\n", o.h.b, p->h.b);
 
+  // &*p : dereferencing a struct pointer emits no load
+  printf("diff deref %d\n", (int)((char *)&*p - (char *)p));
+  memcpy(&*p, buf, 28);
+  printf("deref %d %d\n", o.h.a & 255, o.h.g & 255);
+  hp = &p->h;
+  printf("deref h %d\n", (int)((char *)&*hp - (char *)hp));
+  memset(&*hp, 0, sizeof(struct H));
+  hp->a = 3; hp->g = 4; h.a = 8; h.g = 9;
+  printf("sum7 deref %d\n", sum7(&*hp));
+  memcpy(&*hp, &h, sizeof(struct H)); printf("copy deref %d %d\n", o.h.a, o.h.g);
+
   // &s.h : struct variable
   printf("diff s.h %d\n", (int)((char *)&o.h - (char *)&o));
   memcpy(&o.h, buf, 28);
