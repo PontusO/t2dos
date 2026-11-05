@@ -19,6 +19,10 @@ else is a T2CC program on the SD card.
 1. `make` (needs gcc). Copy `root/` to the SD card.
 2. Flash `kernel.ino`. It boots `/bin/sh.bin`; if that is missing you get a
    `recovery>` prompt with `put name size` (raw bytes follow), `ls`, `mkdir`, `run`.
+   No SD card: the kernel falls back to LittleFS in on-board flash (banner says
+   `fs flash`, formatted on first use). On the CPico 2350 build with the
+   `flash=8388608_7340032` layout: 1 MB for the kernel, 7 MB filesystem. Fill it
+   with `put` from the recovery prompt or the shell.
 3. On the board: `cd /src`, `write hello.c` (type it, end with `.`),
    `cc -o hello.bin hello.c`, `hello`.
    `put` works from the shell too; from a PC:
@@ -45,7 +49,10 @@ read/write/close; exec closes sockets a child leaked.
   (reserved), board 96+, user 128+.
 - `exec(path, argc, argv)` loads a binary into fresh code (SRAM) + data + 256 KB
   stack (PSRAM), runs it, frees everything, returns its exit code. Nesting up to 4.
-  Files the child leaked are closed; `redirect(fd)` is restored.
+  Files the child leaked are closed, memory it `malloc`ed is freed;
+  `redirect(fd)` is restored. `malloc` returns zeroed memory.
+- Syscalls run on a 16 KB kernel stack in SRAM, not the program's PSRAM stack
+  (PSRAM is unreachable while flash is being written).
 - fd 0/1 are the console; `redirect(fd)` routes fd 1 and printf to a file (the
   shell implements `> file` and `>> file` with it). cwd lives in the kernel.
 - Console is a driver interface (`putc/getc/kbhit/ctl/width/height`); the serial

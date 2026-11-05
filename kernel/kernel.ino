@@ -8,6 +8,7 @@
 // (argv[n-1] is arg 0), result in r0. See cc.c and sys.h.
 
 #include <SDFS.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -22,6 +23,9 @@
 #define SOCK_FD 100
 #define STACK_SIZE (256 * 1024)
 
+// Root filesystem: the SD card if it mounts, else LittleFS in on-board flash.
+// The flash FS size comes from the board's flash layout (build with
+// flash=8388608_7340032 on the CPico 2350: 1 MB kernel, 7 MB filesystem).
 static FS *fsys = &SDFS;
 
 // ============================================================ console drivers
@@ -162,9 +166,33 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
 }
 
 // ============================================================ programs
-struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; };
+// Every malloc() a program makes is linked into its Proc, so whatever it did
+// not free() is reclaimed when it exits. The 8-byte header keeps 8-byte alignment.
+struct Blk { Blk *next, *prev; };
+struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Blk heap; };
 static Proc procs[MAX_NEST];
 static int nest = -1;
+
+static void *u_malloc(int n) {
+  if (n < 0) return nullptr;
+  Blk *b = (Blk *)big_alloc(sizeof(Blk) + n);
+  if (!b) return nullptr;
+  memset(b + 1, 0, n);                  // programs (cc's data segment, for one) rely on zeroed memory
+  Blk *h = &procs[nest].heap;
+  b->next = h->next; b->prev = h; h->next->prev = b; h->next = b;
+  return b + 1;
+}
+static void u_free(void *p) {
+  if (!p) return;
+  Blk *b = (Blk *)p - 1;
+  b->prev->next = b->next; b->next->prev = b->prev;
+  free(b);
+}
+static void u_free_all(int level) {     // index, not Proc*: Arduino's generated prototypes precede struct Proc
+  Blk *h = &procs[level].heap;
+  while (h->next != h) { Blk *b = h->next; h->next = b->next; free(b); }
+  h->prev = h;
+}
 static char fmtbuf[1024];
 
 static int run_bin(const char *name, int argc, char **argv);
@@ -217,8 +245,8 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_chdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1; strlcpy(cwd, path, sizeof cwd); return 0; }
     case SYS_getcwd: strlcpy((char *)A(0), cwd, A(1)); return A(0);
     // ---- memory and strings
-    case SYS_malloc: return (int)big_alloc(A(0));
-    case SYS_free: free((void *)A(0)); return 0;
+    case SYS_malloc: return (int)u_malloc(A(0));
+    case SYS_free: u_free((void *)A(0)); return 0;
     case SYS_memset: return (int)memset((void *)A(0), A(1), A(2));
     case SYS_memcmp: return memcmp((void *)A(0), (void *)A(1), A(2));
     case SYS_memcpy: return (int)memcpy((void *)A(0), (void *)A(1), A(2));
@@ -262,6 +290,29 @@ extern "C" int sys(int num, int n, int *argv) {
   #undef A
 }
 
+// Syscalls run on a kernel stack in SRAM, never on the program's stack. The
+// program stack lives in PSRAM, which shares the QSPI controller with flash:
+// while LittleFS erases or programs flash, PSRAM is unreachable, so touching
+// that stack inside a flash write hangs the core.
+// t2_sys_sp is where the next syscall's stack starts. A nested exec moves it
+// below the parent's in-use kernel frames (see run_bin).
+static uint64_t kstack[16 * 1024 / 8];
+extern "C" { __attribute__((used)) volatile uint32_t t2_sys_sp = (uint32_t)(kstack + sizeof kstack / 8); }
+static bool on_kstack(uint32_t sp) { return sp > (uint32_t)kstack && sp <= (uint32_t)(kstack + sizeof kstack / 8); }
+
+extern "C" __attribute__((naked)) int sys_entry(int num, int n, int *argv) {
+  asm volatile(
+    "push {r4, lr}\n"
+    "mov r4, sp\n"               // program sp (argv points into the program's stack, still readable)
+    "movw r3, #:lower16:t2_sys_sp\n"
+    "movt r3, #:upper16:t2_sys_sp\n"
+    "ldr r3, [r3]\n"
+    "mov sp, r3\n"
+    "bl sys\n"
+    "mov sp, r4\n"
+    "pop {r4, pc}\n");
+}
+
 // Switch to the program's stack, set r8/r9, push argc/argv, call entry.
 __attribute__((naked)) static int run(void *entry, void *sysfn, void *data, void *stacktop, int argc, char **argv) {
   asm volatile(
@@ -298,15 +349,23 @@ static int run_bin(const char *name, int argc, char **argv) {
 
   nest++;
   Proc *pr = &procs[nest];
+  pr->heap.next = pr->heap.prev = &pr->heap;
   pr->fd_mask = 0; for (int i = 2; i < MAX_FD; i++) if (fds[i]) pr->fd_mask |= 1 << i;   // fds that belong to the parent
   pr->sock_mask = 0; for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i]) pr->sock_mask |= 1 << i;
   int saved_stdout = stdout_fd;
   int ret;
-  if (setjmp(pr->jb) == 0) ret = run(code + hdr[4] + 1, (void *)sys, data, stack + STACK_SIZE - 64, argc, argv);
+  // exec from inside a syscall: we are on the kernel stack, so the child's
+  // syscalls must start below our frames (128 bytes covers run()'s pushes).
+  uint32_t here; asm volatile("mov %0, sp" : "=r"(here));
+  uint32_t saved_sys_sp = t2_sys_sp;
+  if (on_kstack(here)) t2_sys_sp = (here - 128) & ~7u;
+  if (setjmp(pr->jb) == 0) ret = run(code + hdr[4] + 1, (void *)sys_entry, data, stack + STACK_SIZE - 64, argc, argv);
   else ret = pr->exit_code;
+  t2_sys_sp = saved_sys_sp;            // also after exit(), which longjmps past run()
   for (int i = 2; i < MAX_FD; i++) if (fds[i] && !(pr->fd_mask & (1 << i))) { fds[i].close(); fds[i] = File(); }  // leaked by the child
   for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i] && !(pr->sock_mask & (1 << i))) sock_close(SOCK_FD + i);
   stdout_fd = saved_stdout;
+  u_free_all(nest);                    // memory the child malloc()ed and never freed
   nest--;
   free(code); free(data); free(stack);
   return ret;
@@ -344,9 +403,12 @@ void setup() {
   while (!Serial) {}
   Wire.begin(); SPI.begin();
   SDFS.setConfig(SDFSConfig(SD_CS, SPI_FULL_SPEED));
+  const char *fsname = "NONE";
   bool mounted = SDFS.begin();
+  if (mounted) fsname = "sd";
+  else if ((mounted = LittleFS.begin())) { fsys = &LittleFS; fsname = "flash"; }   // formats on first use
 #if defined(PICO_RP2350)
-  Serial.printf("T2DOS kernel  psram %d  sram free %d  sd %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), mounted ? "ok" : "MISSING");
+  Serial.printf("T2DOS kernel  psram %d  sram free %d  fs %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), fsname);
 #endif
   if (mounted && !is_dir("/bin")) fsys->mkdir("/bin");
 }
