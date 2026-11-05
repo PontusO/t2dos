@@ -182,7 +182,7 @@ extern "C" int sys(int num, int n, int *argv) {
       if (k == INFO_SRAM_FREE) return rp2040.getFreeHeap();
 #if defined(PICO_RP2350)
       if (k == INFO_PSRAM_TOTAL) return rp2040.getPSRAMSize();
-      if (k == INFO_PSRAM_FREE) return rp2040.getPSRAMHeap() ? rp2040.getFreePSRAMHeap() : 0;
+      if (k == INFO_PSRAM_FREE) return rp2040.getFreePSRAMHeap();   // 0 when no PSRAM
 #endif
       if (k == INFO_DISK_TOTAL_KB || k == INFO_DISK_USED_KB) { FSInfo fi; fsys->info(fi); return (k == INFO_DISK_TOTAL_KB ? fi.totalBytes : fi.usedBytes) / 1024; }
       if (k == INFO_CONSOLE) return con->width() | con->height() << 16;
