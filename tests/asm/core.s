@@ -553,3 +553,28 @@ loop2:
         .data
         .ascii  "\v\b\f\r\0\7\x4142\q@"
         .byte   '\'', '\t', '@', '"'
+@ ---------------------------------------------------------------- PC-relative loads
+        .text
+        ldr     r0, [pc]
+        ldr     r0, [pc, #4]
+        ldr     r7, [pc, #1020]
+        ldr     r0, [pc, #1024]
+        ldr     r8, [pc, #4]
+        ldr     r0, [pc, #4092]
+        ldr     r0, [pc, #-4]
+        ldr     r0, [pc, #-4092]
+        ldr.w   r0, [pc, #4]
+        ldr.w   r0, [pc]
+        ldrb    r0, [pc]
+        ldrb    r0, [pc, #4095]
+        ldrb    r0, [pc, #-4]
+        ldrb    r0, [pc, #-4095]
+        ldrb.w  r1, [pc, #8]
+        ldrh    r0, [pc, #2]
+        ldrh    r0, [pc, #-2]
+        ldrh    r9, [pc, #4094]
+        ldrsb   r0, [pc, #1]
+        ldrsb   r0, [pc, #-1]
+        ldrsb   r0, [pc]
+        ldrsh   r0, [pc, #-300]
+        ldrsh.w r0, [pc, #4]

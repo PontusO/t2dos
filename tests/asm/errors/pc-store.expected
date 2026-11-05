@@ -1,0 +1,1 @@
+tests/asm/errors/pc-store.s:4: error: cannot use register index with PC-relative addressing

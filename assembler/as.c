@@ -693,6 +693,7 @@ int do_mem(int id) {
   rt = R(0);
   if (okind[1] != O_MEM) fail("memory operand expected");
   rn = oreg[1];
+  if (rn == 15 && (k < 3 || oidx[1] >= 0)) fail("cannot use register index with PC-relative addressing");   // GNU's words
   if (oidx[1] >= 0) {
     rm = oidx[1];
     if (wid != 4 && lo(rt) && lo(rn) && lo(rm)) return emit16(0x5000 | k << 9 | rm << 6 | rn << 3 | rt);
@@ -702,6 +703,13 @@ int do_mem(int id) {
   v = 0;
   if (ohas[1]) v = opconst(1);
   if (v % scale) fail("misaligned offset");
+  if (rn == 15) {                      // literal loads: ldr T1 (narrow), else imm12 with the U bit (bit 7) for the sign
+    if (wid != 4 && k == 4 && lo(rt) && v >= 0 && v <= 1020) return emit16(0x4800 | rt << 8 | v >> 2);
+    notnarrow();
+    if (v >= 0 && v <= 4095) return emit32(tb | 15, rt << 12 | v);
+    if (v < 0 && v >= -4095) return emit32((tb - 0x80) | 15, rt << 12 | -v);
+    return fail("offset out of range");
+  }
   if (wid != 4) {
     if (rn == 13 && (k == 0 || k == 4) && lo(rt) && v >= 0 && v <= 1020) return emit16((k == 4 ? 0x9800 : 0x9000) | rt << 8 | v >> 2);
     if (nb && lo(rt) && lo(rn) && v >= 0 && v <= 31 * scale) return emit16(nb | (v / scale) << 6 | rn << 3 | rt);
