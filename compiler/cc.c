@@ -71,7 +71,7 @@ char *srcname;
 char *incdir;
 
 int preprocess(); int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
-int declarator(int t); int die(char *msg);
+int declarator(int t); int die(char *msg); int expr_comma();
 
 // ------------------------------------------------------------------ helpers
 int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); exit(1); return 0; }
@@ -665,7 +665,7 @@ int expr(int lev) {
       t = declarator(parse_type());
       if (tk != ')') die(") expected in cast"); next();
       expr(Inc); conv(t); ty = t;
-    } else { expr(Assign); if (tk != ')') die(") expected"); next(); }
+    } else { expr_comma(); if (tk != ')') die(") expected"); next(); }
   }
   else if (tk == Mul) {                         // dereference
     next(); expr(Inc);
@@ -707,7 +707,7 @@ int expr(int lev) {
     }
     else if (tk == Cond) {
       next(); emit16(10240); at = bc_w(0);      // cmp r0,#0 ; beq
-      expr(Assign);
+      expr_comma();
       if (tk != ':') die(": expected"); next();
       at2 = b_w(-1); patch_b(at, cpos);
       expr(Cond); patch_b(at2, cpos);
@@ -756,7 +756,7 @@ int expr(int lev) {
       if (ty & ARR) ty = ty & ~ARR; else load(ty);
     }
     else if (tk == Brak) {
-      next(); push(); expr(Assign); pop1();
+      next(); push(); expr_comma(); pop1();
       if (tk != ']') die("] expected"); next();
       if (t < PTR) die("indexing a non-pointer");
       scale(tysize(t - PTR));
@@ -765,6 +765,15 @@ int expr(int lev) {
     }
     else die("bad operator");
   }
+  return 0;
+}
+
+// a, b, c: evaluate left to right, the value is the last one. Used where C takes a
+// full expression; arguments and initializers use expr(Assign), so a comma there
+// still separates them.
+int expr_comma() {
+  expr(Assign);
+  while (tk == ',') { next(); expr(Assign); }
   return 0;
 }
 
@@ -900,7 +909,7 @@ int stmt() {
   int at; int at2; int sv_brk; int sv_cont; int sv_tgt; int body; int t; int bt; int n; int hi; struct Sym *d;
   if (tk == If) {
     next(); if (tk != '(') die("( expected"); next();
-    expr(Assign); if (tk != ')') die(") expected"); next();
+    expr_comma(); if (tk != ')') die(") expected"); next();
     emit16(10240); at = bc_w(0);                // cmp r0,#0 ; beq else
     stmt();
     if (tk == Else) { next(); at2 = b_w(-1); patch_b(at, cpos); stmt(); patch_b(at2, cpos); }
@@ -910,7 +919,7 @@ int stmt() {
     next(); if (tk != '(') die("( expected"); next();
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1; cont_tgt = cpos;
-    expr(Assign); if (tk != ')') die(") expected"); next();
+    expr_comma(); if (tk != ')') die(") expected"); next();
     emit16(10240); at = bc_w(0);
     stmt();
     b_w(cont_tgt); patch_b(at, cpos);
@@ -919,16 +928,16 @@ int stmt() {
   }
   else if (tk == For) {
     next(); if (tk != '(') die("( expected"); next();
-    if (tk != ';') expr(Assign);
+    if (tk != ';') expr_comma();
     if (tk != ';') die("; expected"); next();
     sv_brk = brk_fix; sv_cont = cont_fix; sv_tgt = cont_tgt;
     brk_fix = -1; cont_fix = -1;
     at = cpos;                                  // condition
-    if (tk != ';') { expr(Assign); emit16(10240); at2 = bc_w(0); } else at2 = -1;
+    if (tk != ';') { expr_comma(); emit16(10240); at2 = bc_w(0); } else at2 = -1;
     if (tk != ';') die("; expected"); next();
     body = b_w(-1);                             // skip increment first time
     cont_tgt = cpos;                            // increment
-    if (tk != ')') expr(Assign);
+    if (tk != ')') expr_comma();
     if (tk != ')') die(") expected"); next();
     b_w(at);
     patch_b(body, cpos);
@@ -940,7 +949,7 @@ int stmt() {
   }
   else if (tk == Switch) {
     next(); if (tk != '(') die("( expected"); next();
-    expr(Assign); if (tk != ')') die(") expected"); next();
+    expr_comma(); if (tk != ')') die(") expected"); next();
     if (tk != '{') die("{ expected"); next();
     sv_brk = brk_fix; brk_fix = -1;
     loc = loc + 4; if (loc > maxloc) maxloc = loc; n = -loc;        // temp slot for the switch value
@@ -971,7 +980,7 @@ int stmt() {
   else if (tk == Continue) { next(); if (tk != ';') die("; expected"); next(); b_w(cont_tgt); }
   else if (tk == Return) {
     next();
-    if (tk != ';') { expr(Assign); conv(fnrty); }   // unsigned char f() { return 300; } gives 44
+    if (tk != ';') { expr_comma(); conv(fnrty); }   // unsigned char f() { return 300; } gives 44
     if (tk != ';') die("; expected"); next();
     ret_fix = chain_add(ret_fix, b_w(-1));
   }
@@ -1006,7 +1015,7 @@ int stmt() {
     }
     next();
   }
-  else { expr(Assign); if (tk != ';') die("; expected"); next(); }
+  else { expr_comma(); if (tk != ';') die("; expected"); next(); }
   return 0;
 }
 
