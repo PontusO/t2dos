@@ -11,7 +11,8 @@
 //   r7 = frame pointer, r8 = host syscall entry, r9 = data/bss base.
 //   Expression results in r0.  All args passed on the stack, left to right
 //   (first arg deepest), caller pops.  Position independent: data is addressed
-//   from r9 (.Ldata+offset), function addresses PC relative (fnaddr).
+//   from r9 (NAME+offset for a global of this file, .Ldata+offset for string
+//   literals), function addresses PC relative (fnaddr).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,6 +64,7 @@ int ty;                  // type of last parsed expression
 int loc;                 // current local frame depth
 int maxloc;
 int ret_fix, brk_fix, cont_fix, cont_tgt;  // fixup chains (branch lines) / targets (labels)
+int nbrk, ncont;                           // enclosing loops and switches / loops
 int nparams;
 int fnrty;               // return type of the function being compiled
 
@@ -73,7 +75,7 @@ int pb; int pb_tk; int pb_ival; struct Sym *pb_id; int pb_numty;   // one token 
 int sv_pb; int sv_pb_tk; int sv_pb_ival; struct Sym *sv_pb_id; int sv_pb_numty; int sv_numty; int sv_slen;
 int numty;                                         // type of the last number token: TINT or TUINT
 int slen;                                          // bytes of the last string literal, with its 0
-int ikind; int ibase;                              // initializer target: 0 = data offset, 1 = frame offset
+int ikind; int ibase; struct Sym *isym;           // initializer target: 0 = data offset (of global isym), 1 = frame offset
 int init_open;                                     // global initializer code is being compiled (into .Linit)
 char *sv_p; int sv_tk; int sv_ival; struct Sym *sv_id; int sv_line; int sv_dpos;   // lexer state for lookahead
 
@@ -232,17 +234,26 @@ int lea_loc(int off) {
   else { if (off < 4096) addi12(0, 7, off); else { imm(1, off); ins("adds\tr0, r7, r1"); } }
   return 0;
 }
-// r0 = r9 + off: the data at .Ldata+off
-int lea_glo(int off) {
-  if (off < 4096) { lnew(L_INS); ls("addw\tr0, r9, #.Ldata+"); ls(dec(off)); lend(); return 0; }
-  if (off < 65536) { lnew(L_INS); ls("movw.16\tr1, #.Ldata+"); ls(dec(off)); lend(); }
+// the data reference "NAME+n" (s a global of this file, n bytes into it) or ".Ldata+n" (s 0: a string literal)
+int ldref(struct Sym *s, int n) {
+  if (s) { lsym(s); if (n) { ls("+"); ls(dec(n)); } }
+  else { ls(".Ldata+"); ls(dec(n)); }
+  return 0;
+}
+// r0 = r9 + off (the data offset in this file): s + n, s a global of this file at off - n, or
+// .Ldata + off when s is 0. The form depends on off, so it is the same whatever ld adds.
+int lea_data(struct Sym *s, int n, int off) {
+  if (off < 4096) { lnew(L_INS); ls("addw\tr0, r9, #"); ldref(s, n); lend(); return 0; }
+  if (off < 65536) { lnew(L_INS); ls("movw.16\tr1, #"); ldref(s, n); lend(); }
   else {
-    lnew(L_INS); ls("movw\tr1, #:lower16:.Ldata+"); ls(dec(off)); lend();
-    lnew(L_INS); ls("movt\tr1, #:upper16:.Ldata+"); ls(dec(off)); lend();
+    lnew(L_INS); ls("movw\tr1, #:lower16:"); ldref(s, n); lend();
+    lnew(L_INS); ls("movt\tr1, #:upper16:"); ldref(s, n); lend();
   }
   ins("add.w\tr0, r9, r1");
   return 0;
 }
+int lea_glo(int off) { return lea_data(0, off, off); }          // anonymous data (string literals)
+int lea_var(struct Sym *s) { return lea_data(s, 0, s->val); }    // a global variable of this file
 // r0 = r9 + the data offset of extern s, which only ld knows: movw/movt of the symbol
 int lea_ext(struct Sym *s) {
   lnew(L_INS); ls("movw\tr1, #:lower16:"); lsym(s); lend();
@@ -1365,12 +1376,12 @@ int expr(int lev) {
       ty = d->type;
     }
     else if (d->class == CNum) { imm(0, d->val); ty = d->type; }
-    else if (d->class == 6) { lea_glo(d->val); ty = d->type; }   // global array: address
+    else if (d->class == 6) { lea_var(d); ty = d->type; }   // global array: address
     else if (d->class == 9) { lea_ext(d); ty = d->type; }        // extern array: address
     else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype_p(d->type, d->ptypes, d->ptypes ? d->nptypes : -1); }   // function as a value
     else {
       if (d->class == CLoc) lea_loc(d->val);
-      else if (d->class == CGlo) lea_glo(d->val);
+      else if (d->class == CGlo) lea_var(d);
       else if (d->class == 7) lea_ext(d);
       else die("undefined variable");
       ty = d->type;
@@ -1429,6 +1440,7 @@ int expr(int lev) {
     t = ty;
     if (tk == '(') call_ind(t);
     else if (tk == Assign) {
+      if (t >= TSTRUCT && t < PTR) die("struct assignment is not supported");
       next(); lvalue(); push(); expr(Assign); assignconv(t); pop1(); store(t); ty = t;
     }
     else if (tk == Cond) {
@@ -1527,7 +1539,7 @@ int restore_lex() {                    // lexing strings wrote to data: clear wh
   fdepth = sv_fdepth; memcpy(fstack_p, sv_fp, 4 * fdepth); memcpy(fstack_line, sv_fl, 4 * fdepth); memcpy(fstack_mac, sv_fm, 4 * fdepth);
   return 0;
 }
-int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_glo(ibase + off); return 0; }
+int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_data(isym, off, ibase + off); return 0; }
 int init_code() { if (!ikind) init_open = 1; return 0; }   // global initializer code: it goes to .Linit
 int init_close() { if (init_open) { tobuf = 1; flush(); tobuf = 0; init_open = 0; } return 0; }
 int poke(int off, int v, int t) {
@@ -1657,7 +1669,7 @@ int stmt() {
     brk_fix = -1; cont_fix = -1; cont_tgt = here();
     expr_comma(); if (tk != ')') die(") expected"); next();
     test0(); at = bc_w(CC_EQ);
-    stmt();
+    nbrk = nbrk + 1; ncont = ncont + 1; stmt(); nbrk = nbrk - 1; ncont = ncont - 1;
     b_w(cont_tgt); patch_here(at);
     chain_here(brk_fix);
     brk_fix = sv_brk; cont_fix = sv_cont; cont_tgt = sv_tgt;
@@ -1677,7 +1689,7 @@ int stmt() {
     if (tk != ')') die(") expected"); next();
     b_w(at);
     patch_here(body);
-    stmt();
+    nbrk = nbrk + 1; ncont = ncont + 1; stmt(); nbrk = nbrk - 1; ncont = ncont - 1;
     b_w(cont_tgt);
     if (at2 >= 0) patch_here(at2);
     chain_here(brk_fix);
@@ -1705,15 +1717,15 @@ int stmt() {
         patch_here(body);
       }
       else if (tk == Default) { next(); if (tk != ':') die(": expected"); next(); at2 = here(); }
-      else { if (!tk) die("unexpected eof"); stmt(); }
+      else { if (!tk) die("unexpected eof"); nbrk = nbrk + 1; stmt(); nbrk = nbrk - 1; }
     }
     next();
     if (at2 >= 0) patch_b(at, at2); else patch_here(at);
     chain_here(brk_fix);
     brk_fix = sv_brk;
   }
-  else if (tk == Break) { next(); if (tk != ';') die("; expected"); next(); brk_fix = chain_add(brk_fix, b_w(-1)); }
-  else if (tk == Continue) { next(); if (tk != ';') die("; expected"); next(); b_w(cont_tgt); }
+  else if (tk == Break) { if (!nbrk) die("break outside a loop or switch"); next(); if (tk != ';') die("; expected"); next(); brk_fix = chain_add(brk_fix, b_w(-1)); }
+  else if (tk == Continue) { if (!ncont) die("continue outside a loop"); next(); if (tk != ';') die("; expected"); next(); b_w(cont_tgt); }
   else if (tk == Return) {
     next();
     if (tk != ';') { expr_comma(); castto(fnrty); }   // unsigned char f() { return 300; } gives 44
@@ -1865,7 +1877,7 @@ int parse_global() {
       dpos = dpos + n;
     }
     if (hi) {
-      ikind = 0; ibase = s->val;
+      ikind = 0; ibase = s->val; isym = s;
       if (darr >= 0) init_array(t, darr, 0); else init_elem(t, 0);
       init_close();
     }
@@ -1905,7 +1917,7 @@ char **dnames; char **dvals; int ndefs;          // -D NAME[=value]
 int compile(char *src, char *out) {
   int i; struct Sym *s;
   tk = 0; ival = 0; line = 0; id = 0; nsyms = 0; nmems = 0; nstructs = 0; ndims = 0; dpos = 0; lastload = 0;
-  ty = 0; loc = 0; maxloc = 0; ret_fix = 0; brk_fix = 0; cont_fix = 0; cont_tgt = 0; nparams = 0; fnrty = 0;
+  ty = 0; loc = 0; maxloc = 0; ret_fix = 0; brk_fix = 0; cont_fix = 0; cont_tgt = 0; nbrk = 0; ncont = 0; nparams = 0; fnrty = 0;
   nfn = 0; dname = 0; darr = 0; pb = 0; numty = 0; slen = 0; ikind = 0; ibase = 0; init_open = 0;
   fdepth = 0; ifdepth = 0; pp_if = 0; tdepth = 0; nsrcbuf = 0;
   srcname = src; outname = out; ofd = -1;
@@ -2029,15 +2041,19 @@ int run_tool(char *name, int argc, char **argv) {
 #endif
 
 // ------------------------------------------------------------------ the driver
-char *tmppre; int ntmpn;                         // temporary files: /tmp/cc<id & 0xffff>_<n>.s/.o
+char *tmppre; int ntmpn;                         // temporary files: /tmp/cc<id & 0xffff>_<n>_<base>.s/.o
 
 int endswith(char *s, char *suf) { int n; int k; n = strlen(s); k = strlen(suf); return n > k && !strcmp(s + n - k, suf); }
-// a new temporary file name, removed again by cleanup()
-char *newtmp(char *ext) {
-  char *t;
+// a new temporary file name for input n (from 1), named after its source src (the base name
+// without the .c/.s, so ld's messages point at the source); removed again by cleanup()
+char *newtmp(char *src, int n, char *ext) {
+  char *t; char *b; char *q; int k;
   if (!ntmpn) make_tmpdir();
-  ntmpn = ntmpn + 1;
-  t = malloc(strlen(tmppre) + 24); sprintf(t, "%s%d.%s", tmppre, ntmpn, ext);
+  ntmpn = 1;
+  b = src; q = src; while (*q) { if (*q == '/') b = q + 1; q = q + 1; }
+  k = strlen(b) - 2;
+  t = malloc(strlen(tmppre) + k + 24); sprintf(t, "%s%d_", tmppre, n);
+  q = t + strlen(t); memcpy(q, b, k); sprintf(q + k, ".%s", ext);
   tmpf[ntmp] = t; ntmp = ntmp + 1;
   return t;
 }
@@ -2128,7 +2144,7 @@ int main(int argc, char **argv) {
     i = 0;
     while (i < nin) {
       o = out; if (!o) o = outfile(in[i], ".o");
-      if (endswith(in[i], ".c")) { s = newtmp("s"); compile(in[i], s); assemble(s, o); }
+      if (endswith(in[i], ".c")) { s = newtmp(in[i], i + 1, "s"); compile(in[i], s); assemble(s, o); }
       else assemble(in[i], o);
       i = i + 1;
     }
@@ -2146,8 +2162,8 @@ int main(int argc, char **argv) {
   i = 0;
   while (i < nin) {
     s = in[i];
-    if (endswith(s, ".c")) { o = newtmp("s"); compile(s, o); s = o; }
-    if (endswith(s, ".s")) { o = newtmp("o"); assemble(s, o); s = o; }
+    if (endswith(s, ".c")) { o = newtmp(in[i], i + 1, "s"); compile(s, o); s = o; }
+    if (endswith(s, ".s")) { o = newtmp(in[i], i + 1, "o"); assemble(s, o); s = o; }
     av[nav] = s; nav = nav + 1;
     i = i + 1;
   }

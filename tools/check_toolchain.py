@@ -4,7 +4,7 @@
 A case is a list of build steps (cc, ar, mkdir) run in its own directory; it ends with
 NAME.bin, whose run must print NAME.expected (the output lines, then "exit N").
 tests/toolchain/pipeline_errors/NAME.c or NAME.s with NAME.expected: `cc -o NAME.bin SRC` must
-print the tool's message (a /tmp/ccXXXX_ name stands for any temporary file) and exit with
+print the tool's message (a /tmp/ccXXXX_N_NAME name stands for any temporary file) and exit with
 the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
 
   check_toolchain.py --pc        build every case with compiler/cc (build/host/as and ld) in
@@ -37,7 +37,7 @@ TOOL = {'cc': os.path.join(ROOT, 'compiler', 'cc'), 'ar': os.path.join(ROOT, 'bu
 NM = os.path.join(ROOT, 'build', 'host', 'nm')
 OBJDUMP = os.path.join(ROOT, 'build', 'host', 'objdump')
 REMOTE = '/src/tc'
-TMP_RE = re.compile(r'^cc[0-9a-f]{1,4}_\d+\.[so]$')     # the driver's temporary files
+TMP_RE = re.compile(r'^cc[0-9a-f]{1,4}_\d+_.+\.[so]$')  # the driver's temporary files: cc<id>_<n>_<source base>
 
 # name: (sources, steps); every case ends with NAME.bin
 CASES = [
@@ -52,6 +52,8 @@ CASES = [
      [['cc', '-S', 'names_lib.c'],
       ['cc', '-c', '-o', 'nl.o', 'names_lib.s'],
       ['cc', '-o', 'names.bin', 'names.c', 'nl.o']]),
+    ('datalimit', ['datalimit_main.c', 'datalimit_big.c'],
+     [['cc', '-o', 'datalimit.bin', 'datalimit_main.c', 'datalimit_big.c']]),
     ('lib_use', ['lib_use.c', 'lib_square.c', 'lib_cube.c'],
      [['cc', '-c', 'lib_square.c', 'lib_cube.c'],
       ['mkdir', 'lib'],
@@ -251,9 +253,19 @@ def check_driver_pc():
     os.chmod(os.path.join(fake, 'as'), 0o755)
     env = dict(os.environ, T2_TOOLS=fake)
     before = tmp_files()
-    ok = expect(['cc', '-o', 'z.bin', 'lib_square.c'], 'fake as: -o /tmp/ccXXXX_2.o /tmp/ccXXXX_1.s\n', 3, wd, env) and ok
+    ok = expect(['cc', '-o', 'z.bin', 'lib_square.c'],
+                'fake as: -o /tmp/ccXXXX_1_lib_square.o /tmp/ccXXXX_1_lib_square.s\n', 3, wd, env) and ok
     if tmp_files() - before:
         ok = fail('driver: temporary files left after a failing as: %r' % sorted(tmp_files() - before))
+    # the data limit (README): the big data first pushes the other file's addw reference past 4095;
+    # ld names the global and the temporary object named after its source, and no .bin is left
+    for s in ('datalimit_main.c', 'datalimit_big.c'):
+        shutil.copyfile(os.path.join(TESTS, s), os.path.join(wd, s))
+    open(os.path.join(wd, 'dl.bin'), 'w').write('an older output\n')
+    ok = expect(['cc', '-o', 'dl.bin', 'datalimit_big.c', 'datalimit_main.c'],
+                'ld: data offset of counter (/tmp/ccXXXX_2_datalimit_main.o) is 5000, too far for addw\n', 1) and ok
+    if os.path.exists(os.path.join(wd, 'dl.bin')):
+        ok = fail('driver: dl.bin is still there after the ld error')
     return ok
 
 

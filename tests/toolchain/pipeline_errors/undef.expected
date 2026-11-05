@@ -1,2 +1,2 @@
-ld: undefined symbol: nowhere (in /tmp/ccXXXX_2.o)
+ld: undefined symbol: nowhere (in /tmp/ccXXXX_1_undef.o)
 exit 1
