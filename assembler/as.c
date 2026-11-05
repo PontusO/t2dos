@@ -7,7 +7,24 @@
 // (struct Item) that sit between the buffer bytes. The second pass lays the items out,
 // grows narrow branches that do not reach (like GNU as, never shrinking), then writes
 // the bytes. Encodings and the narrow/wide choice follow arm-none-eabi-as
-// (-mcpu=cortex-m33 -mthumb): tools/check_asm.py compares the two byte for byte.
+// (-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16): tools/check_asm.py compares the two byte for byte.
+//
+// Relocations (lib/t2obj.h). ld places each object's text and data, so a value that depends
+// on where a section lands is a relocation, with a zero field in the object and the addend in
+// the relocation; distances inside the text section are resolved here.
+//   b/b.w/b<cond>/b<cond>.w/bl/fnaddr to a text label of this file: resolved; to an undefined
+//     symbol: R_BW/R_BCOND/R_BL/R_FNADDR (b and b<cond> are then wide; b.n is an error).
+//   addw rd, rn, #sym[+n]          R_DATA_ADDW     movw rd, #:lower16:sym[+n]   R_DATA_MOVW
+//   movw.16 rd, #sym[+n]           R_DATA_MOVW16   movt rd, #:upper16:sym[+n]   R_DATA_MOVT
+//   .word sym[+n]                  R_WORD
+//     always relocated for a text, data or undefined symbol; an absolute symbol is resolved.
+//   .L labels and "." are not in the symbol table: they relocate against the section symbol
+//   .text or .data, with the label's offset in the addend.
+// T2DOS pseudo-instructions (no GNU form):
+//   fnaddr rd, sym     10 bytes "movw rd, #lo; movt rd, #hi; add rd, pc": rd = the Thumb address
+//                      of sym (the value is S + 1 - (off + 12), off = the offset of the movw)
+//   movw.16 rd, #x     a movw whose value must fit 16 bits (no movt follows)
+//   .t2init sym        sym (a text label of this file) is a run-before-main routine (SYM_INIT)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +34,13 @@
 
 // ------------------------------------------------------------------ state
 struct Sym { char *name; int len; int sect; int pos; int item; int val; int flags; int next; int line; int out; };
-enum { F_DEF = 1, F_GLOBAL = 2, F_EQU = 4, F_EXTERN = 8, F_ANON = 16 };
-struct Item { int kind; int pos; int size; int line; int sym; int sym2; int val; int addr; int flags; };
-enum { K_BR = 1, K_ALIGN = 2, K_DATA = 3 };
+enum { F_DEF = 1, F_GLOBAL = 2, F_EQU = 4, F_EXTERN = 8, F_ANON = 16, F_REF = 32, F_INIT = 64 };
+// rel: the R_* type when the item becomes a relocation (decided in checkrefs), else 0
+struct Item { int kind; int pos; int size; int line; int sym; int sym2; int val; int addr; int flags; int rel; };
+// K_FIX (size 0): the instruction that follows has a field naming a symbol; flags = R_* or FX_INIT
+enum { K_BR = 1, K_ALIGN = 2, K_DATA = 3, K_FIX = 4 };
 enum { B_WIDE = 16, B_NARROW = 32, B_BL = 64, B_INIT = 128 };   // branch item flags | cond
+enum { FX_INIT = 100 };
 enum { HBITS = 4096 };
 
 char *srcname; char *src; int line; char *p;
@@ -34,10 +54,11 @@ char ebuf[300]; char nbuf[160];
 int es1; int es2; int ec;
 
 // the instruction being assembled
-int setf; int cond; int wid; int init;
+int setf; int cond; int wid; int init; int w16;
 int itleft; int itpos; int itcond[4];
 enum { O_REG = 1, O_IMM, O_MEM, O_LIST, O_EXPR };
-int okind[6]; int oreg[6]; int oidx[6]; int ohas[6]; int osym[6]; int osym2[6]; int oval[6]; char *otext[6]; int nops;
+// opart: 1 for #:lower16:, 2 for #:upper16:
+int okind[6]; int oreg[6]; int oidx[6]; int ohas[6]; int opart[6]; int osym[6]; int osym2[6]; int oval[6]; char *otext[6]; int nops;
 
 int fail(char *msg) { printf("%s:%d: error: %s\n", srcname, line, msg); exit(1); return 0; }
 int failname(char *fmt, char *name, int len) {
@@ -78,7 +99,7 @@ struct Item *newitem(int kind, int size) {
   it = items[cur] + nitems[cur];
   nitems[cur] = nitems[cur] + 1;
   it->kind = kind; it->pos = sl[cur]; it->size = size; it->line = line;
-  it->sym = -1; it->sym2 = -1; it->val = 0; it->addr = 0; it->flags = 0;
+  it->sym = -1; it->sym2 = -1; it->val = 0; it->addr = 0; it->flags = 0; it->rel = 0;
   return it;
 }
 
@@ -312,10 +333,11 @@ int esum(int sign) {
 
 int expr() { es1 = -1; es2 = -1; ec = 0; esum(1); return 0; }
 
-int undefined(int i) {
-  if (syms[i].flags & (F_GLOBAL | F_EXTERN))
-    return failname("external symbol '%s' needs a relocation (not supported yet)", syms[i].name, syms[i].len);
-  return failname("undefined symbol '%s'", syms[i].name, syms[i].len);
+int undefined(int i) { return failname("undefined symbol '%s'", syms[i].name, syms[i].len); }
+
+// .L labels and "." have no symbol table entry: their relocations use the section symbol
+int nosymentry(int i) {
+  return (syms[i].flags & F_ANON) || (syms[i].len >= 2 && syms[i].name[0] == '.' && syms[i].name[1] == 'L');
 }
 
 // a constant now: folds a - b of two labels at fixed places in the same section
@@ -331,9 +353,18 @@ int constexpr() {
 int parseop(int i) {
   char *q; int n; int r; int r2; int k;
   skipws();
-  otext[i] = p; oidx[i] = -1; ohas[i] = 0; oval[i] = 0; osym[i] = -1; osym2[i] = -1; oreg[i] = -1;
+  otext[i] = p; oidx[i] = -1; ohas[i] = 0; oval[i] = 0; osym[i] = -1; osym2[i] = -1; oreg[i] = -1; opart[i] = 0;
   if (*p == '#') {
-    p++; expr();
+    p++; skipws();
+    if (*p == ':') {                   // #:lower16:x or #:upper16:x
+      p++; q = p; n = scanident();
+      if (n == 7 && memcmp(q, "lower16", 7) == 0) opart[i] = 1;
+      else if (n == 7 && memcmp(q, "upper16", 7) == 0) opart[i] = 2;
+      else fail("unknown relocation operator");
+      if (*p != ':') fail("missing :");
+      p++;
+    }
+    expr();
     okind[i] = O_IMM; osym[i] = es1; osym2[i] = es2; oval[i] = ec;
     return 0;
   }
@@ -411,6 +442,7 @@ int nargs(int a, int b) { if (nops < a || nops > b) fail("wrong number of operan
 
 // the value of an operand that must be a constant (#imm, or the offset in [rn, #imm])
 int opconst(int i) {
+  if (opart[i]) fail(":lower16: and :upper16: need movw or movt");
   if (osym[i] >= 0 && !(syms[osym[i]].flags & F_DEF)) undefined(osym[i]);
   if (osym2[i] >= 0 && !(syms[osym2[i]].flags & F_DEF)) undefined(osym2[i]);
   if (osym[i] >= 0 || osym2[i] >= 0) fail("constant expression expected");
@@ -418,6 +450,17 @@ int opconst(int i) {
 }
 int IMM(int i) { if (i >= nops || okind[i] != O_IMM) fail("immediate expected"); return opconst(i); }
 int isimm(int i) { return i < nops && okind[i] == O_IMM; }
+
+// operand i is #sym[+n] with a symbol not yet known to be absolute: 1 (and records a K_FIX
+// of type t for the instruction about to be emitted), else 0. A difference of symbols is an error.
+int symfix(int i, int t) {
+  struct Item *it;
+  if (!isimm(i) || osym[i] < 0) return 0;
+  if (osym2[i] >= 0) { opart[i] = 0; opconst(i); }
+  it = newitem(K_FIX, 0);
+  it->flags = t; it->sym = osym[i]; it->val = oval[i];
+  return 1;
+}
 
 // ------------------------------------------------------------------ encodings
 // Thumb-2 modified immediate (i:imm3:imm8 as 12 bits) or -1
@@ -557,9 +600,45 @@ int do_addw(int id) {
   if (wid == 2) fail("no narrow encoding for these operands");
   rd = R(0);
   if (nops == 3) rn = R(1); else rn = rd;
+  if (id == M_ADDW && !opart[nops - 1] && symfix(nops - 1, R_DATA_ADDW)) return plain12(0, rn, rd, 0);
   v = IMM(nops - 1);
   if (v < 0 || v > 4095) fail("immediate out of range");
   return plain12(id == M_SUBW, rn, rd, v);
+}
+
+// movw/movt with a plain immediate, #:lower16:x / #:upper16:x, and movw.16 rd, #x
+int do_mov16(int id) {
+  int rd; int top; int v;
+  nargs(2, 2); if (wid == 2) notnarrow();
+  top = id == M_MOVT;
+  rd = R(0);
+  if (!isimm(1)) fail("immediate expected");
+  if (opart[1]) {
+    if (w16 || opart[1] != top + 1) fail("movw takes :lower16: and movt takes :upper16:");
+    if (symfix(1, top ? R_DATA_MOVT : R_DATA_MOVW)) return mov16(top, rd, 0);
+    opart[1] = 0;
+    v = IMM(1);
+    if (top) return mov16(1, rd, (v >> 16) & 65535);
+    return mov16(0, rd, v & 65535);
+  }
+  if (w16 && symfix(1, R_DATA_MOVW16)) return mov16(0, rd, 0);
+  return mov16(top, rd, IMM(1));
+}
+
+// fnaddr rd, sym: movw rd, #lo; movt rd, #hi; add rd, pc (value filled in by finish or ld)
+int do_fnaddr() {
+  struct Item *it; char *save; int rd;
+  if (itleft) fail("fnaddr cannot be in an IT block");
+  parseops();
+  nargs(2, 2); rd = R(0);
+  if (rd == 13 || rd == 15) fail("bad register");
+  if (okind[1] != O_EXPR && okind[1] != O_REG) fail("fnaddr target expected");
+  save = p; p = otext[1]; expr(); p = save;          // any name is a symbol here, as in branches
+  if (es2 >= 0 || es1 < 0) fail("fnaddr target must be a label");
+  it = newitem(K_FIX, 0);
+  it->flags = R_FNADDR; it->sym = es1; it->val = ec;
+  mov16(0, rd, 0); mov16(1, rd, 0);
+  return emit16(0x4478 | (rd & 8) << 4 | (rd & 7));
 }
 
 int do_cmp(int id) {
@@ -798,12 +877,148 @@ int isit(char *mn) {
   return 1;
 }
 
+// ------------------------------------------------------------------ FPU (single precision)
+// Sd is split into Vd = d >> 1 and D = d & 1, likewise Sn (N) and Sm (M).
+int sreg() {
+  char *q; int n; int r;
+  skipws(); q = p; n = scanident();
+  if (n < 2 || n > 3 || lower(q[0]) != 's' || q[1] < '0' || q[1] > '9') fail("FPU register expected");
+  r = q[1] - '0';
+  if (n == 3) {
+    if (q[2] < '0' || q[2] > '9') fail("FPU register expected");
+    r = r * 10 + q[2] - '0';
+  }
+  if (r > 31) fail("FPU register expected");
+  return r;
+}
+int creg() {
+  char *q; int n; int r;
+  skipws(); q = p; n = scanident(); r = regnum(q, n);
+  if (r < 0) fail("register expected");
+  return r;
+}
+int comma() { skipws(); if (*p != ',') fail("missing ,"); p++; return 0; }
+int keyword(char *w) {                 // the next identifier must be w (any case)
+  char *q; int n; int i;
+  skipws(); q = p; n = scanident();
+  if (n != strlen(w)) fail("syntax error");
+  for (i = 0; i < n; i++) if (lower(q[i]) != w[i]) fail("syntax error");
+  return 0;
+}
+int isvreg() { skipws(); return lower(*p) == 's' && p[1] >= '0' && p[1] <= '9'; }
+
+int vfp3(int h1, int h2, int d, int n, int m) {
+  return emit32(h1 | (d & 1) << 6 | n >> 1, h2 | (d >> 1) << 12 | (n & 1) << 7 | (m & 1) << 5 | m >> 1);
+}
+
+int do_vldr(int store) {
+  int d; int rn; int v; int neg; int u;
+  d = sreg(); comma(); skipws();
+  if (*p != '[') fail("memory operand expected");
+  p++; rn = creg(); skipws();
+  v = 0; neg = 0;
+  if (*p == ',') {
+    p++; skipws();
+    if (*p != '#') fail("immediate expected");
+    p++; skipws();
+    if (*p == '-') neg = 1;
+    v = constexpr();
+    skipws();
+  }
+  if (*p != ']') fail("missing ]");
+  p++;
+  if (store && rn == 15) fail("Use of PC here is UNPREDICTABLE");     // GNU's words
+  if (v % 4) fail("misaligned offset");
+  if (v < -1020 || v > 1020) fail("offset out of range");
+  u = !(v < 0 || (v == 0 && neg));     // [rn, #-0] subtracts, as in GNU as
+  if (v < 0) v = -v;
+  return emit32((store ? 0xED00 : 0xED10) | u << 7 | (d & 1) << 6 | rn, 0x0A00 | (d >> 1) << 12 | v >> 2);
+}
+
+int do_vpush(int pop) {
+  int a; int b; int r; int first; int count; int mask;
+  skipws();
+  if (*p != '{') fail("register list expected");
+  p++; mask = 0;
+  while (1) {
+    a = sreg(); b = a; skipws();
+    if (*p == '-') { p++; b = sreg(); if (b < a) fail("bad register range"); skipws(); }
+    for (r = a; r <= b; r++) mask = mask | 1 << r;
+    if (*p == ',') { p++; continue; }
+    if (*p == '}') { p++; break; }
+    fail("missing }");
+  }
+  first = 0;
+  while (!(mask & 1 << first)) first++;
+  count = 0;
+  for (r = first; r < 32 && (mask & 1 << r); r++) count++;
+  for (r = first + count; r < 32; r++) if (mask & 1 << r) fail("register list not consecutive");
+  return emit32((pop ? 0xECBD : 0xED2D) | (first & 1) << 6, 0x0A00 | (first >> 1) << 12 | count);
+}
+
+// mn is the whole lower-case mnemonic, e.g. "vcvt.f32.s32"
+int do_vfp(char *mn) {
+  char *t; char *nm; int k; int n; int d; int a; int m; int r; int h1; int h2;
+  t = "vadd.f32 vsub.f32 vmul.f32 vdiv.f32 vneg.f32 vsqrt.f32 vcmp.f32 vcvt.f32.s32 vcvt.f32.u32 "
+      "vcvt.s32.f32 vcvt.u32.f32 vmov vmrs vldr vstr vpush vpop ";
+  k = 0;
+  while (*t) {
+    nm = t; n = 0;
+    while (t[n] != ' ') n++;
+    t = t + n + 1;
+    if (strlen(mn) == n && strncmp(mn, nm, n) == 0) break;
+    k++;
+  }
+  if (k == 17) return -1;             // not an FPU mnemonic
+  if (itleft) fail("FPU instructions in an IT block are not supported");
+  if (k <= 3) {                        // vadd vsub vmul vdiv sd, sn, sm
+    d = sreg(); comma(); a = sreg(); comma(); m = sreg();
+    h1 = 0xEE30; h2 = 0x0A00;
+    if (k == 1) h2 = 0x0A40;
+    if (k == 2) h1 = 0xEE20;
+    if (k == 3) h1 = 0xEE80;
+    return vfp3(h1, h2, d, a, m);
+  }
+  if (k <= 10) {                       // vneg vsqrt vcmp vcvt sd, sm (vcmp sd, #0)
+    d = sreg(); comma(); skipws();
+    if (k == 6 && *p == '#') {
+      p++; skipws();
+      if (*p != '0') fail("only #0 is supported");
+      p++;
+      if (*p == '.') { p++; while (*p == '0') p++; }
+      if (isidch(*p)) fail("only #0 is supported");
+      return vfp3(0xEEB5, 0x0A40, d, 0, 0);
+    }
+    m = sreg();
+    h1 = 0xEEB1; h2 = 0x0A40;          // vneg
+    if (k == 5) h2 = 0x0AC0;           // vsqrt
+    if (k == 6) h1 = 0xEEB4;           // vcmp
+    if (k == 7) { h1 = 0xEEB8; h2 = 0x0AC0; }   // vcvt.f32.s32
+    if (k == 8) h1 = 0xEEB8;                    // vcvt.f32.u32
+    if (k == 9) { h1 = 0xEEBD; h2 = 0x0AC0; }   // vcvt.s32.f32 (round towards zero)
+    if (k == 10) { h1 = 0xEEBC; h2 = 0x0AC0; }  // vcvt.u32.f32
+    return vfp3(h1, h2, d, 0, m);
+  }
+  if (k == 11) {                       // vmov sn, rt / vmov rt, sn
+    if (isvreg()) { a = sreg(); comma(); r = creg(); h1 = 0xEE00; }
+    else { r = creg(); comma(); a = sreg(); h1 = 0xEE10; }
+    if (r == 13 || r == 15) fail("bad register");
+    return emit32(h1 | a >> 1, 0x0A10 | r << 12 | (a & 1) << 7);
+  }
+  if (k == 12) { keyword("apsr_nzcv"); comma(); keyword("fpscr"); return emit32(0xEEF1, 0xFA10); }
+  if (k == 13 || k == 14) return do_vldr(k == 14);
+  return do_vpush(k == 16);
+}
+
 int instruction(char *q, int n) {
   char mn[20]; int i; int id; int k;
   if (n > 15) failname("unknown instruction '%s'", q, n);
   for (i = 0; i < n; i++) mn[i] = lower(q[i]);
   mn[n] = 0;
-  wid = 0; k = n;
+  wid = 0; k = n; w16 = 0;
+  if (mn[0] == 'v' && do_vfp(mn) >= 0) return 0;
+  if (strcmp(mn, "fnaddr") == 0) return do_fnaddr();
+  if (k > 3 && strcmp(mn + k - 3, ".16") == 0) { w16 = 1; k = k - 3; mn[k] = 0; }
   if (k > 2 && mn[k - 2] == '.') {
     if (mn[k - 1] == 'w') wid = 4;
     else if (mn[k - 1] == 'n') wid = 2;
@@ -812,7 +1027,7 @@ int instruction(char *q, int n) {
   }
   if (wid == 0 && isit(mn)) return do_it(mn);
   id = findmn(mn);
-  if (id < 0) failname("unknown instruction '%s'", q, n);
+  if (id < 0 || (w16 && (id != M_MOVW || wid))) failname("unknown instruction '%s'", q, n);
   parseops();
   init = 0;
   if (itleft) {
@@ -821,10 +1036,7 @@ int instruction(char *q, int n) {
     if (itleft && (id == M_B || id == M_BL || id == M_BX || id == M_BLX)) fail("a branch must be the last instruction of an IT block");
   } else if (cond >= 0 && id != M_B) fail("conditional instruction outside an IT block");
   if (id == M_MOV || id == M_MVN) return do_mov(id);
-  if (id == M_MOVW || id == M_MOVT) {
-    nargs(2, 2); if (wid == 2) notnarrow();
-    return mov16(id == M_MOVT, R(0), IMM(1));
-  }
+  if (id == M_MOVW || id == M_MOVT) return do_mov16(id);
   if (id == M_ADD || id == M_SUB) return do_addsub(id);
   if (id == M_ADDW || id == M_SUBW) return do_addw(id);
   if (id == M_CMP || id == M_CMN || id == M_TST) return do_cmp(id);
@@ -917,7 +1129,7 @@ int names(int flag) {
 }
 
 int directive(char *q, int n) {
-  int v; int f; int i; char *nm; int nl; struct Sym *y;
+  int v; int f; int i; char *nm; int nl; struct Sym *y; struct Item *it;
   if (isdir(q, n, ".syntax")) {
     skipws(); nm = p; nl = scanident();
     if (nl != 7 || memcmp(nm, "unified", 7) != 0) fail("only .syntax unified is supported");
@@ -928,6 +1140,13 @@ int directive(char *q, int n) {
   if (isdir(q, n, ".data")) { cur = SEC_DATA; return 0; }
   if (isdir(q, n, ".global") || isdir(q, n, ".globl")) return names(F_GLOBAL);
   if (isdir(q, n, ".extern")) return names(F_EXTERN);
+  if (isdir(q, n, ".t2init")) {        // checked and marked F_INIT in checkrefs
+    skipws(); nm = p; nl = scanident();
+    if (nl == 0) fail("symbol name expected");
+    it = newitem(K_FIX, 0);
+    it->flags = FX_INIT; it->sym = lookup(nm, nl);
+    return 0;
+  }
   if (isdir(q, n, ".word")) return data(4);
   if (isdir(q, n, ".short") || isdir(q, n, ".hword")) return data(2);
   if (isdir(q, n, ".byte")) return data(1);
@@ -1017,17 +1236,61 @@ int reaches(struct Item *it, int off) {
   return off >= -16777216 && off <= 16777214;
 }
 
+// an undefined symbol that a relocation may name (not a .L label or "."); marks it for the symbol table
+int extref(int i) {
+  if (nosymentry(i)) undefined(i);
+  syms[i].flags = syms[i].flags | F_REF;
+  return 0;
+}
+
+// checks the symbol references once every symbol is known, and decides which become relocations
 int checkrefs(int sec) {
-  int k; struct Item *it;
+  int k; int c; struct Item *it; struct Sym *y;
   for (k = 0; k < nitems[sec]; k++) {
     it = items[sec] + k;
     line = it->line;
-    if (it->sym >= 0 && !(syms[it->sym].flags & F_DEF)) undefined(it->sym);
-    if (it->sym2 >= 0 && it->kind == K_DATA && !(syms[it->sym2].flags & F_DEF)) undefined(it->sym2);
-    if (it->kind == K_BR && syms[it->sym].sect != sec) fail("branch target in another section");
-    if (it->kind == K_DATA && it->sym2 >= 0) {
-      if (it->sym < 0 && syms[it->sym2].sect != SEC_ABS) fail("constant or label expected");
-      if (it->sym >= 0 && syms[it->sym].sect != syms[it->sym2].sect) fail("difference of symbols in different sections");
+    if (it->kind == K_DATA && it->sym < 0 && it->sym2 >= 0) {   // .word -x
+      if (!(syms[it->sym2].flags & F_DEF)) undefined(it->sym2);
+      if (syms[it->sym2].sect != SEC_ABS) fail("constant or label expected");
+    }
+    if (it->sym < 0) continue;
+    y = syms + it->sym;
+    if (it->kind == K_BR) {
+      if (y->flags & F_DEF) {
+        if (y->sect != sec) fail("branch target in another section");
+        continue;
+      }
+      extref(it->sym);
+      if (sec != SEC_TEXT) fail("branch target in another section");
+      if (it->flags & B_NARROW) failname("narrow branch to undefined symbol '%s'", y->name, y->len);
+      it->size = 4; it->flags = it->flags | B_WIDE;
+      c = it->flags & 15;
+      if (it->flags & B_BL) it->rel = R_BL;
+      else if (c == 14 || (it->flags & B_INIT)) it->rel = R_BW;
+      else it->rel = R_BCOND;
+    } else if (it->kind == K_DATA) {
+      if (it->sym2 >= 0) {             // a difference: a constant
+        if (!(y->flags & F_DEF)) undefined(it->sym);
+        if (!(syms[it->sym2].flags & F_DEF)) undefined(it->sym2);
+        if (y->sect != syms[it->sym2].sect) fail("difference of symbols in different sections");
+      } else if (!(y->flags & F_DEF)) {
+        if (it->size < 4) undefined(it->sym);
+        extref(it->sym);
+        it->rel = R_WORD;
+      } else if (y->sect != SEC_ABS) {
+        if (it->size < 4) fail("relocation too small");
+        it->rel = R_WORD;
+      }
+    } else if (it->kind == K_FIX && it->flags == FX_INIT) {
+      if (!(y->flags & F_DEF) || y->sect != SEC_TEXT)
+        failname(".t2init symbol '%s' is not a text label in this file", y->name, y->len);
+      y->flags = y->flags | F_INIT;
+    } else if (it->kind == K_FIX) {
+      if (!(y->flags & F_DEF)) { extref(it->sym); it->rel = it->flags; }
+      else if (it->flags == R_FNADDR) {
+        if (y->sect != SEC_TEXT) failname("fnaddr target '%s' is not a text label", y->name, y->len);
+        if (sec != SEC_TEXT) fail("fnaddr in the data section");
+      } else if (y->sect != SEC_ABS) it->rel = it->flags;
     }
   }
   return 0;
@@ -1055,9 +1318,12 @@ int put16(char *o, int h) { o[0] = h & 255; o[1] = (h >> 8) & 255; return 0; }
 int encbranch(char *o, struct Item *it) {
   int off; int c; int s; int j1; int j2;
   line = it->line;
-  off = symaddr(it->sym) + it->val - (it->addr + 4);
-  if (off & 1) fail("branch target not halfword aligned");
-  if (!reaches(it, off)) fail("branch out of range");
+  off = 0;                             // a relocation: ld fills in the offset
+  if (!it->rel) {
+    off = symaddr(it->sym) + it->val - (it->addr + 4);
+    if (off & 1) fail("branch target not halfword aligned");
+    if (!reaches(it, off)) fail("branch out of range");
+  }
   c = it->flags & 15;
   if (it->flags & B_INIT) c = 14;
   s = off < 0 ? 1 : 0;
@@ -1094,6 +1360,33 @@ int value(struct Item *it) {
   return v;
 }
 
+int get16(char *o) { return (o[0] & 255) | (o[1] & 255) << 8; }
+int patch16(char *o, int v) {          // the imm16 of a movw/movt
+  put16(o, get16(o) | ((v >> 11) & 1) << 10 | ((v >> 12) & 15));
+  return put16(o + 2, get16(o + 2) | ((v >> 8) & 7) << 12 | (v & 255));
+}
+
+// fill in the field of the instruction at o that a K_FIX without a relocation names
+int patch(char *o, struct Item *it) {
+  int v; int t;
+  line = it->line;
+  t = it->flags;
+  v = symaddr(it->sym) + it->val;
+  if (t == R_FNADDR) {
+    v = v + 1 - (it->addr + 12);
+    patch16(o, v & 65535);
+    return patch16(o + 4, (v >> 16) & 65535);
+  }
+  if (t == R_DATA_ADDW) {
+    if (v < 0 || v > 4095) fail("immediate out of range");
+    put16(o, get16(o) | ((v >> 11) & 1) << 10);
+    return put16(o + 2, get16(o + 2) | ((v >> 8) & 7) << 12 | (v & 255));
+  }
+  if (t == R_DATA_MOVW16 && (v < 0 || v > 65535)) fail("immediate out of range");
+  if (t == R_DATA_MOVT) return patch16(o, (v >> 16) & 65535);
+  return patch16(o, v & 65535);
+}
+
 // the final bytes of a section; *size gets its length
 char *finish(int sec, int *size) {
   char *o; int n; int k; int q; int at; int v; int pad; int a; struct Item *it;
@@ -1115,7 +1408,8 @@ char *finish(int sec, int *size) {
     if (it->kind == K_ALIGN) fill(o + at, it->addr, it->size, it->sym2, sec == SEC_TEXT);
     if (it->kind == K_DATA) {
       line = it->line;
-      v = fits(value(it), it->size);
+      v = 0;
+      if (!it->rel) v = fits(value(it), it->size);
       o[at] = v & 255;
       if (it->size > 1) o[at + 1] = (v >> 8) & 255;
       if (it->size > 2) { o[at + 2] = (v >> 16) & 255; o[at + 3] = (v >> 24) & 255; }
@@ -1124,25 +1418,42 @@ char *finish(int sec, int *size) {
   }
   memcpy(o + at, sb[sec] + q, sl[sec] - q);
   fill(o + n, n, pad, -1, 1);
+  for (k = 0; k < nitems[sec]; k++) {  // fields resolved here: absolute symbols, local fnaddr
+    it = items[sec] + k;
+    if (it->kind == K_FIX && !it->rel && it->flags != FX_INIT) patch(o + it->addr, it);
+  }
   *size = n + pad;
   return o;
 }
 
+int secsym[3];                         // symbol table index of .text/.data, -1 when not needed
+
 int writeobj(char *out) {
-  struct t2o o; struct t2sym *ts; struct Sym *y; char *str; int ns; int strsize; int i; int fd; int at; int tsz; int dsz;
+  struct t2o o; struct t2sym *ts; struct t2rel *rs; struct t2rel *r; struct Sym *y; struct Item *it; char *str;
+  int ns; int nr; int strsize; int i; int k; int sec; int fd; int at; int tsz; int dsz;
   o.text = finish(SEC_TEXT, &tsz);
   o.data = finish(SEC_DATA, &dsz);
   o.h.text_size = tsz; o.h.data_size = dsz;
   ns = 0; strsize = 1;
-  for (i = 0; i < nsyms; i++) {
+  for (i = 0; i < nsyms; i++) {        // named symbols, and .L labels that are .t2init routines
     y = syms + i;
     if (y->flags & F_ANON) continue;
-    if (y->len >= 2 && y->name[0] == '.' && y->name[1] == 'L') continue;
-    if (!(y->flags & (F_DEF | F_GLOBAL | F_EXTERN))) continue;
+    if (nosymentry(i) && !(y->flags & F_INIT)) continue;
+    if (!(y->flags & (F_DEF | F_GLOBAL | F_EXTERN | F_REF))) continue;
     y->out = ns; ns++; strsize = strsize + y->len + 1;
   }
+  nr = 0; secsym[SEC_TEXT] = -1; secsym[SEC_DATA] = -1;
+  for (sec = SEC_TEXT; sec <= SEC_DATA; sec++)
+    for (k = 0; k < nitems[sec]; k++) {
+      it = items[sec] + k;
+      if (!it->rel) continue;
+      nr++;
+      if (nosymentry(it->sym) && secsym[syms[it->sym].sect] < 0) { secsym[syms[it->sym].sect] = ns; ns++; strsize = strsize + 6; }
+    }
   ts = malloc(ns * sizeof(struct t2sym) + 4);
+  rs = malloc(nr * sizeof(struct t2rel) + 4);
   str = malloc(strsize + 1); memset(str, 0, strsize + 1);
+  if (!ts || !rs || !str) fail("out of memory");
   at = 1;
   for (i = 0; i < nsyms; i++) {
     y = syms + i;
@@ -1151,11 +1462,29 @@ int writeobj(char *out) {
     memcpy(str + at, y->name, y->len); at = at + y->len + 1;
     if (y->flags & F_DEF) { ts[y->out].sect = y->sect; ts[y->out].value = symaddr(i); }
     else { ts[y->out].sect = SEC_UNDEF; ts[y->out].value = 0; }
-    ts[y->out].flags = (y->flags & (F_GLOBAL | F_EXTERN)) ? SYM_GLOBAL : 0;
+    ts[y->out].flags = 0;
+    if ((y->flags & (F_GLOBAL | F_EXTERN)) || !(y->flags & F_DEF)) ts[y->out].flags = SYM_GLOBAL;
+    if (y->flags & F_INIT) ts[y->out].flags = ts[y->out].flags | SYM_INIT;
   }
+  for (sec = SEC_TEXT; sec <= SEC_DATA; sec++) {
+    if (secsym[sec] < 0) continue;
+    ts[secsym[sec]].name = at;
+    strcpy(str + at, sec == SEC_TEXT ? ".text" : ".data"); at = at + 6;
+    ts[secsym[sec]].sect = sec; ts[secsym[sec]].value = 0; ts[secsym[sec]].flags = 0;
+  }
+  nr = 0;
+  for (sec = SEC_TEXT; sec <= SEC_DATA; sec++)
+    for (k = 0; k < nitems[sec]; k++) {
+      it = items[sec] + k;
+      if (!it->rel) continue;
+      r = rs + nr; nr++;
+      r->sect = sec; r->off = it->addr; r->type = it->rel;
+      if (nosymentry(it->sym)) { r->sym = secsym[syms[it->sym].sect]; r->addend = symaddr(it->sym) + it->val; }
+      else { r->sym = syms[it->sym].out; r->addend = it->val; }
+    }
   o.h.magic = T2OBJ_MAGIC; o.h.version = T2OBJ_VERSION;
-  o.h.nsyms = ns; o.h.nrels = 0; o.h.str_size = strsize;
-  o.syms = ts; o.rels = 0; o.str = str;
+  o.h.nsyms = ns; o.h.nrels = nr; o.h.str_size = strsize;
+  o.syms = ts; o.rels = rs; o.str = str;
   fd = open(out, 577, 420);
   if (fd < 0) { printf("as: cannot write %s\n", out); exit(1); }
   if (t2o_write(fd, &o) < 0) { printf("as: write error on %s\n", out); close(fd); exit(1); }

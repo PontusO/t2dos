@@ -1,0 +1,1 @@
+tests/asm/errors/init-undef.s:3: error: .t2init symbol 'ext' is not a text label in this file

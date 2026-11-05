@@ -1,0 +1,59 @@
+text 0000000c R_BL ext+0
+text 00000010 R_BL ext-4
+text 00000014 R_BL puts+0
+text 0000001a R_BW ext+0
+text 0000001e R_BW ext2+8
+text 00000024 R_BCOND ext+0
+text 00000028 R_BCOND ext2+0
+text 0000002e R_BW ext+0
+text 00000050 R_FNADDR ext+0
+text 0000005a R_FNADDR ext2+4
+text 00000064 R_DATA_ADDW ldat+0
+text 00000068 R_DATA_ADDW gdat+4
+text 0000006c R_DATA_ADDW .data+8
+text 00000070 R_DATA_ADDW .data+10
+text 00000074 R_DATA_ADDW extd+0
+text 00000078 R_DATA_ADDW lfun+0
+text 0000007c R_DATA_ADDW .text+98
+text 00000088 R_DATA_MOVW ldat+0
+text 0000008c R_DATA_MOVT ldat+0
+text 00000090 R_DATA_MOVW gdat+6
+text 00000094 R_DATA_MOVT gdat+6
+text 00000098 R_DATA_MOVW .data+12
+text 0000009c R_DATA_MOVT .data+12
+text 000000a0 R_DATA_MOVW extd+0
+text 000000a4 R_DATA_MOVT extd-1
+text 000000a8 R_DATA_MOVW gfun+0
+text 000000ac R_DATA_MOVT .text+100
+text 000000b8 R_DATA_MOVW16 ldat+0
+text 000000bc R_DATA_MOVW16 gdat+2
+text 000000c0 R_DATA_MOVW16 .data+8
+text 000000c4 R_DATA_MOVW16 extd+100
+text 000000c8 R_DATA_MOVW16 lfun+0
+text 000000d4 R_WORD lfun+0
+text 000000d8 R_WORD gfun+4
+text 000000dc R_WORD .text+100
+text 000000e0 R_WORD ldat+0
+text 000000e4 R_WORD gdat+0
+text 000000e8 R_WORD .data+0
+text 000000ec R_WORD ext+0
+text 000000f0 R_WORD .text+240
+data 0000000c R_WORD lfun+0
+data 00000010 R_WORD .text+101
+data 00000014 R_WORD ext+12
+data 00000018 R_WORD .data+8
+
+00000100 t .Linit
+00000000 d .data
+00000000 t .text
+00000064 a CONST
+12344567 a FWD
+0000012c a FWD12
+         U ext
+         U ext2
+         U extd
+0000000c D gdat
+00000032 T gfun
+00000004 d ldat
+00000000 t lfun
+         U puts

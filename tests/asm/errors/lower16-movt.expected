@@ -1,0 +1,1 @@
+tests/asm/errors/lower16-movt.s:4: error: movw takes :lower16: and movt takes :upper16:

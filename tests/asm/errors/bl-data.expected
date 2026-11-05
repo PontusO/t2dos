@@ -1,0 +1,1 @@
+tests/asm/errors/bl-data.s:3: error: branch target in another section

@@ -1,0 +1,1 @@
+tests/asm/errors/fnaddr-data.s:4: error: fnaddr target 'd' is not a text label

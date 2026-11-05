@@ -1,0 +1,1 @@
+tests/asm/errors/byte-undef.s:3: error: undefined symbol 'ext'

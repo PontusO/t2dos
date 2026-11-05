@@ -1,0 +1,1 @@
+tests/asm/errors/narrow-undef.s:4: error: narrow branch to undefined symbol 'ext'

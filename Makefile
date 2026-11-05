@@ -56,7 +56,9 @@ check: build/host/nm build/host/as
 	@out=$$(build/host/nm build/obj/missing.o); st=$$?; \
 	  if [ $$st -ne 1 ] || [ "$$out" != "nm: cannot read build/obj/missing.o" ]; then echo "FAIL missing: status $$st, output '$$out'"; exit 1; fi
 	@echo bad-object checks ok
-	python3 tools/check_asm.py tests/asm/core.s
+	python3 tools/check_asm.py tests/asm/core.s tests/asm/fpu.s
+	python3 tools/check_asm.py --relocs tests/asm/reloc.s | diff - tests/asm/reloc.expected
+	test "$$(python3 tools/check_asm.py --inits tests/asm/reloc.s | tr '\n' ' ')" = ".Linit lfun "
 	python3 tools/check_asm.py --errors tests/asm/errors/*.s
 .PHONY: ref check
 clean:

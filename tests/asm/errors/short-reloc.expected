@@ -1,0 +1,1 @@
+tests/asm/errors/short-reloc.s:4: error: relocation too small

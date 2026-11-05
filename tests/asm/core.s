@@ -532,7 +532,7 @@ dend:
         .balign 4, 0xff
         .byte   1
         .balign 4, 0xee
-        .short  a1, a2 + 1
+        .short  a1 - a2 + 0x1000, a2 + 1 - a1     @ .short of a label alone needs a relocation (an error)
         .byte   a2 - a1 + 200
         .space  1
         .align  1

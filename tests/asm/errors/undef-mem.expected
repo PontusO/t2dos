@@ -1,0 +1,1 @@
+tests/asm/errors/undef-mem.s:3: error: undefined symbol 'ext'

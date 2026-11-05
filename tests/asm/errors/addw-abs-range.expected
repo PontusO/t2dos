@@ -1,0 +1,1 @@
+tests/asm/errors/addw-abs-range.s:3: error: immediate out of range

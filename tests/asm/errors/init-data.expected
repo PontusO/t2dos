@@ -1,0 +1,1 @@
+tests/asm/errors/init-data.s:4: error: .t2init symbol 'd' is not a text label in this file

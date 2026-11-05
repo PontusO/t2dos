@@ -1,0 +1,1 @@
+tests/asm/errors/fnaddr-undef-l.s:3: error: undefined symbol '.Lnone'

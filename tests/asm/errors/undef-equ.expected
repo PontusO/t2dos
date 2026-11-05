@@ -1,0 +1,1 @@
+tests/asm/errors/undef-equ.s:2: error: undefined symbol 'ext'

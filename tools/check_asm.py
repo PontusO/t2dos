@@ -2,9 +2,18 @@
 """Check build/host/as against GNU as.
 
   check_asm.py file.s...           assemble each with build/host/as and arm-none-eabi-as,
-                                   compare the text and data bytes
+                                   compare the text and data bytes. R_WORD relocations are
+                                   applied as GNU leaves them in its object (S + A for a
+                                   local symbol, A for a global or undefined one, sections at
+                                   0); any other relocation fails. For GNU, the T2DOS forms
+                                   `fnaddr rd, sym` and `movw.16 rd, #x` are rewritten into
+                                   movw/movt/add rd, pc and movw rd, #:lower16:x
   check_asm.py --errors file.s...  each file must fail: exit status 1, no output file, and the
                                    first line of output equal to file.expected (next to file.s)
+  check_asm.py --relocs file.s     assemble with build/host/as and print the relocations, one
+                                   "SECT OFFSET TYPE SYMBOL+ADDEND" line each in object order,
+                                   then a blank line and the nm listing of the object
+  check_asm.py --inits file.s      print the names of the SYM_INIT (.t2init) symbols, sorted
   check_asm.py --corpus            disassemble every root/bin/*.bin and compiler/tests/*.c (built
                                    with compiler/cc into build/corpus/), turn it back into
                                    assembly, and require build/host/as and GNU as to reproduce
@@ -29,13 +38,45 @@ def gnu(tool):
     return os.path.join(GNU, 'arm-none-eabi-' + tool)
 
 
-def read_t2obj(path):
-    """(text, data) of a T2DOS object: seven LE ints, then text, then data."""
+SECTS = {1: 'text', 2: 'data'}
+RELOCS = {1: 'R_BL', 2: 'R_BW', 3: 'R_BCOND', 4: 'R_DATA_ADDW', 5: 'R_DATA_MOVW', 6: 'R_DATA_MOVT',
+          7: 'R_DATA_MOVW16', 8: 'R_FNADDR', 9: 'R_WORD'}
+SYM_GLOBAL = 1
+SYM_INIT = 2
+
+
+def parse_t2obj(path):
+    """text, data, symbols [(name, sect, value, flags)], relocations [(sect, off, sym, type, addend)]."""
     b = open(path, 'rb').read()
-    magic, version, tsize, dsize = struct.unpack('<4i', b[:16])
+    magic, version, tsize, dsize, nsyms, nrels, strsize = struct.unpack('<7i', b[:28])
     if magic != T2OBJ_MAGIC:
         raise ValueError('%s: not a T2DOS object' % path)
-    return b[28:28 + tsize], b[28 + tsize:28 + tsize + dsize]
+    p = 28
+    text = b[p:p + tsize]
+    p += tsize
+    data = b[p:p + dsize]
+    p += dsize
+    raw = [struct.unpack('<4i', b[p + 16 * i:p + 16 * i + 16]) for i in range(nsyms)]
+    p += 16 * nsyms
+    rels = [struct.unpack('<5i', b[p + 20 * i:p + 20 * i + 20]) for i in range(nrels)]
+    p += 20 * nrels
+    strs = b[p:p + strsize]
+    syms = [(strs[n:strs.index(b'\0', n)].decode(), sect, value, flags) for n, sect, value, flags in raw]
+    return text, data, syms, rels
+
+
+def read_t2obj(path):
+    """(text, data) of a T2DOS object, with R_WORD relocations applied as GNU leaves them."""
+    text, data, syms, rels = parse_t2obj(path)
+    secs = {1: bytearray(text), 2: bytearray(data)}
+    for sect, off, sym, typ, addend in rels:
+        name, ssect, value, flags = syms[sym]
+        if typ != 9:
+            raise ValueError('%s: %s at %s+0x%x cannot be compared with GNU'
+                             % (path, RELOCS.get(typ, typ), SECTS[sect], off))
+        v = addend + (value if ssect != 0 and not (flags & SYM_GLOBAL) else 0)
+        secs[sect][off:off + 4] = struct.pack('<I', v & 0xffffffff)
+    return bytes(secs[1]), bytes(secs[2])
 
 
 def ours(src, obj):
@@ -44,7 +85,57 @@ def ours(src, obj):
     r = subprocess.run([AS, '-o', obj, src], capture_output=True, text=True)
     if r.returncode != 0:
         return None, (r.stdout + r.stderr).strip()
-    return read_t2obj(obj), None
+    try:
+        return read_t2obj(obj), None
+    except ValueError as e:
+        return None, str(e)
+
+
+LABEL = r'^(\s*(?:[\w.$]+:\s*)?)'
+FNADDR_RE = re.compile(LABEL + r'fnaddr\s+(\w+)\s*,\s*([^@]*?)\s*(@.*)?$', re.M | re.I)
+MOVW16_RE = re.compile(LABEL + r'movw\.16(\s+\w+\s*,\s*)#', re.M | re.I)
+
+
+def gnu_forms(text):
+    """Rewrite the T2DOS pseudo-instructions into GNU instructions with the same bytes."""
+    n = [0]
+
+    def fn(m):
+        n[0] += 1
+        lab = '.Lt2fn%d' % n[0]
+        v = '(%s + 1 - (%s + 12))' % (m.group(3), lab)
+        return '%s%s: movw %s, #:lower16:%s\n\tmovt %s, #:upper16:%s\n\tadd %s, pc' % (
+            m.group(1), lab, m.group(2), v, m.group(2), v, m.group(2))
+    return MOVW16_RE.sub(r'\1movw\2#:lower16:', FNADDR_RE.sub(fn, text))
+
+
+def relocs(src):
+    os.makedirs(WORK, exist_ok=True)
+    obj = os.path.join(WORK, os.path.basename(src)[:-2] + '.o')
+    if os.path.exists(obj):
+        os.unlink(obj)
+    r = subprocess.run([AS, '-o', obj, src], capture_output=True, text=True)
+    if r.returncode != 0:
+        print('FAIL %s: build/host/as: %s' % (src, (r.stdout + r.stderr).strip()))
+        return 1
+    text, data, syms, rels = parse_t2obj(obj)
+    for sect, off, sym, typ, addend in rels:
+        print('%s %08x %s %s%+d' % (SECTS.get(sect, '?'), off, RELOCS.get(typ, str(typ)), syms[sym][0], addend))
+    print()
+    sys.stdout.flush()
+    return subprocess.run([os.path.join(ROOT, 'build', 'host', 'nm'), obj]).returncode
+
+
+def inits(src):
+    os.makedirs(WORK, exist_ok=True)
+    obj = os.path.join(WORK, os.path.basename(src)[:-2] + '.o')
+    r = subprocess.run([AS, '-o', obj, src], capture_output=True, text=True)
+    if r.returncode != 0:
+        print('FAIL %s: build/host/as: %s' % (src, (r.stdout + r.stderr).strip()))
+        return 1
+    for name in sorted(s[0] for s in parse_t2obj(obj)[2] if s[3] & SYM_INIT):
+        print(name)
+    return 0
 
 
 def theirs(src, base):
@@ -56,7 +147,7 @@ def theirs(src, base):
     if not re.search(r'^\s*\.thumb\b', text, re.M):
         head += '\t.thumb\n'
     gsrc = base + '.gnu.s'
-    open(gsrc, 'w').write(head + text)
+    open(gsrc, 'w').write(head + gnu_forms(text))
     gobj = base + '.gnu.o'
     r = subprocess.run([gnu('as')] + GNU_FLAGS + ['-o', gobj, gsrc], capture_output=True, text=True)
     if r.returncode != 0:
@@ -124,6 +215,7 @@ def check_error(src):
 
 # ------------------------------------------------------------------ corpus
 LINE_RE = re.compile(r'^\s*([0-9a-f]+):\t([0-9a-f ]+?)\s*\t(\S+)(?:\t(.*))?$')
+FPU_RE = re.compile(r'^(v(add|sub|mul|div|neg|sqrt|cmp)\.f32|vcvt\.(f32\.[su]32|[su]32\.f32)|vmov|vmrs|vldr|vstr|vpush|vpop)$')
 BRANCH_RE = re.compile(r'^(b|bl|b(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al))(\.[nw])?$')
 
 
@@ -144,7 +236,7 @@ def build_corpus():
 
 
 def to_asm(code, work):
-    """Disassemble code bytes into assembly; returns (source, instructions, deferred)."""
+    """Disassemble code bytes into assembly; returns (source, instructions, deferred, raw)."""
     raw = work + '.code'
     open(raw, 'wb').write(code)
     dis = subprocess.run([gnu('objdump'), '-D', '-b', 'binary', '-m', 'arm', '-M', 'force-thumb', raw],
@@ -174,7 +266,7 @@ def to_asm(code, work):
         if a in targets:
             lines.append('L_%x:' % a)
         raw_bytes = False
-        if mn.startswith('v') or mn.startswith('.') or 'UNDEFINED' in mn or mn.startswith('<'):
+        if (mn.startswith('v') and not FPU_RE.match(mn)) or mn.startswith('.') or 'UNDEFINED' in mn or mn.startswith('<'):
             raw_bytes = True
             if mn.startswith('v'):
                 deferred += 1
@@ -232,7 +324,7 @@ def check_corpus():
         total += n
         deferred += nd
         rawtotal += nr
-    print('corpus: %d files, %d instructions reproduced, %d deferred (FPU, Task 4), '
+    print('corpus: %d files, %d instructions reproduced, %d deferred (FPU forms as does not support), '
           '%d other lines as .short (undecodable or branch to a non-instruction), %d failed'
           % (len(bins), total, deferred, rawtotal, bad))
     return bad == 0
@@ -241,6 +333,10 @@ def check_corpus():
 def main(argv):
     if len(argv) > 1 and argv[1] == '--corpus':
         return 0 if check_corpus() else 1
+    if len(argv) == 3 and argv[1] == '--relocs':
+        return relocs(argv[2])
+    if len(argv) == 3 and argv[1] == '--inits':
+        return inits(argv[2])
     if len(argv) > 1 and argv[1] == '--errors':
         ok = True
         for f in argv[2:]:

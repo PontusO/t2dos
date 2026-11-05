@@ -1,0 +1,1 @@
+tests/asm/errors/lower16-add.s:3: error: :lower16: and :upper16: need movw or movt

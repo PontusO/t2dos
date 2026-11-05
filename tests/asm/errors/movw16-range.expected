@@ -1,0 +1,1 @@
+tests/asm/errors/movw16-range.s:4: error: immediate out of range
