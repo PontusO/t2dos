@@ -37,3 +37,21 @@ for r in rels:
 blob += strtab
 os.makedirs(os.path.dirname(out), exist_ok=True)
 open(out, "wb").write(blob)
+
+# bad objects, next to the sample, for the nm error tests
+outdir = os.path.dirname(os.path.abspath(out))
+def bad(fname, data):
+    open(os.path.join(outdir, fname), "wb").write(data)
+
+bad("bad-magic.o", b"XXXX" + blob[4:])
+bad("bad-trunc.o", blob[:-6])                       # header claims more than the file holds
+badsyms = list(syms)
+badsyms[0] = (len(strtab) + 100, SEC_TEXT, 0, SYM_GLOBAL)   # name offset past the string table
+blob2 = struct.pack("<7i", 0x424F3254, 1, len(text), len(data), len(badsyms), len(rels), len(strtab)) + text + data
+for s in badsyms:
+    blob2 += struct.pack("<4i", *s)
+for r in rels:
+    blob2 += struct.pack("<5i", *r)
+bad("bad-name.o", blob2 + strtab)
+huge = struct.pack("<7i", 0x424F3254, 1, 0, 0, 0x10000000, 0, 0)   # nsyms * 16 wraps to 0
+bad("bad-count.o", huge)

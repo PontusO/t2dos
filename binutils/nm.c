@@ -1,5 +1,5 @@
-// nm - list the symbols of T2DOS object files and archives
-//   nm file.o|file.a...   prints "%08x %c name", sorted by name; T/D/A/U, lower case for local symbols
+// nm - list the symbols of T2DOS object files
+//   nm file.o...   prints "%08x %c name", sorted by name; T/D/A/U, lower case for local symbols
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,24 +33,9 @@ int nm_obj(struct t2o *o) {
 }
 
 int nm_file(char *path, int heading) {
-  char *buf; int size; struct t2o o; struct t2ar_hdr *ah; struct t2ar_member *m; char *astr; int i; int rc;
+  char *buf; int size; struct t2o o;
   buf = t2_readfile(path, &size);
   if (!buf) { printf("nm: cannot read %s\n", path); return 1; }
-  if (size >= 4 && *(int *)buf == T2AR_MAGIC) {
-    ah = (struct t2ar_hdr *)buf;
-    m = (struct t2ar_member *)(buf + sizeof(struct t2ar_hdr) + ah->nindex * sizeof(struct t2ar_index));
-    astr = (char *)(m + ah->nmembers);
-    if (heading) printf("%s:\n", path);
-    rc = 0;
-    for (i = 0; i < ah->nmembers; i++) {
-      if (m[i].offset < 0 || m[i].size < 0 || m[i].offset + m[i].size > size || t2o_read(buf + m[i].offset, m[i].size, &o) < 0) {
-        printf("nm: %s: not a T2DOS object\n", path); return 1;
-      }
-      printf("\n%s:\n", astr + m[i].name);
-      nm_obj(&o);
-    }
-    return rc;
-  }
   if (t2o_read(buf, size, &o) < 0) { printf("nm: %s: not a T2DOS object\n", path); return 1; }
   if (heading) printf("%s:\n", path);
   return nm_obj(&o);
@@ -58,7 +43,7 @@ int nm_file(char *path, int heading) {
 
 int main(int argc, char **argv) {
   int i; int rc;
-  if (argc < 2) { printf("usage: nm file.o|file.a...\n"); return 1; }
+  if (argc < 2) { printf("usage: nm file.o...\n"); return 1; }
   rc = 0;
   for (i = 1; i < argc; i++) if (nm_file(argv[i], argc > 2)) rc = 1;
   return rc;

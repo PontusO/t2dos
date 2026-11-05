@@ -41,6 +41,14 @@ ref:
 check: build/host/nm
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
+	@# bad objects: exit status 1 and the exact error message
+	@for f in bad-magic bad-trunc bad-name bad-count; do \
+	  out=$$(build/host/nm build/obj/$$f.o); st=$$?; \
+	  if [ $$st -ne 1 ] || [ "$$out" != "nm: build/obj/$$f.o: not a T2DOS object" ]; then echo "FAIL $$f: status $$st, output '$$out'"; exit 1; fi; \
+	done
+	@out=$$(build/host/nm build/obj/missing.o); st=$$?; \
+	  if [ $$st -ne 1 ] || [ "$$out" != "nm: cannot read build/obj/missing.o" ]; then echo "FAIL missing: status $$st, output '$$out'"; exit 1; fi
+	@echo bad-object checks ok
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin
