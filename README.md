@@ -1,28 +1,39 @@
 # T2DOS: a DOS-class OS for the RP2350, with a self-hosting C compiler
 
 One program at a time, flat memory, kernel in the Arduino sketch, everything
-else is a T2CC program on the SD card.
+else is a T2CC program on the SD card (or, without a card, in on-board flash).
 
 ## Layout
     sys.h             syscall ABI: numbers, flags, structs. Shared by kernel, cc.c, programs
     cc.c              the compiler (gcc builds it as a PC cross compiler; compiles itself on the board)
-    kernel/kernel.ino the kernel (arduino-pico, SDFS on SPI, set SD_CS)
+    kernel/kernel.ino the kernel (arduino-pico; SDFS on SPI, set SD_CS; LittleFS fallback)
     host_linux.c      the same kernel contract on Linux/ARM, run binaries with qemu-arm
     userland/*.c      sh ls cat cp mv rm mkdir rmdir echo hexdump free put write blink
                       wifi get send rls nc (network)
     lib/net.c         client helpers for the file protocol, #include "net.c"
     tools/fileserver.py  Linux side: python3 fileserver.py dir [port]
-    root/             SD card image: /bin/*.bin  /lib/sys.h /lib/net.c  /src/
+    root/             filesystem image: /bin/*.bin  /lib/sys.h /lib/net.c  /src/
     Makefile          make all; make host
 
-## Bootstrapping the card
+## Building the kernel
+Tested on the iLabs CPico 2350 with arduino-pico 6.2.0 (`rp2040:rp2040`).
+The sketch includes `sys.h` from the repo root:
+
+    FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
+    arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel kernel
+    arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel
+
+The `flash=` layout gives the kernel 1 MB (it uses about 184 KB) and the
+filesystem 7 MB. Reflashing the kernel keeps the filesystem.
+
+## Bootstrapping
 1. `make` (needs gcc). Copy `root/` to the SD card.
 2. Flash `kernel.ino`. It boots `/bin/sh.bin`; if that is missing you get a
    `recovery>` prompt with `put name size` (raw bytes follow), `ls`, `mkdir`, `run`.
    No SD card: the kernel falls back to LittleFS in on-board flash (banner says
    `fs flash`, formatted on first use). On the CPico 2350 build with the
    `flash=8388608_7340032` layout: 1 MB for the kernel, 7 MB filesystem. Fill it
-   with `put` from the recovery prompt or the shell.
+   with `put` from the recovery prompt or the shell, one file at a time.
 3. On the board: `cd /src`, `write hello.c` (type it, end with `.`),
    `cc -o hello.bin hello.c`, `hello`.
    `put` works from the shell too; from a PC:
@@ -45,8 +56,8 @@ read/write/close; exec closes sockets a child leaked.
 - Programs are position independent Thumb-2: `r7` frame, `r8` = kernel
   `sys()`, `r9` = data base, args on the stack (first arg deepest), result in r0.
 - `sys(num, nargs, argv)`, `argv[nargs-1]` is the first argument. Numbers in sys.h,
-  grouped: process 0+, console 16+, files 32+, memory/strings 64+, network 80+
-  (reserved), board 96+, user 128+.
+  grouped: process 0+, console 16+, files 32+, memory/strings 64+, network 80+,
+  board 96+, user 128+.
 - `exec(path, argc, argv)` loads a binary into fresh code (SRAM) + data + 256 KB
   stack (PSRAM), runs it, frees everything, returns its exit code. Nesting up to 4.
   Files the child leaked are closed, memory it `malloc`ed is freed;
@@ -70,9 +81,23 @@ Not yet: float, initializers, function pointers, unsigned/short, 2-D arrays,
 multi-line macros. See test.c and test3.c for the covered subset.
 
 ## Verified
+On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
+flash; files survive reset and reflash; `ls`, `free`, `echo`, `> file`,
+`>> file`, `cat`, `cp`, `hexdump`, `put`; `cc` compiles and runs test.c and an
+`#include "sys.h"` program; `cc` rebuilds `cc.bin` byte-identical to the PC
+build, and that `cc` rebuilds it again identically. PSRAM is fully returned
+after every program.
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
 Under qemu-arm with host_linux: the shell runs every tool, `cc` compiles and
 runs test.c, redirection works, and `cc` on the "board" rebuilds `cc.bin`
 byte-identical to the PC cross build.
+
+## Not yet verified / known gaps
+- SD card on the CPico 2350: not tested yet (no card was mounted; the kernel
+  expects it on SPI0 with CS on GP17, `SD_CS SS`).
+- Network tools on real hardware: only tested under qemu so far.
+- `host_linux.c` does not yet free a program's `malloc`s on exit or zero them,
+  unlike the board kernel.
+- Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
