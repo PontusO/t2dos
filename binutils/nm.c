@@ -1,5 +1,5 @@
 // nm - list the symbols of T2DOS object files
-//   nm file.o...   prints "%08x %c name", sorted by name; T/D/A/U, lower case for local symbols
+//   nm file.o...   (an archive: each member as ARCHIVE(MEMBER)) prints "%08x %c name", sorted by name; T/D/A/U, lower case for local symbols
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,12 +32,37 @@ int nm_obj(struct t2o *o) {
   return 0;
 }
 
+// "ARCHIVE(MEMBER):" or the plain path: the heading nm prints for several files
+int nm_head(char *path, char *member) {
+  if (member) printf("%s(%s):\n", path, member); else printf("%s:\n", path);
+  return 0;
+}
+
+// each member of an archive is listed as if it were a file named ARCHIVE(MEMBER)
+int nm_archive(char *path, char *buf, int size, int heading) {
+  struct t2ar a; struct t2o o; int i; int rc; char *name; char *full;
+  if (t2ar_read(buf, size, &a) < 0) { printf("nm: %s: not a T2DOS archive\n", path); return 1; }
+  rc = 0;
+  for (i = 0; i < a.h.nmembers; i++) {
+    name = a.str + a.members[i].name;
+    if (t2ar_member(&a, i, &o) < 0) {
+      printf("nm: %s(%s): not a T2DOS object\n", path, name);
+      rc = 1;
+      continue;
+    }
+    if (heading || a.h.nmembers > 1) nm_head(path, name);
+    nm_obj(&o);
+  }
+  return rc;
+}
+
 int nm_file(char *path, int heading) {
   char *buf; int size; struct t2o o;
   buf = t2_readfile(path, &size);
   if (!buf) { printf("nm: cannot read %s\n", path); return 1; }
+  if (size >= 4 && memcmp(buf, "T2AR", 4) == 0) return nm_archive(path, buf, size, heading);
   if (t2o_read(buf, size, &o) < 0) { printf("nm: %s: not a T2DOS object\n", path); return 1; }
-  if (heading) printf("%s:\n", path);
+  if (heading) nm_head(path, 0);
   return nm_obj(&o);
 }
 

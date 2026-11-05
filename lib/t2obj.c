@@ -51,6 +51,52 @@ int t2o_read(char *buf, int size, struct t2o *o) {
   return 0;
 }
 
+// an archive: the tables point into the buffer given to t2ar_read, which must stay alive
+struct t2ar { struct t2ar_hdr h; struct t2ar_index *index; struct t2ar_member *members; char *str; char *base; };
+
+// 0 ok, -1 bad magic, truncated or inconsistent (every name, member number, offset and size is checked)
+int t2ar_read(char *buf, int size, struct t2ar *a) {
+  int need; int p; int i; struct t2ar_index *x; struct t2ar_member *m;
+  if (size < 0 || size < sizeof(struct t2ar_hdr)) return -1;
+  memcpy((char *)a, buf, sizeof(struct t2ar_hdr));   // h is the first member
+  if (a->h.magic != T2AR_MAGIC || a->h.version != 1) return -1;
+  if (a->h.nmembers < 0 || a->h.nindex < 0 || a->h.str_size < 0) return -1;
+  if (a->h.str_size > size) return -1;
+  if (a->h.nindex > size / sizeof(struct t2ar_index) || a->h.nmembers > size / sizeof(struct t2ar_member)) return -1;
+  need = sizeof(struct t2ar_hdr);
+  if (a->h.nindex * sizeof(struct t2ar_index) > size - need) return -1;
+  need = need + a->h.nindex * sizeof(struct t2ar_index);
+  if (a->h.nmembers * sizeof(struct t2ar_member) > size - need) return -1;
+  need = need + a->h.nmembers * sizeof(struct t2ar_member);
+  if (a->h.str_size > size - need) return -1;
+  p = sizeof(struct t2ar_hdr);
+  a->index = (struct t2ar_index *)(buf + p); p = p + a->h.nindex * sizeof(struct t2ar_index);
+  a->members = (struct t2ar_member *)(buf + p); p = p + a->h.nmembers * sizeof(struct t2ar_member);
+  a->str = buf + p; p = p + a->h.str_size;       // p: the end of the tables, where the member objects may start
+  a->base = buf;
+  // string table: NUL terminated, empty only without names
+  if (a->h.str_size == 0 && (a->h.nindex > 0 || a->h.nmembers > 0)) return -1;
+  if (a->h.str_size > 0 && a->str[a->h.str_size - 1] != 0) return -1;
+  for (i = 0; i < a->h.nindex; i++) {
+    x = a->index + i;
+    if (x->name < 0 || x->name >= a->h.str_size) return -1;
+    if (x->member < 0 || x->member >= a->h.nmembers) return -1;
+  }
+  for (i = 0; i < a->h.nmembers; i++) {
+    m = a->members + i;
+    if (m->name < 0 || m->name >= a->h.str_size) return -1;
+    if (m->offset < p || (m->offset & 3) || m->offset > size) return -1;
+    if (m->size < 0 || m->size > size - m->offset) return -1;
+  }
+  return 0;
+}
+
+// the object of member i (t2o_read on its bytes): 0 ok, -1 bad
+int t2ar_member(struct t2ar *a, int i, struct t2o *o) {
+  if (i < 0 || i >= a->h.nmembers) return -1;
+  return t2o_read(a->base + a->members[i].offset, a->members[i].size, o);
+}
+
 // 0 ok, -1 on a short write
 int t2o_write(int fd, struct t2o *o) {
   if (write(fd, (char *)o, sizeof(struct t2obj_hdr)) != sizeof(struct t2obj_hdr)) return -1;

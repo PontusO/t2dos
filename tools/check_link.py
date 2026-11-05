@@ -27,6 +27,9 @@ TESTS = os.path.join(ROOT, 'tests', 'link')
 WORK = os.path.join(ROOT, 'build', 'link')
 AS = os.path.join(ROOT, 'build', 'host', 'as')
 LD = os.path.join(ROOT, 'build', 'host', 'ld')
+AR = os.path.join(ROOT, 'build', 'host', 'ar')
+NM = os.path.join(ROOT, 'build', 'host', 'nm')
+ARCHIVE_TESTS = ('ar_chain',)       # NAME.expected files that check_ar and the board's archive run own
 REMOTE = '/src/lk'
 SYM_GLOBAL = 1
 SYM_INIT = 2
@@ -92,19 +95,184 @@ def layout(wd, objs):
     for o in objs:
         t, dd, syms, rels = parse_t2obj(os.path.join(wd, o))
         text = (text + 3) & ~3
-        data = (data + 3) & ~3
+        if len(dd):
+            data = (data + 3) & ~3      # an object without data takes no alignment
         for (n, sect, value, flags) in syms:
             if n == 'main' and sect == 1 and flags & SYM_GLOBAL:
                 entry = text + value
             if flags & SYM_INIT:
                 inits += 1
         text += len(t)
-        data += len(dd)
+        data += len(dd)         # the data size ends with the last object that has data
     if inits:
         text = (text + 1) & ~1
         entry = text
         text += 2 + 4 * inits + 4 + 4
     return text, data, entry
+
+
+def tool(exe, args, cwd):
+    r = subprocess.run([exe] + args, cwd=cwd, capture_output=True, text=True)
+    return r.returncode, r.stdout + r.stderr
+
+
+def bin_header(path):
+    b = open(path, 'rb').read()
+    code, data, zero, entry = struct.unpack('<4i', b[4:20])
+    return b, (code, data, entry), len(b) == 20 + code + data and b[:4] == b'T2CC' and zero == 0
+
+
+def fail(msg):
+    print('FAIL ar: ' + msg)
+    return False
+
+
+def run_in(wd, exe, args, want, status=0):
+    st, got = tool(exe, args, wd)
+    if st != status or got != want:
+        return fail('%s %s: status %d, output %r, want status %d, %r'
+                    % (os.path.basename(exe), ' '.join(args), st, got, status, want))
+    return True
+
+
+USAGE = 'usage: ar rc|t|x ARCHIVE [FILE...]\n'
+
+
+def check_ar():
+    """ar, nm on archives and the archive search of ld, on the PC"""
+    ok = True
+    wd = os.path.join(WORK, 'ar')
+    shutil.rmtree(wd, ignore_errors=True)
+    os.makedirs(wd)
+    for n in ('lib_a', 'lib_b', 'lib_c', 'lib_bad', 'main_ar', 'main_bad'):
+        st, out = tool(AS, ['-o', n + '.o', os.path.join(TESTS, n + '.s')], wd)
+        if st or out:
+            return fail('as %s: %s' % (n, out))
+
+    def run(exe, args, want, status=0):
+        return run_in(wd, exe, args, want, status)
+
+    # one archive with a, b, c; fa and fb in two archives in either order
+    ok = run(AR, ['rc', 'lib.a', 'lib_a.o', 'lib_b.o', 'lib_c.o'], '') and ok
+    ok = run(AR, ['t', 'lib.a'], 'lib_a.o\nlib_b.o\nlib_c.o\n') and ok
+    ok = run(AR, ['rc', 'liba.a', 'lib_a.o'], '') and ok
+    ok = run(AR, ['rc', 'libb.a', 'lib_b.o'], '') and ok
+    ok = run(AR, ['rc', 'libc.a', 'lib_c.o'], '') and ok
+    want = layout(wd, ['main_ar.o', 'lib_a.o', 'lib_b.o'])      # lib_c.o is absent
+    if layout(wd, ['main_ar.o', 'lib_a.o', 'lib_b.o', 'lib_c.o']) == want:
+        ok = fail('the test needs lib_c to change the size')
+    first = None
+    for name, args in (('one', ['main_ar.o', 'lib.a']), ('ab', ['main_ar.o', 'liba.a', 'libb.a']),
+                       ('ba', ['main_ar.o', 'libb.a', 'liba.a']), ('cba', ['main_ar.o', 'libc.a', 'libb.a', 'liba.a']),
+                       ('first', ['lib.a', 'main_ar.o'])):
+        if not run(LD, ['-o', name + '.bin'] + args, ''):
+            ok = False
+            continue
+        b, hdr, good = bin_header(os.path.join(wd, name + '.bin'))
+        if not good or hdr != want:
+            ok = fail('%s: header %r, want %r (lib_c must not be linked)' % (name, hdr, want))
+        if first is None:
+            first = b
+        elif b != first:
+            ok = fail('%s: differs from the first .bin' % name)
+    # a pulled-in member with an undefined symbol is named ARCHIVE(MEMBER)
+    ok = run(AR, ['rc', 'libbad.a', 'lib_bad.o'], '') and ok
+    ok = run(LD, ['-o', 'bad.bin', 'main_bad.o', 'libbad.a'],
+             'ld: undefined symbol: nowhere (in libbad.a(lib_bad.o))\n', 1) and ok
+    if os.path.exists(os.path.join(wd, 'bad.bin')):
+        ok = fail('bad.bin was written')
+    # a member nobody needs is not linked, so its undefined symbol does not matter
+    ok = run(LD, ['-o', 'u.bin', 'main_ar.o', 'liba.a', 'libb.a', 'libbad.a'], '') and ok
+    # ar errors
+    open(os.path.join(wd, 'text.o'), 'w').write('not an object\n')
+    open(os.path.join(wd, 'text.a'), 'w').write('not an archive\n')
+    ok = run(AR, ['rc', 'x.a', 'lib_a.o', 'text.o'], 'ar: text.o: not a T2DOS object\n', 1) and ok
+    if os.path.exists(os.path.join(wd, 'x.a')):
+        ok = fail('x.a was written after an error')
+    ok = run(AR, ['rc', 'x.a', 'nofile.o'], 'ar: cannot read nofile.o\n', 1) and ok
+    ok = run(AR, ['t', 'text.a'], 'ar: text.a: not a T2DOS archive\n', 1) and ok
+    ok = run(AR, ['x', 'text.a'], 'ar: text.a: not a T2DOS archive\n', 1) and ok
+    ok = run(AR, ['rc', 'text.a', 'lib_a.o'], 'ar: text.a: not a T2DOS archive\n', 1) and ok
+    ok = run(AR, ['t', 'nofile.a'], 'ar: cannot read nofile.a\n', 1) and ok
+    ok = run(AR, ['x', 'lib.a', 'nosuch.o'], 'ar: nosuch.o: no such member\n', 1) and ok
+    ok = run(AR, ['q', 'lib.a'], USAGE, 1) and ok
+    ok = run(AR, [], USAGE, 1) and ok
+    # ar x: all members, or the named ones, byte for byte
+    for d in ('xa', 'xb', 'xc', 'sub'):
+        os.makedirs(os.path.join(wd, d))
+    ok = run_in(os.path.join(wd, 'xa'), AR, ['x', '../lib.a'], '') and ok
+    ok = run_in(os.path.join(wd, 'xb'), AR, ['x', '../lib.a', 'lib_b.o'], '') and ok
+    for n in ('lib_a.o', 'lib_b.o', 'lib_c.o'):
+        if open(os.path.join(wd, 'xa', n), 'rb').read() != open(os.path.join(wd, n), 'rb').read():
+            ok = fail('ar x: %s differs' % n)
+    if os.listdir(os.path.join(wd, 'xb')) != ['lib_b.o']:
+        ok = fail('ar x lib.a lib_b.o wrote %r' % os.listdir(os.path.join(wd, 'xb')))
+    # ar rc replaces a member in place (matching the base name) and appends new ones
+    shutil.copyfile(os.path.join(wd, 'lib_c.o'), os.path.join(wd, 'sub', 'lib_b.o'))
+    ok = run(AR, ['rc', 'lib.a', 'sub/lib_b.o', 'lib_bad.o'], '') and ok
+    ok = run(AR, ['t', 'lib.a'], 'lib_a.o\nlib_b.o\nlib_c.o\nlib_bad.o\n') and ok
+    ok = run_in(os.path.join(wd, 'xc'), AR, ['x', '../lib.a', 'lib_b.o'], '') and ok
+    if open(os.path.join(wd, 'xc', 'lib_b.o'), 'rb').read() != open(os.path.join(wd, 'lib_c.o'), 'rb').read():
+        ok = fail('the replaced member lib_b.o has the old contents')
+    # nm lists the members as ARCHIVE(MEMBER)
+    ok = run(NM, ['liba.a'], '00000000 T fa\n         U fb\n') and ok
+    ok = run(NM, ['liba.a', 'libb.a'], 'liba.a(lib_a.o):\n00000000 T fa\n         U fb\n'
+             'libb.a(lib_b.o):\n00000000 T fb\n00000006 T fz\n') and ok
+    ok = run(NM, ['libc.a', 'lib_b.o'], 'libc.a(lib_c.o):\n00000000 T fc\nlib_b.o:\n00000000 T fb\n00000006 T fz\n') and ok
+    ok = run(NM, ['text.a'], 'nm: text.a: not a T2DOS object\n', 1) and ok
+    ok = check_damaged(wd) and ok
+    return ok
+
+
+def check_damaged(wd):
+    """damaged archives are rejected by ar, nm and ld"""
+    tool(AR, ['rc', 'dsrc.a', 'lib_a.o', 'lib_b.o', 'lib_c.o'], wd)
+    good = open(os.path.join(wd, 'dsrc.a'), 'rb').read()
+    ver, nmem, ni, ss = struct.unpack('<4i', good[4:20])
+    idx = 20
+    mem = idx + 8 * ni
+    strt = mem + 12 * nmem
+    off0 = struct.unpack('<i', good[mem + 4:mem + 8])[0]
+
+    def put(b, at, v):
+        return b[:at] + struct.pack('<i', v) + b[at + 4:]
+
+    cases = [
+        ('truncated', good[:len(good) // 2]),
+        ('short header', good[:12]),
+        ('bad version', put(good, 4, 2)),
+        ('huge nindex', put(good, 12, 0x3FFFFFFF)),
+        ('negative nmembers', put(good, 8, -1)),
+        ('huge str_size', put(good, 16, 0x7FFFFFF0)),
+        ('index name out of range', put(good, idx, ss)),
+        ('index name negative', put(good, idx, -4)),
+        ('index member out of range', put(good, idx + 4, nmem)),
+        ('member name out of range', put(good, mem, ss + 8)),
+        ('member offset beyond the file', put(good, mem + 4, len(good))),
+        ('member offset negative', put(good, mem + 4, -4)),
+        ('member size beyond the file', put(good, mem + 8, len(good))),
+        ('member offset unaligned', put(good, mem + 4, off0 + 1)),
+        ('string table not terminated', good[:strt + ss - 1] + b'x' + good[strt + ss:]),
+        ('member is not an object', good[:off0] + b'XXXX' + good[off0 + 4:]),
+    ]
+    ok = True
+    for label, data in cases:
+        open(os.path.join(wd, 'dmg.a'), 'wb').write(data)
+        want = 'ar: dmg.a: not a T2DOS archive\n'
+        for exe, args, want, status in (
+                (AR, ['t', 'dmg.a'], 'ar: dmg.a: not a T2DOS archive\n', 1),
+                (LD, ['-o', 'dmg.bin', 'main_ar.o', 'dmg.a'], 'ld: dmg.a: not a T2DOS archive\n', 1),
+                (NM, ['dmg.a'], 'nm: dmg.a: not a T2DOS archive\n', 1)):
+            if label == 'member is not an object':
+                if exe == AR:
+                    continue        # ar t reads only the names
+                if exe == NM:
+                    want = ('nm: dmg.a(lib_a.o): not a T2DOS object\ndmg.a(lib_b.o):\n00000000 T fb\n00000006 T fz\n'
+                            'dmg.a(lib_c.o):\n00000000 T fc\n')
+            st, got = tool(exe, args, wd)
+            if st != status or got != want:
+                ok = fail('damaged (%s): %s status %d, output %r, want %r' % (label, os.path.basename(exe), st, got, want))
+    return ok
 
 
 def check_pc():
@@ -124,7 +292,7 @@ def check_pc():
     os.makedirs(wd, exist_ok=True)
     ok = expect_error('missing', wd, ['-o', 'x.bin', 'nofile.o'], 'ld: cannot read nofile.o\n', 'x.bin') and ok
     open(os.path.join(wd, 'lib.a'), 'wb').write(b'T2AR' + b'\0' * 16)
-    ok = expect_error('archive', wd, ['lib.a'], 'ld: lib.a: not a T2DOS object\n', 'a.bin') and ok
+    ok = expect_error('archive', wd, ['lib.a'], 'ld: lib.a: not a T2DOS archive\n', 'a.bin') and ok
     # -e: noentry.o has no main but links with its start as the entry (offset 0)
     shutil.copyfile(os.path.join(WORK, 'noentry', 'noentry.o'), os.path.join(wd, 'noentry.o'))
     st, got = ld(wd, ['-o', 'e.bin', '-e', 'start', 'noentry.o'])
@@ -134,6 +302,8 @@ def check_pc():
     n += 3
     for e in sorted(glob.glob(os.path.join(TESTS, '*.expected'))):
         name = os.path.basename(e)[:-9]
+        if name in ARCHIVE_TESTS:
+            continue
         p = prepare(TESTS, name)
         if not p:
             ok = False
@@ -154,6 +324,11 @@ def check_pc():
             ok = False
             continue
         n += 1
+        if name == 'dsz' and data != 7:     # R18: 1 byte, 3 bytes (at 4), no data: 7, not 8
+            print('FAIL dsz: data size %d, want 7' % data)
+            ok = False
+    ok = check_ar() and ok
+    n += 1
     print('%s: %d link tests' % ('ok' if ok else 'FAILED', n))
     return ok
 
@@ -189,6 +364,8 @@ def check_board():
 
     for e in sorted(glob.glob(os.path.join(TESTS, '*.expected'))):
         name = os.path.basename(e)[:-9]
+        if name in ARCHIVE_TESTS:
+            continue
         want = open(e).read().rstrip('\n').split('\n')
         objs = []
         good = True
@@ -220,7 +397,58 @@ def check_board():
                 good = False
         print('%s %s' % ('ok' if good else 'FAIL', name))
         ok = ok and good
-    return ok
+    good = check_board_ar(b, run)
+    print('%s ar_chain' % ('ok' if good else 'FAIL'))
+    return ok and good
+
+
+def check_board_ar(b, run):
+    """ar on the board builds the archives; ld on the board links and runs the ar_chain cases"""
+    b.put(os.path.join(ROOT, 'root', 'bin', 'ar.bin'), '/bin/ar.bin')
+    wd = os.path.join(WORK, 'ar')
+    want = open(os.path.join(TESTS, 'ar_chain.expected')).read().rstrip('\n').split('\n')
+    good = True
+
+    def step(cmd, wait=30.0):
+        nonlocal good
+        out, code = run(cmd, wait)
+        if out or code != 0:
+            print('FAIL ar_chain: %s: exit %r, %r' % (cmd, code, out))
+            good = False
+        return good
+
+    for n in ('lib_a', 'lib_b', 'lib_c', 'main_ar'):
+        b.put(os.path.join(TESTS, n + '.s'), '%s/%s.s' % (REMOTE, n))
+        step('as -o %s/%s.o %s/%s.s' % (REMOTE, n, REMOTE, n))
+    if not good:
+        return False
+    step('ar rc %s/lib.a %s/lib_a.o %s/lib_b.o %s/lib_c.o' % ((REMOTE,) * 4))
+    step('ar rc %s/liba.a %s/lib_a.o' % ((REMOTE,) * 2))
+    step('ar rc %s/libb.a %s/lib_b.o' % ((REMOTE,) * 2))
+    if not good:
+        return False
+    # the board's archives equal the PC's
+    for n in ('liba', 'libb'):
+        if b.fetch('%s/%s.a' % (REMOTE, n)) != open(os.path.join(wd, n + '.a'), 'rb').read():
+            print('FAIL ar_chain: the board %s.a differs from the PC one' % n)
+            good = False
+    out, code = run('ar t %s/lib.a' % REMOTE, 10.0)
+    if out != ['lib_a.o', 'lib_b.o', 'lib_c.o'] or code != 0:
+        print('FAIL ar_chain: ar t on the board: exit %r, %r' % (code, out))
+        good = False
+    for name, libs in (('one', ['lib.a']), ('ab', ['liba.a', 'libb.a']), ('ba', ['libb.a', 'liba.a'])):
+        if not step('ld -o %s/%s.bin %s/main_ar.o %s' % (REMOTE, name, REMOTE, ' '.join('%s/%s' % (REMOTE, l) for l in libs))):
+            continue
+        if b.fetch('%s/%s.bin' % (REMOTE, name)) != open(os.path.join(wd, name + '.bin'), 'rb').read():
+            print('FAIL ar_chain: the board %s.bin differs from the PC .bin' % name)
+            good = False
+        if name != 'ba':
+            out, code = run('%s/%s.bin' % (REMOTE, name), 10.0)
+            out.append('exit %r' % code)
+            if out != want:
+                print('FAIL ar_chain: %s.bin on the board: %r, want %r' % (name, out, want))
+                good = False
+    return good
 
 
 def main(argv):

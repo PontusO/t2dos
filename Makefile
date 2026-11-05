@@ -1,7 +1,7 @@
 # T2DOS build: cross compiler on the PC, userland binaries into an SD card image tree (root/)
 CC_HOST = compiler/cc
 PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
-BINUTILS = nm
+BINUTILS = nm ar
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
 all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
@@ -52,7 +52,7 @@ ref:
 	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm build/host/as build/host/ld
+check: build/host/nm build/host/ar build/host/as build/host/ld
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message

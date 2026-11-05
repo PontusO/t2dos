@@ -12,6 +12,12 @@
 // the one global definition among all objects.
 // With SYM_INIT symbols, an entry stub follows the text: push {r4, lr}; bl init (each in
 // link order); pop.w {r4, lr}; b.w entry. The stub is then the entry.
+// Archives (files starting with the archive magic) are searched after the objects: a member is
+// added when its index names a global that is referenced and not yet defined; the search over all
+// archives repeats until nothing changes. Members are laid out after the command-line objects in
+// the order they were added, and are then like any object (named ARCHIVE(MEMBER) in messages).
+// The data size is the end of the last object that has data (an object without data takes no
+// alignment).
 // Output: "T2CC", code size, data size, 0, entry offset (32-bit LE), the code, the data.
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,9 +30,13 @@ enum { NOP = 0xBF00, PUSH_R4_LR = 0xB510, POP_W_R4_LR = 0xE8BD, POP_W_R4_LR_2 = 
        B_W = 0xF000, B_W_2 = 0x9000, BL_2 = 0xD000 };
 
 struct t2o **objs; char **paths; int *tbase; int *dbase; int nobj;
+// archives: the t2ar, its path, and for its members (flat, mbase[a] + member) the object and whether it is added
+struct t2ar **ars; char **arpaths; int *mbase; int nar; struct t2o **mobj; int *madded;
 char *code; int csize; char *data; int dsize;
 // global definitions: open hash table of (object, symbol) pairs, -1 when empty
 int *hobj; int *hsym; int hsize;
+// referenced names (symbols that are undefined in a linked object): the same kind of table
+int *uobj; int *usym;
 
 int get16(char *b, int at) { return (b[at] & 255) | (b[at + 1] & 255) << 8; }
 int put16(char *b, int at, int v) { b[at] = v & 255; b[at + 1] = (v >> 8) & 255; return 0; }
@@ -39,12 +49,13 @@ int hash(char *s) {
   while (*s) { h = h * 31 + (*s & 255); s++; }
   return h & (hsize - 1);
 }
-// the slot of global name s: its entry, or the empty slot where it goes
-int hfind(char *s) {
+// the slot of name s in the table (tob, tsym): its entry, or the empty slot where it goes
+int tfind(int *tob, int *tsym, char *s) {
   int i; i = hash(s);
-  while (hobj[i] >= 0 && strcmp(symname(hobj[i], hsym[i]), s) != 0) i = (i + 1) & (hsize - 1);
+  while (tob[i] >= 0 && strcmp(symname(tob[i], tsym[i]), s) != 0) i = (i + 1) & (hsize - 1);
   return i;
 }
+int hfind(char *s) { return tfind(hobj, hsym, s); }
 
 // value of symbol sym of object ob in the final segments (sym is defined, or its global is)
 int symval(int ob, int sym) {
@@ -57,20 +68,20 @@ int symval(int ob, int sym) {
 }
 
 int bad(char *path) { printf("ld: %s: not a T2DOS object\n", path); exit(1); return 0; }
+int badarchive(char *path) { printf("ld: %s: not a T2DOS archive\n", path); exit(1); return 0; }
 
-// relocations must patch whole fields inside their section; data holds only R_WORD;
+// 1 if not: relocations must patch whole fields inside their section; data holds only R_WORD;
 // a run-before-main routine is a text symbol
-int checkrels(int ob) {
-  struct t2o *o; struct t2rel *r; int i; int n; int size;
-  o = objs[ob];
-  for (i = 0; i < o->h.nsyms; i++) if ((o->syms[i].flags & SYM_INIT) && o->syms[i].sect != SEC_TEXT) bad(paths[ob]);
+int badrels(struct t2o *o) {
+  struct t2rel *r; int i; int n; int size;
+  for (i = 0; i < o->h.nsyms; i++) if ((o->syms[i].flags & SYM_INIT) && o->syms[i].sect != SEC_TEXT) return 1;
   for (i = 0; i < o->h.nrels; i++) {
     r = o->rels + i;
     n = 4;
     if (r->type == R_FNADDR) n = 10;
     size = o->h.text_size;
-    if (r->sect == SEC_DATA) { size = o->h.data_size; if (r->type != R_WORD) bad(paths[ob]); }
-    if (r->type < R_BL || r->type > R_WORD || r->off < 0 || r->off > size - n) bad(paths[ob]);
+    if (r->sect == SEC_DATA) { size = o->h.data_size; if (r->type != R_WORD) return 1; }
+    if (r->type < R_BL || r->type > R_WORD || r->off < 0 || r->off > size - n) return 1;
   }
   return 0;
 }
@@ -140,15 +151,52 @@ int relocate(int ob) {
 
 int usage() { printf("usage: ld [-o out.bin] [-e entry] file.o...\n"); exit(1); return 0; }
 
+// link object o (named path): its globals are defined (a second definition is an error),
+// its undefined symbols become referenced names
+int addobj(struct t2o *o, char *path) {
+  int j; int h; struct t2sym *s;
+  objs[nobj] = o; paths[nobj] = path;
+  for (j = 0; j < o->h.nsyms; j++) {
+    s = o->syms + j;
+    if (s->sect == SEC_UNDEF) {
+      h = tfind(uobj, usym, symname(nobj, j));
+      if (uobj[h] < 0) { uobj[h] = nobj; usym[h] = j; }
+      continue;
+    }
+    if (!(s->flags & SYM_GLOBAL)) continue;
+    h = hfind(symname(nobj, j));
+    if (hobj[h] >= 0) {
+      printf("ld: duplicate symbol: %s (%s and %s)\n", symname(nobj, j), paths[hobj[h]], path);
+      exit(1);
+    }
+    hobj[h] = nobj; hsym[h] = j;
+  }
+  nobj++;
+  return 0;
+}
+
+// "ARCHIVE(MEMBER)"
+char *memberpath(int a, int m) {
+  char *name; char *p; int n; int k;
+  name = ars[a]->str + ars[a]->members[m].name;
+  n = strlen(arpaths[a]); k = strlen(name);
+  p = malloc(n + k + 3);
+  memcpy(p, arpaths[a], n); p[n] = '(';
+  memcpy(p + n + 1, name, k); p[n + 1 + k] = ')'; p[n + 2 + k] = 0;
+  return p;
+}
+
 int main(int argc, char **argv) {
   char *out; char *entname; char *buf; int size; int i; int j; int k; int h; int nundef;
-  int ninit; int pos; int entry; int stub; int fd; int hdr; struct t2o *o; struct t2sym *s;
+  int ninit; int pos; int entry; int stub; int fd; int hdr; struct t2o *o; struct t2ar *ar;
+  char **fpath; char **fbuf; int *fsize; int *fobj; int nf; int nmembers; int changed; int a; int m;
   out = "a.bin"; entname = "main";
-  objs = malloc((argc + 1) * sizeof(struct t2o *));
-  paths = malloc((argc + 1) * sizeof(char *));
-  tbase = malloc((argc + 1) * sizeof(int));
-  dbase = malloc((argc + 1) * sizeof(int));
-  nobj = 0;
+  fpath = malloc((argc + 1) * sizeof(char *)); fbuf = malloc((argc + 1) * sizeof(char *));
+  fsize = malloc((argc + 1) * sizeof(int)); fobj = malloc((argc + 1) * sizeof(int));
+  ars = malloc((argc + 1) * sizeof(struct t2ar *)); arpaths = malloc((argc + 1) * sizeof(char *));
+  mbase = malloc((argc + 1) * sizeof(int));
+  nf = 0; nar = 0; nmembers = 0; k = 0;
+  // read the inputs: objects (fobj 1, validated here) and archives (fobj 0)
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) { i++; out = argv[i]; }
     else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) { i++; entname = argv[i]; }
@@ -156,54 +204,61 @@ int main(int argc, char **argv) {
     else {
       buf = t2_readfile(argv[i], &size);
       if (!buf) { printf("ld: cannot read %s\n", argv[i]); return 1; }
+      fpath[nf] = argv[i]; fbuf[nf] = buf; fsize[nf] = size;
+      if (size >= 4 && get16(buf, 0) == (T2AR_MAGIC & 65535) && get16(buf, 2) == ((T2AR_MAGIC >> 16) & 65535)) {
+        ar = malloc(sizeof(struct t2ar));
+        if (t2ar_read(buf, size, ar) < 0) badarchive(argv[i]);
+        ars[nar] = ar; arpaths[nar] = argv[i]; mbase[nar] = nmembers;
+        nmembers = nmembers + ar->h.nmembers;
+        nar++;
+        fobj[nf] = 0;
+      } else {
+        o = malloc(sizeof(struct t2o));
+        if (t2o_read(buf, size, o) < 0 || badrels(o)) bad(argv[i]);
+        k = k + o->h.nsyms;
+        fobj[nf] = 1; fbuf[nf] = (char *)o;
+      }
+      nf++;
+    }
+  }
+  if (nf == 0) usage();
+  mobj = malloc((nmembers + 1) * sizeof(struct t2o *)); madded = malloc((nmembers + 1) * sizeof(int));
+  for (a = 0; a < nar; a++) {
+    for (m = 0; m < ars[a]->h.nmembers; m++) {
       o = malloc(sizeof(struct t2o));
-      if (t2o_read(buf, size, o) < 0) bad(argv[i]);
-      objs[nobj] = o; paths[nobj] = argv[i];
-      checkrels(nobj);
-      nobj++;
+      if (t2ar_member(ars[a], m, o) < 0 || badrels(o)) badarchive(arpaths[a]);
+      mobj[mbase[a] + m] = o; madded[mbase[a] + m] = 0;
+      k = k + o->h.nsyms;
     }
   }
-  if (nobj == 0) usage();
-
-  // layout
-  csize = 0; dsize = 0; ninit = 0; k = 0;
-  for (i = 0; i < nobj; i++) {
-    csize = (csize + 3) & -4; dsize = (dsize + 3) & -4;
-    tbase[i] = csize; dbase[i] = dsize;
-    csize = csize + objs[i]->h.text_size; dsize = dsize + objs[i]->h.data_size;
-    for (j = 0; j < objs[i]->h.nsyms; j++) if (objs[i]->syms[j].flags & SYM_INIT) ninit++;
-    k = k + objs[i]->h.nsyms;
-  }
-  stub = (csize + 1) & -2;
-  code = malloc(stub + 10 + 4 * ninit); memset(code, 0, stub + 10 + 4 * ninit);
-  data = malloc(dsize + 1); memset(data, 0, dsize + 1);
-  pos = 0;
-  for (i = 0; i < nobj; i++) {
-    while (pos < tbase[i]) {
-      if (pos & 1) pos++;                                  // after an odd-sized text: a zero byte
-      else { put16(code, pos, NOP); pos = pos + 2; }
-    }
-    memcpy(code + tbase[i], objs[i]->text, objs[i]->h.text_size);
-    memcpy(data + dbase[i], objs[i]->data, objs[i]->h.data_size);
-    pos = tbase[i] + objs[i]->h.text_size;
-  }
-
-  // global definitions
+  objs = malloc((nf + nmembers + 1) * sizeof(struct t2o *));
+  paths = malloc((nf + nmembers + 1) * sizeof(char *));
+  tbase = malloc((nf + nmembers + 1) * sizeof(int));
+  dbase = malloc((nf + nmembers + 1) * sizeof(int));
   hsize = 16; while (hsize < 2 * k) hsize = hsize * 2;
   hobj = malloc(hsize * sizeof(int)); hsym = malloc(hsize * sizeof(int));
-  for (i = 0; i < hsize; i++) hobj[i] = -1;
-  for (i = 0; i < nobj; i++) {
-    for (j = 0; j < objs[i]->h.nsyms; j++) {
-      s = objs[i]->syms + j;
-      if (s->sect == SEC_UNDEF || !(s->flags & SYM_GLOBAL)) continue;
-      h = hfind(symname(i, j));
-      if (hobj[h] >= 0) {
-        printf("ld: duplicate symbol: %s (%s and %s)\n", symname(i, j), paths[hobj[h]], paths[i]);
-        return 1;
+  uobj = malloc(hsize * sizeof(int)); usym = malloc(hsize * sizeof(int));
+  for (i = 0; i < hsize; i++) { hobj[i] = -1; uobj[i] = -1; }
+
+  // the objects, then the archive members that define something still undefined
+  nobj = 0;
+  for (i = 0; i < nf; i++) if (fobj[i]) addobj((struct t2o *)fbuf[i], fpath[i]);
+  changed = 1;
+  while (changed) {
+    changed = 0;
+    for (a = 0; a < nar; a++) {
+      for (i = 0; i < ars[a]->h.nindex; i++) {
+        m = ars[a]->index[i].member;
+        if (madded[mbase[a] + m]) continue;
+        buf = ars[a]->str + ars[a]->index[i].name;
+        if (hobj[hfind(buf)] >= 0 || uobj[tfind(uobj, usym, buf)] < 0) continue;
+        madded[mbase[a] + m] = 1;
+        addobj(mobj[mbase[a] + m], memberpath(a, m));
+        changed = 1;
       }
-      hobj[h] = i; hsym[h] = j;
     }
   }
+
   // every undefined symbol, then the entry
   nundef = 0;
   for (i = 0; i < nobj; i++) {
@@ -221,7 +276,30 @@ int main(int argc, char **argv) {
     nundef++;
   }
   if (nundef) return 1;
+
+  // layout
+  csize = 0; dsize = 0; ninit = 0;
+  for (i = 0; i < nobj; i++) {
+    csize = (csize + 3) & -4;
+    if (objs[i]->h.data_size > 0) dsize = (dsize + 3) & -4;
+    tbase[i] = csize; dbase[i] = dsize;
+    csize = csize + objs[i]->h.text_size; dsize = dsize + objs[i]->h.data_size;
+    for (j = 0; j < objs[i]->h.nsyms; j++) if (objs[i]->syms[j].flags & SYM_INIT) ninit++;
+  }
   entry = symval(hobj[h], hsym[h]);
+  stub = (csize + 1) & -2;
+  code = malloc(stub + 10 + 4 * ninit); memset(code, 0, stub + 10 + 4 * ninit);
+  data = malloc(dsize + 1); memset(data, 0, dsize + 1);
+  pos = 0;
+  for (i = 0; i < nobj; i++) {
+    while (pos < tbase[i]) {
+      if (pos & 1) pos++;                                  // after an odd-sized text: a zero byte
+      else { put16(code, pos, NOP); pos = pos + 2; }
+    }
+    memcpy(code + tbase[i], objs[i]->text, objs[i]->h.text_size);
+    memcpy(data + dbase[i], objs[i]->data, objs[i]->h.data_size);
+    pos = tbase[i] + objs[i]->h.text_size;
+  }
 
   for (i = 0; i < nobj; i++) relocate(i);
 
