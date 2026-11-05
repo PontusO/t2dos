@@ -41,6 +41,8 @@ struct Sym *id;          // current identifier
 struct Sym *syms; int nsyms;
 struct Mem *mems; int nmems;
 int *stsize; int *stfirst; int nstructs;
+int *starr; int *stcnt;  // array rows (int[4] in int m[3][4]) are struct-like types: element type, length; -1 for structs
+int *dims; int ndims;    // set by parse_dims()
 
 char *code; int cpos;    // code segment
 char *data; int dpos;    // data segment (strings + globals)
@@ -324,6 +326,18 @@ int preprocess() {
 }
 
 // ------------------------------------------------------------------ types
+int newstruct() {                          // returns the index of a fresh struct-like type
+  if (nstructs >= 250) die("too many struct and array row types");
+  stsize[nstructs] = 0; stfirst[nstructs] = -1; starr[nstructs] = -1; stcnt[nstructs] = 0;
+  nstructs = nstructs + 1;
+  return nstructs - 1;
+}
+int isrow(int t) { return t >= TSTRUCT && t < PTR && starr[t - TSTRUCT] >= 0; }
+int rowelem(int t) { return starr[t - TSTRUCT]; }
+int rowcnt(int t) { return stcnt[t - TSTRUCT]; }
+int mkrow(int et, int n);
+// an expression of row type is the address of its first element
+int decay() { if (isrow(ty)) ty = rowelem(ty) + PTR; return 0; }
 int tysize(int t) {
   if (t >= PTR) return 4;
   if (t == TCHAR) return 1;
@@ -342,9 +356,9 @@ int parse_type() {
   else if (tk == Struct) {
     next();
     if (tk == Id) {
-      if (!id->stag) { id->stag = nstructs + 1; stsize[nstructs] = 0; stfirst[nstructs] = -1; nstructs = nstructs + 1; }
+      if (!id->stag) { newstruct(); id->stag = nstructs; }
       si = id->stag - 1; next();
-    } else if (tk == '{') { si = nstructs; stsize[si] = 0; stfirst[si] = -1; nstructs = nstructs + 1; }   // anonymous
+    } else if (tk == '{') { si = nstructs; newstruct(); }   // anonymous
     else die("struct name expected");
     {
       if (tk == '{') {
@@ -354,7 +368,9 @@ int parse_type() {
           while (tk != ';') {
             mt = declarator(bt);
             if (!dname) die("member name expected");
-            sz = tysize(mt); al = sz > 4 ? 4 : sz; if (al == 3) al = 4;
+            al = mt; while (isrow(al)) al = rowelem(al);    // a row aligns like its element
+            sz = tysize(al); al = sz > 4 ? 4 : sz; if (al == 3) al = 4;
+            sz = tysize(mt);
             if (al > 1) off = (off + al - 1) & -al;
             mems[nmems].id = dname; mems[nmems].type = mt; mems[nmems].off = off; mems[nmems].next = stfirst[si];
             stfirst[si] = nmems; nmems = nmems + 1;
@@ -401,6 +417,29 @@ int skip_params() {
     next();
   }
 }
+// array row type: n elements of type et (shared between declarations)
+int mkrow(int et, int n) {
+  int i;
+  i = 0; while (i < nstructs) { if (starr[i] == et && stcnt[i] == n) return TSTRUCT + i; i = i + 1; }
+  i = newstruct(); starr[i] = et; stcnt[i] = n; stsize[i] = tysize(et) * n;
+  return TSTRUCT + i;
+}
+// [N][M]...: dims[0..ndims); only the first may be [] (-2)
+int parse_dims() {
+  ndims = 0;
+  while (tk == Brak) {
+    if (ndims >= 8) die("too many array dimensions");
+    array_dim(); dims[ndims] = darr; ndims = ndims + 1;
+  }
+  return 0;
+}
+// element type of dims[from - 1]: rows of dims[from..ndims), innermost first
+int rows_of(int t, int from) {
+  int k;
+  k = ndims - 1;
+  while (k >= from) { if (dims[k] < 0) die("array size expected"); t = mkrow(t, dims[k]); k = k - 1; }
+  return t;
+}
 // [N] or [] (size from the initializer: darr = -2)
 int array_dim() {
   next();
@@ -410,24 +449,30 @@ int array_dim() {
   return 0;
 }
 // Declarator after a base type: stars, then a name (or none, for casts and
-// prototypes) and an optional [N], or a function pointer ( *name[N] )( params ).
-// Returns the type; sets dname (0 if no name) and darr (-1 if not an array).
+// prototypes) and optional [N][M]..., or ( *name[N] ) followed by ( params ) for
+// a function pointer or by [M]... for a pointer to an array.
+// Returns the type (of an element, for arrays); sets dname (0 if no name) and
+// darr (outermost length, -1 if not an array, -2 for []).
 int declarator(int t) {
-  int ps;
+  int ps; int inner;
   while (tk == Mul) { next(); t = t + PTR; }
   dname = 0; darr = -1;
   if (tk == '(') {
     next(); ps = 0;
     while (tk == Mul) { next(); ps = ps + 1; }
-    if (!ps) die("only function pointers are supported: (*name)(...)");
+    if (!ps) die("only function and array pointers are supported: (*name)");
     if (tk == Id) { dname = id; next(); }
     if (tk == Brak) array_dim();
     if (tk != ')') die(") expected in declarator"); next();
+    if (tk == Brak) {                           // int (*p)[4]: pointer to array
+      inner = darr; parse_dims(); darr = inner;
+      return rows_of(t, 0) + ps * PTR;
+    }
     skip_params();
     return fntype(t) + ps * PTR;
   }
   if (tk == Id) { dname = id; next(); }
-  if (tk == Brak) array_dim();
+  if (tk == Brak) { parse_dims(); t = rows_of(t, 1); darr = dims[0]; }
   return t;
 }
 
@@ -535,7 +580,8 @@ int expr(int lev) {
     next(); if (tk != '(') die("( expected after sizeof"); next();
     t = declarator(parse_type());
     if (tk != ')') die(") expected"); next();
-    imm(0, tysize(t)); ty = TINT;
+    n = tysize(t); if (darr >= 0) n = n * darr;
+    imm(0, n); ty = TINT;
   }
   else if (tk == Id) {
     d = id; next();
@@ -572,7 +618,7 @@ int expr(int lev) {
     if (isfndes(ty)) {}                         // *f is f
     else {
       if (ty < PTR) die("bad dereference");
-      ty = ty - PTR; load(ty);
+      ty = ty - PTR; load(ty); decay();
     }
   }
   else if (tk == And) {                         // address-of
@@ -662,7 +708,7 @@ int expr(int lev) {
       if (t < PTR) die("indexing a non-pointer");
       scale(tysize(t - PTR));
       emit16(6152);                             // adds r0,r1,r0
-      ty = t - PTR; load(ty);
+      ty = t - PTR; load(ty); decay();
     }
     else die("bad operator");
   }
@@ -778,6 +824,7 @@ int init_struct(int t, int off) {
   return 0;
 }
 int init_elem(int t, int off) {
+  if (isrow(t)) { init_array(rowelem(t), rowcnt(t), off); return 0; }
   if (t >= TSTRUCT && t < PTR) return init_struct(t, off);
   return init_scalar(t, off);
 }
@@ -947,7 +994,7 @@ int parse_global() {
       n = 0; loc = 0; maxloc = 0;
       while (tk != ')') {
         bt = declarator(parse_type());
-        if (darr >= 0) bt = bt + PTR;           // int a[N] as a parameter is int *a
+        if (darr != -1) bt = bt + PTR;          // int a[N] or a[] as a parameter is int *a
         if (dname) {
           if (dname->class == CLoc) die("duplicate param");
           dname->hclass = dname->class; dname->htype = dname->type; dname->hval = dname->val;
@@ -1025,6 +1072,7 @@ int main(int argc, char **argv) {
   syms = malloc(8192 * sizeof(struct Sym)); nsyms = 0;
   mems = malloc(2048 * sizeof(struct Mem)); nmems = 0;
   stsize = malloc(256 * 4); stfirst = malloc(256 * 4); nstructs = 0;
+  starr = malloc(256 * 4); stcnt = malloc(256 * 4); dims = malloc(8 * 4);
   code = malloc(1048576); cpos = 0;
   data = malloc(1048576); dpos = 0;
   fstack_p = malloc(8 * 4); fstack_line = malloc(8 * 4); fdepth = 0;
