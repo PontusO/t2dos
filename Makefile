@@ -18,5 +18,14 @@ root/lib/sys.h: sys.h
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
 host: host_linux.c sys.h
 	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static
+# Reference compiler: gcc build of compiler/cc.c at the commit in build/ref/COMMIT (byte-identity reference)
+ref:
+	@mkdir -p build/ref
+	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
+	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
+	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
+check:
+	@echo no checks yet
+.PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin
