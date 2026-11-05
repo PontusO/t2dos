@@ -1,0 +1,27 @@
+addw 0 a-data
+addw-b 128 b-data
+movw 16 a-end
+movw-b 5273 far
+movw16 18 end
+movw16-b 5271 b-far
+word0 128 b-data
+word1 2 data
+bl 105
+b.w 106
+bcond-taken 200
+bcond-not 1
+fnaddr 66
+addw-l 135 b-local
+movw-l 137 local
+movw16-l 136 -local
+addw-a 0 a-data
+bword0 138 ocal
+bword1 0 a-data
+tword0 5271 b-far
+tword1 17 -end
+bl-back 15
+b.w-back 17
+bcond-taken-back 55
+bcond-not-back 2
+fnaddr-back 11
+exit 42

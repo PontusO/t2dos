@@ -1,0 +1,2 @@
+ld: undefined symbol: missing_fn (in undef.o)
+ld: undefined symbol: missing_data (in undef.o)

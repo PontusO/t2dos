@@ -1,0 +1,1 @@
+ld: duplicate symbol: twice (dup_a.o and dup_b.o)

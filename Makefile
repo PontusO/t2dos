@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): compiler/cc.c sys.h
 	gcc -O2 -w -I . -o $@ compiler/cc.c
@@ -28,6 +28,13 @@ build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
 root/bin/as.bin: assembler/as.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
 	@mkdir -p root/bin
 	./$(CC_HOST) -I lib -o $@ assembler/as.c
+# the linker: same pattern, source in linker/
+build/host/ld: linker/ld.c lib/t2obj.h lib/t2obj.c
+	@mkdir -p build/host
+	gcc -O2 -w -I lib -I . -o $@ linker/ld.c
+root/bin/ld.bin: linker/ld.c $(CC_HOST) sys.h lib/t2obj.h lib/t2obj.c
+	@mkdir -p root/bin
+	./$(CC_HOST) -I lib -o $@ linker/ld.c
 root/lib/t2obj.h: lib/t2obj.h
 	@mkdir -p root/lib && cp lib/t2obj.h root/lib/
 root/lib/t2obj.c: lib/t2obj.c
@@ -45,7 +52,7 @@ ref:
 	@test -f build/ref/COMMIT || echo 040b630 > build/ref/COMMIT
 	git show $$(cat build/ref/COMMIT):compiler/cc.c > build/ref/cc.c
 	gcc -O2 -w -I . -o build/ref/cc build/ref/cc.c
-check: build/host/nm build/host/as
+check: build/host/nm build/host/as build/host/ld
 	python3 tests/obj/mkobj.py build/obj/sample.o
 	build/host/nm build/obj/sample.o | diff - tests/obj/sample.expected
 	@# bad objects: exit status 1 and the exact error message
@@ -60,6 +67,7 @@ check: build/host/nm build/host/as
 	python3 tools/check_asm.py --relocs tests/asm/reloc.s | diff - tests/asm/reloc.expected
 	test "$$(python3 tools/check_asm.py --inits tests/asm/reloc.s | tr '\n' ' ')" = ".Linit lfun "
 	python3 tools/check_asm.py --errors tests/asm/errors/*.s
+	python3 tools/check_link.py --pc
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin
