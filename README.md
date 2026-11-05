@@ -96,8 +96,14 @@ typedef, global/local 1-D arrays, enum, `#define NAME number`,
 compound assignment (+= -= *= /= %= &= |= ^= <<= >>=), sizeof(type), casts,
 if/else while for switch/case/default break continue return, prototypes.
 String and char escapes: `\n \t \r \b \a \f \v \e \\ \' \"`, octal `\033`, hex `\x1b`.
-Not yet: float, initializers, function pointers, unsigned/short, 2-D arrays,
-multi-line macros. See test.c and test3.c for the covered subset.
+Function pointers: `int (*fp)(int)`, arrays `int (*tbl[4])(int)`, struct
+members, parameters, typedefs (`typedef int (*op)(int, int);`), casts and
+sizeof `(int (*)(int))`, `fp = f` / `fp = &f`, calls `fp(x)` / `(*fp)(x)` /
+`s->fn(x)` / `tbl[i](x)`, functions returning function pointers. Parameter
+types of a function pointer are not checked. Builtins (printf, ...) are
+syscalls and cannot be taken as function pointers.
+Not yet: float, initializers, unsigned/short, 2-D arrays, multi-line macros.
+See test.c, test3.c and test4.c (function pointers) for the covered subset.
 
 ## Verified
 On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
@@ -105,7 +111,11 @@ flash; files survive reset and reflash; `ls`, `free`, `echo`, `> file`,
 `>> file`, `cat`, `cp`, `hexdump`, `put`; `cc` compiles and runs test.c and an
 `#include "sys.h"` program; `cc` rebuilds `cc.bin` byte-identical to the PC
 build, and that `cc` rebuilds it again identically. PSRAM is fully returned
-after every program.
+after every program. `edit` works through `screen` (tested with its default
+flow control on) and builds on the board byte-identical to the PC build.
+Backspace erases at the shell and `write` prompts. test4.c (function
+pointers) prints the same as a native gcc build, whether compiled on the PC
+or on the board.
 Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
 then compile it on the "board" and send the binary back, identical to the PC
 build; nc -l accepts a connection.
@@ -120,3 +130,7 @@ byte-identical to the PC cross build.
 - `host_linux.c` does not yet free a program's `malloc`s on exit or zero them,
   unlike the board kernel.
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
+- test.c, test3.c and test4.c have no automatic runner: compare their output
+  by hand (test4.c against `gcc test4.c && ./a.out`, except `sizeof`).
+- Under qemu/host_linux the function pointer support has not been run yet
+  (qemu-arm is not installed on the development PC).

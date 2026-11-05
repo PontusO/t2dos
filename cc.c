@@ -24,7 +24,9 @@ enum { Num = 128, Str, Id,
 // symbol classes
 enum { CNum = 1, CFun, CSys, CGlo, CLoc };
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
-enum { TCHAR = 0, TINT = 1, TSTRUCT = 2, PTR = 256, ARR = 1048576 };
+// FN marks a function type; bits 22.. index fnret[] (its return type). A function
+// designator has 0 pointer levels, a function pointer 1.
+enum { TCHAR = 0, TINT = 1, TSTRUCT = 2, PTR = 256, ARR = 1048576, FN = 2097152 };
 
 #include "sys.h"
 
@@ -50,12 +52,17 @@ int maxloc;
 int ret_fix, brk_fix, cont_fix, cont_tgt;  // fixup chains / targets
 int nparams;
 
+int *fnret; int nfn;     // function types: return type of each
+int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
+struct Sym *dname; int darr;                       // set by declarator(): name, array size or -1
+
 // include stack
 char **fstack_p; int *fstack_line; int fdepth;
 char *srcname;
 char *incdir;
 
 int preprocess(); int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
+int declarator(int t); int die(char *msg);
 
 // ------------------------------------------------------------------ helpers
 int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); exit(1); return 0; }
@@ -112,8 +119,22 @@ int lea_glo(int off) {
   if (off < 4096) addi12(0, 9, off); else { imm(1, off); emit32(60169, 1); }   // add.w r0,r9,r1  EB09 0001
   return 0;
 }
+// function types
+int fntype(int ret) {
+  int k;
+  k = 0; while (k < nfn) { if (fnret[k] == ret) return FN | k << 22; k = k + 1; }
+  if (nfn >= 512) die("too many function types");
+  fnret[nfn] = ret; nfn = nfn + 1;
+  return FN | k << 22;
+}
+int fnlevels(int t) { return (t >> 8) & 4095; }
+int isfn(int t) { return (t & FN) && fnlevels(t) <= 1; }          // designator or pointer: callable
+int isfndes(int t) { return (t & FN) && fnlevels(t) == 0; }       // designator: its value is its address
+int fnret_of(int t) { return fnret[(t >> 22) & 511]; }
+
 // load r0 = *r0 according to type
 int load(int t) {
+  if (isfndes(t)) return 0;                                  // a function is its own address
   if (t == TCHAR) { emit32(63888, 0); lastload = 4; }          // ldrsb.w r0,[r0]  F990 0000
   else if (t == TINT || t >= PTR) { emit16(26624); lastload = 2; } // ldr r0,[r0]  6800
   // struct: keep address
@@ -325,18 +346,16 @@ int parse_type() {
       if (tk == '{') {
         next(); off = 0;
         while (tk != '}') {
-          mt = parse_type();
+          bt = parse_type();
           while (tk != ';') {
-            while (tk == Mul) { next(); mt = mt + PTR; }
-            if (tk != Id) die("member name expected");
+            mt = declarator(bt);
+            if (!dname) die("member name expected");
             sz = tysize(mt); al = sz > 4 ? 4 : sz; if (al == 3) al = 4;
             if (al > 1) off = (off + al - 1) & -al;
-            mems[nmems].id = id; mems[nmems].type = mt; mems[nmems].off = off; mems[nmems].next = stfirst[si];
+            mems[nmems].id = dname; mems[nmems].type = mt; mems[nmems].off = off; mems[nmems].next = stfirst[si];
             stfirst[si] = nmems; nmems = nmems + 1;
-            next();
-            if (tk == Brak) {                   // array member: storage inline, type is "address of element"
-              next(); if (tk != Num) die("array size expected"); sz = sz * ival; next();
-              if (tk != ']') die("] expected"); next();
+            if (darr >= 0) {                    // array member: storage inline, type is "address of element"
+              sz = sz * darr;
               mems[nmems - 1].type = (mt + PTR) | ARR;
             }
             off = off + sz;
@@ -364,6 +383,46 @@ int find_mem(int t) {
   die("no such member"); return 0;
 }
 
+// skip a parenthesized parameter list (function pointer declarators don't check params)
+int skip_params() {
+  int depth;
+  if (tk != '(') die("( expected");
+  depth = 0;
+  while (1) {
+    if (!tk) die("unexpected eof in parameter list");
+    if (tk == '(') depth = depth + 1;
+    else if (tk == ')') { depth = depth - 1; if (!depth) { next(); return 0; } }
+    next();
+  }
+}
+// Declarator after a base type: stars, then a name (or none, for casts and
+// prototypes) and an optional [N], or a function pointer ( *name[N] )( params ).
+// Returns the type; sets dname (0 if no name) and darr (-1 if not an array).
+int declarator(int t) {
+  int ps;
+  while (tk == Mul) { next(); t = t + PTR; }
+  dname = 0; darr = -1;
+  if (tk == '(') {
+    next(); ps = 0;
+    while (tk == Mul) { next(); ps = ps + 1; }
+    if (!ps) die("only function pointers are supported: (*name)(...)");
+    if (tk == Id) { dname = id; next(); }
+    if (tk == Brak) {
+      next(); if (tk != Num) die("array size expected"); darr = ival; next();
+      if (tk != ']') die("] expected"); next();
+    }
+    if (tk != ')') die(") expected in declarator"); next();
+    skip_params();
+    return fntype(t) + ps * PTR;
+  }
+  if (tk == Id) { dname = id; next(); }
+  if (tk == Brak) {
+    next(); if (tk != Num) die("array size expected"); darr = ival; next();
+    if (tk != ']') die("] expected"); next();
+  }
+  return t;
+}
+
 // ------------------------------------------------------------------ expressions
 // Emit a user function call: args already pushed, n args.
 int call_fn(struct Sym *f, int n) {
@@ -372,6 +431,31 @@ int call_fn(struct Sym *f, int n) {
   if (f->class == CFun && f->val >= 0) patch_b(at, f->val);
   else { f->fix = chain_add(f->fix, at); if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; } }
   if (n) emit16(45056 | n);                     // add sp,#4n  B000|n
+  return 0;
+}
+// r0 = address of function f (Thumb bit set), PC relative: movw/movt r0,#off ; add r0,pc.
+// The offset is patched at the end, when every function has an address.
+int fn_addr(struct Sym *f) {
+  if (f->class == CSys) die("cannot take the address of a builtin");
+  if (f->class == 0) { f->class = CFun; f->val = -1; f->type = TINT; }
+  if (naddr >= 4096) die("too many function addresses");
+  afix_at[naddr] = cpos; afix_sym[naddr] = f; naddr = naddr + 1;
+  imm2(0, 0);
+  emit16(17528);                                // add r0,pc        4478
+  return 0;
+}
+// Call through a function address in r0: keep it on the stack under the args,
+// then ldr r1,[sp,#4n] ; blx r1 ; pop args and the address.
+int call_ind(int t) {
+  int n;
+  push(); next(); n = 0;
+  while (tk != ')') { expr(Assign); push(); n = n + 1; if (tk == ',') next(); }
+  next();
+  if (n > 126) die("too many arguments");
+  emit16(39168 | n);                            // ldr r1,[sp,#4n]  9900|n
+  emit16(18312);                                // blx r1           4788
+  emit16(45056 | (n + 1));                      // add sp,#4(n+1)
+  ty = fnret_of(t);
   return 0;
 }
 // Emit a host syscall: r0 = num, r1 = nargs, r2 = argv (argv[n-1] is arg 0)
@@ -441,13 +525,13 @@ int expr(int lev) {
   else if (tk == Str) { lea_glo(ival); next(); ty = TCHAR + PTR; }
   else if (tk == Sizeof) {
     next(); if (tk != '(') die("( expected after sizeof"); next();
-    t = parse_type();
+    t = declarator(parse_type());
     if (tk != ')') die(") expected"); next();
     imm(0, tysize(t)); ty = TINT;
   }
   else if (tk == Id) {
     d = id; next();
-    if (tk == '(') {                            // function call
+    if (tk == '(' && (d->class == CSys || d->class == CFun || d->class == 0)) {   // direct call
       next(); n = 0;
       while (tk != ')') { expr(Assign); push(); n = n + 1; if (tk == ',') next(); }
       next();
@@ -458,6 +542,7 @@ int expr(int lev) {
     }
     else if (d->class == CNum) { imm(0, d->val); ty = TINT; }
     else if (d->class == 6) { lea_glo(d->val); ty = d->type; }   // global array: address
+    else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype(d->type); }   // function as a value
     else {
       if (d->class == CLoc) lea_loc(d->val);
       else if (d->class == CGlo) lea_glo(d->val);
@@ -469,19 +554,23 @@ int expr(int lev) {
   else if (tk == '(') {
     next();
     if (is_type()) {                          // cast
-      t = parse_type();
+      t = declarator(parse_type());
       if (tk != ')') die(") expected in cast"); next();
       expr(Inc); ty = t;
     } else { expr(Assign); if (tk != ')') die(") expected"); next(); }
   }
   else if (tk == Mul) {                         // dereference
     next(); expr(Inc);
-    if (ty < PTR) die("bad dereference");
-    ty = ty - PTR; load(ty);
+    if (isfndes(ty)) {}                         // *f is f
+    else {
+      if (ty < PTR) die("bad dereference");
+      ty = ty - PTR; load(ty);
+    }
   }
   else if (tk == And) {                         // address-of
     next(); expr(Inc);
-    lvalue(); ty = ty + PTR;
+    if (isfndes(ty)) ty = ty + PTR;             // &f: the address is already in r0
+    else { lvalue(); ty = ty + PTR; }
   }
   else if (tk == '!') { next(); expr(Inc); emit16(10240); emit16(48908); emit16(8193); emit16(8192); ty = TINT; } // cmp r0,#0; ite eq; mov 1; mov 0
   else if (tk == '~') { next(); expr(Inc); emit16(17344); ty = TINT; }   // mvns r0,r0  43C0
@@ -503,9 +592,10 @@ int expr(int lev) {
   else die("bad expression");
 
   // binary operators, precedence climbing
-  while (tk >= lev) {
+  while (tk >= lev || (tk == '(' && isfn(ty))) {   // a call binds tightest, like [ and ->
     t = ty;
-    if (tk == Assign) {
+    if (tk == '(') call_ind(t);
+    else if (tk == Assign) {
       next(); lvalue(); push(); expr(Assign); pop1(); store(t); ty = t;
     }
     else if (tk == Cond) {
@@ -668,13 +758,11 @@ int stmt() {
   else if (is_type()) {                       // local declaration
     bt = parse_type();
     while (tk != ';') {
-      t = bt;
-      while (tk == Mul) { next(); t = t + PTR; }
-      if (tk != Id) die("local name expected");
-      n = tysize(t); d = id; next();
-      if (tk == Brak) {                         // local array: slot holds pointer to the storage that follows it
-        next(); if (tk != Num) die("array size expected"); n = n * ival; next();
-        if (tk != ']') die("] expected"); next();
+      t = declarator(bt);
+      if (!dname) die("local name expected");
+      n = tysize(t); d = dname;
+      if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
+        n = n * darr;
         newlocal(d, t + PTR, n + 4);
         lea_loc(d->val); addi12(1, 0, 4); emit16(24577);   // r0=slot; r1=r0+4; str r1,[r0]
       } else newlocal(d, t, n);
@@ -706,32 +794,29 @@ int parse_global() {
     return 0;
   }
   if (tk == Typedef) {
-    next(); bt = parse_type();
-    while (tk == Mul) { next(); bt = bt + PTR; }
-    if (tk != Id) die("typedef name expected");
-    id->class = 8; id->type = bt; next();
+    next(); bt = declarator(parse_type());
+    if (!dname || darr >= 0) die("typedef name expected");
+    dname->class = 8; dname->type = bt;
     if (tk != ';') die("; expected"); next();
     return 0;
   }
   bt = parse_type();
   while (tk != ';') {
-    t = bt;
-    while (tk == Mul) { next(); t = t + PTR; }
-    if (tk != Id) die("global name expected");
-    s = id; next();
-    if (tk == '(') {                            // function
+    t = declarator(bt);
+    if (!dname) die("global name expected");
+    s = dname;
+    if (tk == '(' && darr < 0) {                // function (a function pointer's params were consumed)
       if (s->class == CFun && s->val >= 0) die("duplicate function");
       s->type = t; next();
       // prototype or definition? parse params either way
       n = 0; loc = 0; maxloc = 0;
       while (tk != ')') {
-        bt = parse_type();
-        while (tk == Mul) { next(); bt = bt + PTR; }
-        if (tk == Id) {
-          if (id->class == CLoc) die("duplicate param");
-          id->hclass = id->class; id->htype = id->type; id->hval = id->val;
-          id->class = CLoc; id->type = bt; id->val = n;   // index, fixed up below
-          next();
+        bt = declarator(parse_type());
+        if (darr >= 0) bt = bt + PTR;           // int a[N] as a parameter is int *a
+        if (dname) {
+          if (dname->class == CLoc) die("duplicate param");
+          dname->hclass = dname->class; dname->htype = dname->type; dname->hval = dname->val;
+          dname->class = CLoc; dname->type = bt; dname->val = n;   // index, fixed up below
         }
         n = n + 1;
         if (tk == ',') next();
@@ -766,9 +851,8 @@ int parse_global() {
     // global variable
     if (s->class) die("duplicate global");
     n = tysize(t);
-    if (tk == Brak) {
-      next(); if (tk != Num) die("array size expected"); n = n * ival; next();
-      if (tk != ']') die("] expected"); next();
+    if (darr >= 0) {
+      n = n * darr;
       // global array: the symbol is the storage itself; treat name as pointer constant
       dpos = (dpos + 3) & -4;
       s->class = 6; s->type = t + PTR; s->val = dpos;     // val = address of storage
@@ -785,7 +869,7 @@ int parse_global() {
 }
 
 int main(int argc, char **argv) {
-  char *out; int fd; int i; int hdr; struct Sym *s;
+  char *out; int fd; int i; int n; int hdr; struct Sym *s; struct Sym *d;
   out = "a.bin"; srcname = 0; incdir = 0;
   i = 1;
   while (i < argc) {
@@ -801,6 +885,8 @@ int main(int argc, char **argv) {
   code = malloc(1048576); cpos = 0;
   data = malloc(1048576); dpos = 0;
   fstack_p = malloc(8 * 4); fstack_line = malloc(8 * 4); fdepth = 0;
+  fnret = malloc(512 * 4); nfn = 0;
+  afix_at = malloc(4096 * 4); afix_sym = malloc(4096 * 4); naddr = 0;
   memset(syms, 0, 8192 * sizeof(struct Sym));
 
   // keywords, in token enum order
@@ -823,6 +909,16 @@ int main(int argc, char **argv) {
   // check for unresolved functions
   i = 0; while (i < nsyms) { if (syms[i].class == CFun && syms[i].val < 0 && syms[i].fix >= 0) { printf("undefined function: %s\n", syms[i].name); exit(1); } i = i + 1; }
   if (s->class != CFun || s->val < 0) die("no main()");
+  // function addresses: movw/movt r0,#off at afix_at, then add r0,pc; pc reads as afix_at + 12
+  i = 0;
+  while (i < naddr) {
+    d = afix_sym[i];
+    if (d->class != CFun || d->val < 0) {
+      printf("undefined function: "); n = 0; while (n < d->len) { putchar(d->name[n]); n = n + 1; } printf("\n"); exit(1);
+    }
+    n = cpos; cpos = afix_at[i]; imm2(0, d->val + 1 - (afix_at[i] + 12)); cpos = n;
+    i = i + 1;
+  }
 
   fd = open(out, 577, 420);    // O_WRONLY|O_CREAT|O_TRUNC, 0644
   if (fd < 0) { printf("cannot write %s\n", out); return 1; }
