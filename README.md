@@ -128,7 +128,8 @@ The other tools:
     ar rc lib.a a.o b.o...           create an archive, or replace and append members
     ar t lib.a                       list the members
     ar x lib.a [member...]           extract (all members without names)
-    nm file.o|lib.a...               symbols: T text, D data, U undefined
+    nm file.o|lib.a...               symbols: T/t text, D/d data, A/a absolute (upper
+                                     case global, lower case local), U undefined
     objdump file.o|lib.a|prog.bin... header, symbols, relocations, disassembly, data
 
 Separate compilation: `extern int counter;`, `extern char name[];` and
@@ -142,6 +143,19 @@ symbol: f (in x.o)`). Examples:
     cc -o mixed.bin main.c fast.s                     C and assembly together
     cc -c sq.c cube.c; ar rc libm2.a sq.o cube.o      a library ...
     cc -o p.bin p.c -L . -l m2                        ... and a program using it
+
+Data limit across files: `cc` addresses a global of its own file with the
+short `addw r0, r9, #name` while the global's offset in that file's data is
+below 4 KB (strings likewise). `ld` puts the files' data one after the other,
+so after linking that offset grows by the data of every earlier file and must
+still be below 4096. When it is not, `ld` stops with
+
+    ld: data offset of counter (/tmp/cc3f2a_2_main.o) is 5000, too far for addw
+
+(the global, and the temporary object named after the source that refers to
+it). Put the files with big data last, or keep big buffers in the last file:
+`cc -o p.bin main.c big.c`, not `cc -o p.bin big.c main.c`, when big.c has
+`char buf[5000];`.
 
 C and assembly call each other with cc's convention: the arguments on the
 stack, the first one deepest, popped by the caller; the result in r0. Keep
@@ -170,6 +184,14 @@ data symbol is its offset in the data, so data lives at `r9 + offset`:
     movw    r1, #:lower16:counter     @ any offset
     movt    r1, #:upper16:counter
     add.w   r0, r9, r1
+
+`.word label` in `.data` stores the label's section offset (the value ld
+gives the symbol), not an address: a function pointer table in `.data` does
+not work, since calling through it jumps to an offset. Take function
+addresses at run time with `fnaddr`. `.align`/`.balign` go up to 4 bytes
+(ld aligns each section to 4). As in GNU as, `sp` and `pc` are refused where
+ARMv8-M makes them unpredictable (`r13 not allowed here`, `r15 not allowed
+here`), and `add rd, pc, #imm` is `adr`.
 
 `b`, `b<cond>` and `bl` to another file's functions are relocated by ld.
 T2DOS pseudo-instructions (GNU as has no such forms):
