@@ -23,7 +23,7 @@ enum { Num = 128, Str, Id,
   Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak };
 
 // symbol classes
-enum { CNum = 1, CFun, CSys, CGlo, CLoc };
+enum { CNum = 1, CFun, CSys, CGlo, CLoc };   // 6 = global array, 8 = typedef
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
 // FN marks a function type; bits 22.. index fnret[] (its return type). A function
 // designator has 0 pointer levels, a function pointer 1.
@@ -32,7 +32,8 @@ enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TSTR
 #include "sys.h"
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
-             int hclass; int htype; int hval; int fix; int stag; };
+             int hclass; int htype; int hval; int fix; int stag;
+             int mdef; char *mbody; char **margs; int mnargs; int mvar; };   // macro: defined, body, params (-1: object-like), ...
 struct Mem { struct Sym *id; int type; int off; int next; int cnt; };   // cnt: array member length, else -1
 
 // ------------------------------------------------------------------ state
@@ -59,6 +60,8 @@ int fnrty;               // return type of the function being compiled
 int *fnret; int nfn;     // function types: return type of each
 int *afix_at; struct Sym **afix_sym; int naddr;   // function addresses to patch at the end
 struct Sym *dname; int darr;                       // set by declarator(): name, array size, -1 none, -2 for []
+int pb; int pb_tk; int pb_ival; struct Sym *pb_id; int pb_numty;   // one token pushed back by next()
+int sv_pb; int sv_pb_tk; int sv_pb_ival; struct Sym *sv_pb_id; int sv_pb_numty; int sv_numty; int sv_slen;
 int numty;                                         // type of the last number token: TINT or TUINT
 int slen;                                          // bytes of the last string literal, with its 0
 int ikind; int ibase;                              // initializer target: 0 = data offset, 1 = frame offset
@@ -66,11 +69,15 @@ int init_open; int init_head; int init_tail;       // code chunks for global ini
 char *sv_p; int sv_tk; int sv_ival; struct Sym *sv_id; int sv_line; int sv_dpos;   // lexer state for lookahead
 
 // include stack
-char **fstack_p; int *fstack_line; int fdepth;
+// input stack: included files and macro expansions (fstack_mac: the macro, 0 for a file)
+char **fstack_p; int *fstack_line; struct Sym **fstack_mac; int fdepth;
+char **sv_fp; int *sv_fl; struct Sym **sv_fm; int sv_fdepth;
+char *mbuf;              // macro expansion is built here
 char *srcname;
 char *incdir;
 
-int preprocess(); int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
+int preprocess(); int lex(); int expand(struct Sym *m); int expanding(struct Sym *m); int intern(char *s, int n); int idstart(int c); int idchar(int c);
+int patch_b(int at, int target); int expr(int lev); int stmt(); int next();
 int declarator(int t); int die(char *msg); int expr_comma();
 
 // ------------------------------------------------------------------ helpers
@@ -241,23 +248,214 @@ int lookup(char *s, int len, int hash) {
   return -1;
 }
 
-int next() {
-  char *pp; int hash; int i; int c;
+int idstart(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+int idchar(int c) { return idstart(c) || (c >= '0' && c <= '9'); }
+// the symbol for identifier s[0..n), created if new
+int intern(char *s, int n) {
+  int hash; int i; int k;
+  hash = s[0]; k = 1;
+  while (k < n) { hash = hash * 147 + s[k]; k = k + 1; }
+  hash = (hash & 1073741823) | n << 6;
+  i = lookup(s, n, hash);
+  if (i < 0) {
+    if (nsyms >= 8192) die("too many symbols");
+    i = nsyms; nsyms = nsyms + 1;
+    syms[i].name = s; syms[i].len = n; syms[i].hash = hash; syms[i].tk = Id;
+    syms[i].class = 0; syms[i].fix = -1;
+  }
+  return i;
+}
+char *sdup(char *a, char *b) {          // copy of a..b, newlines turned into spaces
+  char *r; int n; int i;
+  n = b - a; r = malloc(n + 1);
+  i = 0; while (i < n) { r[i] = a[i] == '\n' ? ' ' : a[i]; i = i + 1; }
+  r[n] = 0;
+  return r;
+}
+char *trim(char *s) {
+  int n;
+  while (*s == ' ' || *s == '\t') s = s + 1;
+  n = strlen(s); while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r')) n = n - 1;
+  s[n] = 0;
+  return s;
+}
+int push_src(char *np, struct Sym *m) {
+  if (fdepth >= 64) die("macro or include nesting too deep");
+  fstack_p[fdepth] = p; fstack_line[fdepth] = line; fstack_mac[fdepth] = m; fdepth = fdepth + 1;
+  p = np;
+  return 0;
+}
+int expanding(struct Sym *m) {         // a macro is not expanded again inside its own expansion
+  int k;
+  k = 0; while (k < fdepth) { if (fstack_mac[k] == m) return 1; k = k + 1; }
+  return 0;
+}
+int param_index(struct Sym *m, char *s, int n) {
+  int k;
+  k = 0;
+  while (k < m->mnargs) { if (strlen(m->margs[k]) == n && !memcmp(m->margs[k], s, n)) return k; k = k + 1; }
+  return -1;
+}
+int mput(char *o, int c) { if (o - mbuf >= 65500) die("macro expansion too long"); *o = c; return 0; }
+// expansion buffers: every subst() and expand_text() call has its own, freed when done
+char *bput(char *b, char *o, int c) { if (o - b >= 65500) die("macro expansion too long"); *o = c; return o + 1; }
+char *bcat(char *b, char *o, char *s) { while (*s) { o = bput(b, o, *s); s = s + 1; } return o; }
+char *blit(char *b, char *o, char **ps) {   // copy the literal at *ps ("..." or '...')
+  char *s; int q;
+  s = *ps; q = *s; o = bput(b, o, *s); s = s + 1;
+  while (*s && *s != q) { if (*s == '\\' && s[1]) { o = bput(b, o, *s); s = s + 1; } o = bput(b, o, *s); s = s + 1; }
+  if (*s) { o = bput(b, o, *s); s = s + 1; }
+  *ps = s;
+  return o;
+}
+struct Sym *find_sym(char *s, int n) {      // like intern() but never creates one (s may be a temporary)
+  int hash; int i; int k;
+  hash = s[0]; k = 1;
+  while (k < n) { hash = hash * 147 + s[k]; k = k + 1; }
+  i = lookup(s, n, (hash & 1073741823) | n << 6);
+  if (i < 0) return 0;
+  return syms + i;
+}
+// arguments of a call of m; *pq points at its '(' and ends after the ')'.
+// nl: count newlines into line (reading the source itself)
+char **collect_args(struct Sym *m, char **pq, int nl) {
+  char *q; char **args; int n; int depth; char *start; int c;
+  q = *pq + 1;
+  args = malloc(4 * (m->mnargs + 1)); n = 0; depth = 0; start = q;
+  while (1) {
+    c = *q;
+    if (!c) die("unterminated macro call");
+    if (c == '"' || c == '\'') {
+      q = q + 1;
+      while (*q && *q != c) { if (*q == '\\' && q[1]) q = q + 1; q = q + 1; }
+      if (*q) q = q + 1;
+      continue;
+    }
+    if (c == '\n' && nl) line = line + 1;
+    if (c == '(') depth = depth + 1;
+    else if (c == ')') { if (!depth) break; depth = depth - 1; }
+    else if (c == ',' && !depth && !(m->mvar && n == m->mnargs - 1)) {   // the ... argument keeps its commas
+      if (n >= m->mnargs) die("too many macro arguments");
+      args[n] = trim(sdup(start, q)); n = n + 1; start = q + 1;
+    }
+    q = q + 1;
+  }
+  if (n >= m->mnargs && !(m->mnargs == 0 && !*trim(sdup(start, q)))) die("too many macro arguments");
+  if (m->mnargs > 0) { args[n] = trim(sdup(start, q)); n = n + 1; }
+  if (n == m->mnargs - 1 && m->mvar) { args[n] = ""; n = n + 1; }   // f(x) for f(x, ...)
+  if (n != m->mnargs) die("wrong number of macro arguments");
+  *pq = q + 1;
+  return args;
+}
+struct Sym **tstack; int tdepth;            // macros being expanded by expand_text()
+int tactive(struct Sym *m) { int k; k = 0; while (k < tdepth) { if (tstack[k] == m) return 1; k = k + 1; } return 0; }
+char *subst(struct Sym *m, char **args);
+// s with all macros in it expanded: what C does to an argument before substituting it
+char *expand_text(char *s) {
+  char *b; char *o; char *w; char *r; char *q; char **args; struct Sym *m;
+  b = malloc(65536); o = b;
+  while (*s) {
+    if (*s == '"' || *s == '\'') o = blit(b, o, &s);
+    else if (*s >= '0' && *s <= '9') { while (idchar(*s)) { o = bput(b, o, *s); s = s + 1; } }   // 0x1f, 10u
+    else if (idstart(*s)) {
+      w = s; while (idchar(*s)) s = s + 1;
+      m = find_sym(w, s - w); r = 0;
+      if (m && m->mdef && !expanding(m) && !tactive(m)) {
+        if (m->mnargs < 0) r = m->mbody;
+        else {
+          q = s; while (*q == ' ' || *q == '\t') q = q + 1;
+          if (*q == '(') { args = collect_args(m, &q, 0); s = q; r = subst(m, args); }
+        }
+      }
+      if (r) {                               // rescan the replacement with m disabled
+        if (tdepth >= 64) die("macro nesting too deep");
+        tstack[tdepth] = m; tdepth = tdepth + 1;
+        r = expand_text(r);
+        tdepth = tdepth - 1;
+        o = bcat(b, o, r); free(r);
+      }
+      else while (w < s) { o = bput(b, o, *w); w = w + 1; }
+    }
+    else { o = bput(b, o, *s); s = s + 1; }
+  }
+  bput(b, o, 0);
+  r = sdup(b, o); free(b);
+  return r;
+}
+// body of m with params replaced by args; #x makes a string, a ## b joins.
+// Arguments are macro-expanded first, except next to # and ##, as in C.
+char *subst(struct Sym *m, char **args) {
+  char *b; char *o; char *s; char *a; char *w; char *t; int k; int raw;
+  b = malloc(65536); o = b; s = m->mbody; raw = 0;
+  while (*s) {
+    if (*s == '"' || *s == '\'') { o = blit(b, o, &s); raw = 0; }   // literals are copied as they are
+    else if (*s == '#' && s[1] == '#') {
+      while (o > b && (*(o - 1) == ' ' || *(o - 1) == '\t')) o = o - 1;
+      s = s + 2; while (*s == ' ' || *s == '\t') s = s + 1;
+      raw = 1;                                // the next parameter is pasted as written
+    }
+    else if (*s == '#') {
+      s = s + 1; while (*s == ' ' || *s == '\t') s = s + 1;
+      w = s; while (idchar(*s)) s = s + 1;
+      k = param_index(m, w, s - w);
+      if (k < 0) die("# must be followed by a macro parameter");
+      o = bput(b, o, '"');
+      a = args[k];
+      while (*a) {                            // runs of white space become one space, as in C
+        if (*a == ' ' || *a == '\t') { o = bput(b, o, ' '); while (*a == ' ' || *a == '\t') a = a + 1; continue; }
+        if (*a == '"' || *a == '\\') o = bput(b, o, '\\');
+        o = bput(b, o, *a); a = a + 1;
+      }
+      o = bput(b, o, '"'); raw = 0;
+    }
+    else if (idstart(*s)) {
+      w = s; while (idchar(*s)) s = s + 1;
+      k = param_index(m, w, s - w);
+      if (k >= 0) {
+        t = s; while (*t == ' ' || *t == '\t') t = t + 1;
+        if (raw || (t[0] == '#' && t[1] == '#')) o = bcat(b, o, args[k]);
+        else { a = expand_text(args[k]); o = bcat(b, o, a); free(a); }
+      }
+      else while (w < s) { o = bput(b, o, *w); w = w + 1; }
+      raw = 0;
+    }
+    else if (*s >= '0' && *s <= '9') { while (idchar(*s)) { o = bput(b, o, *s); s = s + 1; } raw = 0; }
+    else { if (*s != ' ' && *s != '\t') raw = 0; o = bput(b, o, *s); s = s + 1; }
+  }
+  bput(b, o, 0);
+  a = sdup(b, o); free(b);
+  return a;
+}
+// expand macro m whose name was just read: 0 if it is function-like and not called
+int expand(struct Sym *m) {
+  char *q; char **args; int nl; int lv;
+  if (m->mnargs < 0) { push_src(m->mbody, m); return 1; }
+  // look for the '(', also past the end of finished macro expansions: F(x)(y)
+  q = p; nl = 0; lv = fdepth;
+  while (1) {
+    while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') { if (*q == '\n') nl = nl + 1; q = q + 1; }
+    if (*q || lv == 0 || !fstack_mac[lv - 1]) break;
+    lv = lv - 1; q = fstack_p[lv]; nl = 0;
+  }
+  if (*q != '(') return 0;
+  if (lv < fdepth) { line = fstack_line[lv]; fdepth = lv; }   // those expansions are done
+  line = line + nl;
+  args = collect_args(m, &q, 1);
+  p = q;
+  push_src(subst(m, args), m);
+  return 1;
+}
+int lex() {
+  char *pp; int i; int c;
   while ((tk = *p)) {
     p = p + 1;
     if (tk == '\n') { line = line + 1; }
     else if (tk == '#') { preprocess(); }
-    else if ((tk >= 'a' && tk <= 'z') || (tk >= 'A' && tk <= 'Z') || tk == '_') {
-      pp = p - 1; hash = tk;
-      while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' || (*p >= '0' && *p <= '9')) { hash = hash * 147 + *p; p = p + 1; }
-      hash = (hash & 1073741823) | (p - pp) << 6;
-      i = lookup(pp, p - pp, hash);
-      if (i < 0) {
-        if (nsyms >= 8192) die("too many symbols");
-        i = nsyms; nsyms = nsyms + 1;
-        syms[i].name = pp; syms[i].len = p - pp; syms[i].hash = hash; syms[i].tk = Id;
-        syms[i].class = 0; syms[i].fix = -1;
-      }
+    else if (idstart(tk)) {
+      pp = p - 1;
+      while (idchar(*p)) p = p + 1;
+      i = intern(pp, p - pp);
+      if (syms[i].mdef && !expanding(syms + i) && expand(syms + i)) continue;   // read the expansion
       id = syms + i; tk = id->tk;
       return 0;
     }
@@ -324,13 +522,44 @@ int next() {
     else if (tk == '.') { tk = Dot; return 0; }
     else if (tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == ']' || tk == ',' || tk == ':') return 0;
   }
-  // end of this file: pop include stack
-  if (fdepth > 0) { fdepth = fdepth - 1; p = fstack_p[fdepth]; line = fstack_line[fdepth]; return next(); }
+  // end of this file or macro expansion: pop the input stack
+  if (fdepth > 0) { fdepth = fdepth - 1; p = fstack_p[fdepth]; line = fstack_line[fdepth]; return lex(); }
   return 0;
 }
+// next token. Adjacent string literals ("a" "b", also from macros) become one:
+// after a string, peek at the next token and push it back if it is not a string.
+int next() {
+  int s_ival; int s_slen; int i;
+  if (pb) { pb = 0; tk = pb_tk; ival = pb_ival; id = pb_id; numty = pb_numty; return 0; }
+  lex();
+  if (tk != Str) return 0;
+  while (1) {
+    s_ival = ival; s_slen = slen;
+    lex();
+    if (tk != Str) { pb = 1; pb_tk = tk; pb_ival = ival; pb_id = id; pb_numty = numty; tk = Str; ival = s_ival; slen = s_slen; return 0; }
+    if (ival != s_ival + s_slen) die("string literals not adjacent");
+    i = ival; while (i < dpos) { data[i - 1] = data[i]; i = i + 1; }   // drop the first literal's 0
+    dpos = dpos - 1; slen = s_slen + slen - 1; ival = s_ival;
+  }
+}
 
+// rest of the line, \-newline continuations joined: a macro body
+char *line_body() {
+  char *o; char *r;
+  while (*p == ' ' || *p == '\t') p = p + 1;
+  o = mbuf;
+  while (*p && *p != '\n') {
+    if (*p == '\\' && (p[1] == '\n' || (p[1] == '\r' && p[2] == '\n'))) {
+      p = p + (p[1] == '\r' ? 3 : 2); line = line + 1; mput(o, ' '); o = o + 1;
+    }
+    else { mput(o, *p); o = o + 1; p = p + 1; }
+  }
+  mput(o, 0);
+  r = sdup(mbuf, o);
+  return trim(r);
+}
 int preprocess() {
-  char *name; char *q; int n; int sv; struct Sym *d;
+  char *name; char *q; int n; struct Sym *d; char **names;
   while (*p == ' ' || *p == '\t') p = p + 1;
   if (!memcmp(p, "include", 7)) {
     p = p + 7;
@@ -341,24 +570,49 @@ int preprocess() {
       n = p - name; q = malloc(n + 1); memcpy(q, name, n); q[n] = 0;
       if (*p) p = p + 1;
       while (*p && *p != '\n') p = p + 1;
-      if (fdepth >= 8) die("include nesting too deep");
-      fstack_p[fdepth] = p; fstack_line[fdepth] = line; fdepth = fdepth + 1;
-      p = readfile(q); line = 1;
+      push_src(readfile(q), 0); line = 1;
       return 0;
     }
     // <system header>: ignored, builtins cover it
   }
   else if (!memcmp(p, "define", 6)) {
     p = p + 6;
-    sv = line;
-    next();                                   // identifier
-    if (tk != Id) die("bad #define");
-    d = id;
     while (*p == ' ' || *p == '\t') p = p + 1;
-    if (*p >= '0' && *p <= '9') { next(); d->class = CNum; d->type = numty; d->val = ival; }
-    line = sv;
+    if (!idstart(*p)) die("bad #define");
+    name = p; while (idchar(*p)) p = p + 1;
+    d = syms + intern(name, p - name);
+    d->mnargs = -1; d->mvar = 0;
+    if (*p == '(') {                          // NAME( with no space: function-like
+      p = p + 1; n = 0; names = malloc(32 * 4);
+      while (*p == ' ' || *p == '\t') p = p + 1;
+      while (*p != ')') {
+        if (n >= 32) die("too many macro parameters");
+        if (*p == '.' && p[1] == '.' && p[2] == '.') { names[n] = "__VA_ARGS__"; d->mvar = 1; p = p + 3; }
+        else { if (!idstart(*p)) die("bad macro parameter"); q = p; while (idchar(*p)) p = p + 1; names[n] = sdup(q, p); }
+        n = n + 1;
+        while (*p == ' ' || *p == '\t') p = p + 1;
+        if (*p == ',' && !d->mvar) { p = p + 1; while (*p == ' ' || *p == '\t') p = p + 1; }
+        else if (*p != ')') die("bad macro parameter list");
+      }
+      p = p + 1;
+      d->margs = names; d->mnargs = n;
+    }
+    d->mbody = line_body(); d->mdef = 1;   // the symbol keeps its class: a name can be a macro and a variable
+    return 0;
   }
-  while (*p && *p != '\n') p = p + 1;
+  else if (!memcmp(p, "undef", 5)) {
+    p = p + 5;
+    while (*p == ' ' || *p == '\t') p = p + 1;
+    name = p; while (idchar(*p)) p = p + 1;
+    if (p > name) {
+      d = syms + intern(name, p - name);
+      d->mdef = 0;
+    }
+  }
+  while (*p && *p != '\n') {                // other directives are ignored, continuations too
+    if (*p == '\\' && p[1] == '\n') { p = p + 1; line = line + 1; }
+    p = p + 1;
+  }
   return 0;
 }
 
@@ -462,6 +716,67 @@ int skip_params() {
     next();
   }
 }
+// ------------------------------------------------------------------ constant expressions
+// Evaluated while parsing, for array sizes, case labels and enum values:
+// numbers, enum and macro constants, sizeof(type), ( ), unary - + ~ !, binary
+// operators and ?:.
+int cexpr();
+int cunary() {
+  int v; int t;
+  if (tk == Num) { v = ival; next(); return v; }
+  if (tk == Id && id->class == CNum) { v = id->val; next(); return v; }
+  if (tk == '(') { next(); v = cexpr(); if (tk != ')') die(") expected"); next(); return v; }
+  if (tk == Sub) { next(); return -cunary(); }
+  if (tk == Add) { next(); return cunary(); }
+  if (tk == '~') { next(); return ~cunary(); }
+  if (tk == '!') { next(); return !cunary(); }
+  if (tk == Sizeof) {
+    next(); if (tk != '(') die("( expected after sizeof"); next();
+    t = declarator(parse_type()); v = tysize(t); if (darr >= 0) v = v * darr;
+    if (tk != ')') die(") expected"); next();
+    return v;
+  }
+  die("constant expected"); return 0;
+}
+int cprec(int op) {
+  if (op == Mul || op == Div || op == Mod) return 10;
+  if (op == Add || op == Sub) return 9;
+  if (op == Shl || op == Shr) return 8;
+  if (op == Lt || op == Gt || op == Le || op == Ge) return 7;
+  if (op == Eq || op == Ne) return 6;
+  if (op == And) return 5;
+  if (op == Xor) return 4;
+  if (op == Or) return 3;
+  if (op == Lan) return 2;
+  if (op == Lor) return 1;
+  return 0;
+}
+int cbin(int minp) {
+  int v; int r; int op; int pr;
+  v = cunary();
+  while ((pr = cprec(tk)) && pr >= minp) {
+    op = tk; next(); r = cbin(pr + 1);
+    if ((op == Div || op == Mod) && !r) die("division by zero in a constant");
+    if (op == Mul) v = v * r; else if (op == Div) v = v / r; else if (op == Mod) v = v % r;
+    else if (op == Add) v = v + r; else if (op == Sub) v = v - r;
+    else if (op == Shl) v = v << r; else if (op == Shr) v = v >> r;
+    else if (op == Lt) v = v < r; else if (op == Gt) v = v > r; else if (op == Le) v = v <= r; else if (op == Ge) v = v >= r;
+    else if (op == Eq) v = v == r; else if (op == Ne) v = v != r;
+    else if (op == And) v = v & r; else if (op == Xor) v = v ^ r; else if (op == Or) v = v | r;
+    else if (op == Lan) v = v && r; else v = v || r;
+  }
+  return v;
+}
+int cexpr() {
+  int v; int a; int b;
+  v = cbin(1);
+  if (tk == Cond) {
+    next(); a = cexpr(); if (tk != ':') die(": expected"); next(); b = cexpr();
+    return v ? a : b;
+  }
+  return v;
+}
+
 // array row type: n elements of type et (shared between declarations)
 int mkrow(int et, int n) {
   int i;
@@ -489,8 +804,9 @@ int rows_of(int t, int from) {
 int array_dim() {
   next();
   if (tk == ']') { darr = -2; next(); return 0; }
-  if (tk == Num) darr = ival; else if (tk == Id && id->class == CNum) darr = id->val; else die("array size expected");
-  next(); if (tk != ']') die("] expected"); next();
+  darr = cexpr();
+  if (darr < 0) die("negative array size");
+  if (tk != ']') die("] expected"); next();
   return 0;
 }
 // Declarator after a base type: stars, then a name (or none, for casts and
@@ -783,10 +1099,17 @@ int expr_comma() {
 // that runs before main: chunks are chained with b.w, see main(). Locals: code at
 // the declaration; arrays and structs are zeroed first. Nested aggregates need
 // their own braces; a char array also takes a string.
-int save_lex() { sv_p = p; sv_tk = tk; sv_ival = ival; sv_id = id; sv_line = line; sv_dpos = dpos; return 0; }
+int save_lex() {
+  sv_p = p; sv_tk = tk; sv_ival = ival; sv_id = id; sv_line = line; sv_dpos = dpos;
+  sv_pb = pb; sv_pb_tk = pb_tk; sv_pb_ival = pb_ival; sv_pb_id = pb_id; sv_pb_numty = pb_numty; sv_numty = numty; sv_slen = slen;
+  sv_fdepth = fdepth; memcpy(sv_fp, fstack_p, 4 * fdepth); memcpy(sv_fl, fstack_line, 4 * fdepth); memcpy(sv_fm, fstack_mac, 4 * fdepth);
+  return 0;
+}
 int restore_lex() {                    // lexing strings wrote to data: clear what lookahead used
   if (dpos > sv_dpos) memset(data + sv_dpos, 0, dpos - sv_dpos);
   p = sv_p; tk = sv_tk; ival = sv_ival; id = sv_id; line = sv_line; dpos = sv_dpos;
+  pb = sv_pb; pb_tk = sv_pb_tk; pb_ival = sv_pb_ival; pb_id = sv_pb_id; pb_numty = sv_pb_numty; numty = sv_numty; slen = sv_slen;
+  fdepth = sv_fdepth; memcpy(fstack_p, sv_fp, 4 * fdepth); memcpy(fstack_line, sv_fl, 4 * fdepth); memcpy(fstack_mac, sv_fm, 4 * fdepth);
   return 0;
 }
 int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_glo(ibase + off); return 0; }
@@ -960,8 +1283,8 @@ int stmt() {
     while (tk != '}') {
       if (tk == Case) {
         next();
-        if (tk == Sub) { next(); t = -ival; } else if (tk == Num) t = ival; else if (tk == Id && id->class == CNum) t = id->val; else die("case constant expected");
-        next(); if (tk != ':') die(": expected"); next();
+        t = cexpr();
+        if (tk != ':') die(": expected"); next();
         body = b_w(-1);                                           // previous body falls through over the test
         patch_b(at, cpos);                                        // failed previous test lands here
         lea_loc(n); emit16(26624); imm(1, t); emit16(17032);      // ldr r0,[r0] ; cmp r0,r1  4288
@@ -1029,7 +1352,7 @@ int parse_global() {
       while (tk != '}') {
         if (tk != Id) die("enum name expected");
         s = id; next();
-        if (tk == Assign) { next(); if (tk == Sub) { next(); i = -ival; } else i = ival; next(); }
+        if (tk == Assign) { next(); i = cexpr(); }
         s->class = CNum; s->type = TINT; s->val = i; i = i + 1;
         if (tk == ',') next();
       }
@@ -1138,7 +1461,9 @@ int main(int argc, char **argv) {
   starr = malloc(256 * 4); stcnt = malloc(256 * 4); dims = malloc(8 * 4);
   code = malloc(1048576); cpos = 0;
   data = malloc(1048576); dpos = 0;
-  fstack_p = malloc(8 * 4); fstack_line = malloc(8 * 4); fdepth = 0;
+  fstack_p = malloc(64 * 4); fstack_line = malloc(64 * 4); fstack_mac = malloc(64 * 4); fdepth = 0;
+  sv_fp = malloc(64 * 4); sv_fl = malloc(64 * 4); sv_fm = malloc(64 * 4); mbuf = malloc(65536);
+  tstack = malloc(64 * 4); tdepth = 0;
   fnret = malloc(512 * 4); nfn = 0;
   init_open = 0; init_head = -1; init_tail = -1;
   afix_at = malloc(4096 * 4); afix_sym = malloc(4096 * 4); naddr = 0;
