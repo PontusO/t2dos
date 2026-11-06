@@ -46,6 +46,7 @@ filesystem 7 MB. Reflashing the kernel keeps the filesystem.
    `put` works from the shell too; from a PC:
    `(printf 'put cc.bin %d\n' $(stat -c%s cc.bin); cat cc.bin) > /dev/ttyACM0`
 4. `/autoexec.sh` runs at shell start; `sh script` runs any script.
+   At the prompt, Up and Down scroll through the last 16 command lines.
 
 ## Editor
 `edit file` is a full-screen editor for an ANSI/VT100 terminal, e.g.

@@ -1,20 +1,68 @@
 // sh.c - T2DOS shell. Builtins: cd pwd exit help. Everything else is /bin/name.bin or ./name.bin.
 // Output redirection with "> file" and ">> file". "sh script" runs a script.
+// Up and Down scroll through the last 16 command lines.
 #include "sys.h"
 
 char line[256];
 char path[160];
 char cwd[128];
 
+// command history: the last HIST lines, hist[(hfirst + i) % HIST] for i < hcount, oldest first
+#define HIST 16
+char hist[HIST][256];
+int hfirst; int hcount;
+char draft[256];                       // what was typed before Up was first pressed
+
+int hist_add(char *s) {
+  if (!*s) return 0;
+  if (hcount && !strcmp(hist[(hfirst + hcount - 1) % HIST], s)) return 0;   // same as the last one
+  if (hcount == HIST) { hfirst = (hfirst + 1) % HIST; hcount--; }
+  strcpy(hist[(hfirst + hcount) % HIST], s);
+  hcount++;
+  return 1;
+}
+// the next key; an escape sequence comes back as 'A' + 256 (Up), 'B' + 256 (Down) or 0 (others)
+int waitkey(int ms) { int t; t = millis(); while (!kbhit()) { if (millis() - t > ms) return -1; } return getchar(); }
+int getkey() {
+  int c;
+  c = getchar();
+  if (c != 27) return c;
+  c = waitkey(50);
+  if (c != '[' && c != 'O') return 0;
+  c = waitkey(50);
+  while (c >= 0 && (c < 64 || c > 126)) c = waitkey(50);    // parameters, up to the final byte
+  if (c == 'A' || c == 'B') return c + 256;
+  return 0;
+}
+// replace the len characters on screen and in buf with s
+int retype(char *buf, int len, char *s) {
+  while (len) { printf("\b \b"); len--; }
+  strcpy(buf, s); printf("%s", buf);
+  return strlen(buf);
+}
+
 int readline(char *buf, int max) {
-  int len; int c;
-  len = 0;
+  int len; int c; int h;
+  len = 0; h = hcount;                 // h: the history line shown, hcount = the line being typed
   while (1) {
-    c = getchar();
-    if (c == '\r' || c == '\n') { buf[len] = 0; putchar('\n'); return len; }
+    c = getkey();
+    if (c == '\r' || c == '\n') { buf[len] = 0; putchar('\n'); hist_add(buf); return len; }
     if (c == 8 || c == 127) { if (len) { len--; printf("\b \b"); } }
     else if (c == 3) { buf[0] = 0; putchar('\n'); return 0; }
-    else if (c >= 32 && len < max - 1) { buf[len++] = c; putchar(c); }
+    else if (c == 'A' + 256) {         // Up: an older line
+      if (h > 0) {
+        if (h == hcount) { buf[len] = 0; strcpy(draft, buf); }
+        h--; len = retype(buf, len, hist[(hfirst + h) % HIST]);
+      }
+    }
+    else if (c == 'B' + 256) {         // Down: a newer line, then back to what was typed
+      if (h < hcount) {
+        h++;
+        if (h == hcount) len = retype(buf, len, draft);
+        else len = retype(buf, len, hist[(hfirst + h) % HIST]);
+      }
+    }
+    else if (c >= 32 && c < 256 && len < max - 1) { buf[len++] = c; putchar(c); }
   }
 }
 
