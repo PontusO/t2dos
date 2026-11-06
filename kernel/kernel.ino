@@ -26,6 +26,10 @@
                                   // each level's syscall frames share these 8 KB: keep it shallow
 #define MAX_ARGS 15               // spawn() keeps at most this many arguments...
 #define ARG_BYTES 256             // ...in this many bytes, NUL bytes included
+#define PIPE_FD 200               // pipe fds are PIPE_FD + an index into pfds
+#define MAX_PIPES 8
+#define MAX_PIPE_FDS 16
+#define MAX_BOUNDS 8              // message ends a pipe holds that no reader has reached yet
 
 // ============================================================ tasks
 // Every malloc() a program makes is linked into its Proc, so whatever it did
@@ -38,7 +42,9 @@ struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Bl
 // Cooperative tasks: tasks[0] is the foreground (the shell and what it runs),
 // tasks[1..MAX_JOBS] are background jobs. A task gives up the CPU only in
 // k_yield(), called from the waiting system calls (getchar, kbhit, sleep,
-// recv, accept, kill, yield), never inside a file, flash or WiFi operation.
+// recv, accept, kill, yield, and a read of an empty pipe, a write to a full
+// pipe or a pipe close with a full queue of message ends), never inside a
+// file, flash or WiFi operation.
 // cwd, stdout_fd and t2_sys_sp are globals that always hold the running
 // task's values; k_yield() saves them into the Task it leaves and loads the
 // next task's. A program and the programs it execs run nested in one task
@@ -56,11 +62,27 @@ struct Task {
   jmp_buf jb;                           // task-level unwind (kill)
   uint8_t *code, *data, *stack; uint32_t entry;   // loaded by spawn, not yet started
   int argc; char *argv[MAX_ARGS + 1]; char args[ARG_BYTES];
+  char fmtbuf[1024];                    // printf's buffer: a write to a full pipe switches mid-printf
 };
 static Task tasks[1 + MAX_JOBS];
 static Task *cur = &tasks[0];
 static int k_yield();
 static void k_wait();
+
+// Named pipes: /pipe/NAME, made by mkpipe, owned by the task (and nesting
+// level) that made it and removed when that program ends. A writer's close
+// ends one message: bounds[] holds the stream positions (in total_written
+// terms) where messages end. A pipe fd is dead once its pipe is removed
+// (gen differs): read 0, write -1, close frees it.
+struct Pipe {
+  int used, gen; char name[32]; int owner, level;
+  char buf[PIPE_SIZE]; int head, count;
+  int bounds[MAX_BOUNDS], nbounds;
+  int total_read, total_written;
+};
+struct PipeFd { int used, pipe, mode, owner, level, wrote, gen, id; };   // mode 0 read, 1 write
+static Pipe pipes[MAX_PIPES];
+static PipeFd pfds[MAX_PIPE_FDS];
 
 // Root filesystem: the SD card if it mounts, else LittleFS in on-board flash.
 // The flash FS size comes from the board's flash layout (build with
@@ -150,8 +172,97 @@ static const char *resolve(const char *in, char *out, int outsz) {
 
 static bool is_dir(const char *path) { File f = fsys->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
 
+// ============================================================ named pipes
+static bool is_pipe_fd(int fd) { return fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS; }
+// a resolved path's pipe name (the part after /pipe/), or nullptr if it is not under /pipe/
+static const char *pipe_name(const char *path) { return !strncmp(path, "/pipe/", 6) && path[6] ? path + 6 : nullptr; }
+static int find_pipe(const char *nm) { for (int i = 0; i < MAX_PIPES; i++) if (pipes[i].used && !strcmp(pipes[i].name, nm)) return i; return -1; }
+static int pfd_entry(int fd) { int e = fd - PIPE_FD; return e >= 0 && e < MAX_PIPE_FDS && pfds[e].used ? e : -1; }
+static bool pfd_live(int e) { int i = pfds[e].pipe; return pipes[i].used && pipes[i].gen == pfds[e].gen; }
+// next message end at or after pos, or -1
+static int next_bound(Pipe *p, int pos) { int b = -1; for (int k = 0; k < p->nbounds; k++) if (p->bounds[k] >= pos && (b < 0 || p->bounds[k] < b)) b = p->bounds[k]; return b; }
+// drops one message end at `at` (two writers closing at the same position are two messages)
+static void bound_drop(Pipe *p, int at) { for (int k = 0; k < p->nbounds; k++) if (p->bounds[k] == at) { p->bounds[k] = p->bounds[--p->nbounds]; return; } }
+
+static int k_mkpipe(const char *nm) {
+  if (!nm || !nm[0] || strlen(nm) > 31 || strchr(nm, '/') || find_pipe(nm) >= 0) return -1;
+  for (int i = 0; i < MAX_PIPES; i++) if (!pipes[i].used) {
+    Pipe *p = &pipes[i];
+    int g = p->gen + 1;
+    memset(p, 0, sizeof *p);
+    p->used = 1; p->gen = g; strcpy(p->name, nm); p->owner = cur_id(); p->level = cur->nest;
+    return 0;
+  }
+  return -1;
+}
+static int pipe_open(int i, int mode) {
+  static int next_id;
+  for (int e = 0; e < MAX_PIPE_FDS; e++) if (!pfds[e].used) {
+    PipeFd *f = &pfds[e];
+    f->used = 1; f->pipe = i; f->mode = mode; f->owner = cur_id(); f->level = cur->nest;
+    f->wrote = 0; f->gen = pipes[i].gen; f->id = ++next_id;
+    return PIPE_FD + e;
+  }
+  return -1;
+}
+// Up to cnt bytes, never across the next message end; at a message end 0,
+// once. Empty: wait for a writer. A removed pipe reads 0.
+static int pipe_read(int fd, char *buf, int cnt) {
+  int e = pfd_entry(fd);
+  if (e < 0 || pfds[e].mode != 0) return -1;
+  int id = pfds[e].id;
+  for (;;) {
+    if (!pfds[e].used || pfds[e].id != id || !pfd_live(e)) return 0;   // closed or removed while we waited
+    Pipe *p = &pipes[pfds[e].pipe];
+    int pos = p->total_read, b = next_bound(p, pos);
+    if (b == pos) { bound_drop(p, b); return 0; }
+    if (p->count == 0) { k_wait(); continue; }
+    int avail = p->count; if (b >= 0 && b - pos < avail) avail = b - pos;
+    if (cnt > avail) cnt = avail;
+    if (cnt < 0) cnt = 0;
+    for (int k = 0; k < cnt; k++) buf[k] = p->buf[(p->head + k) % PIPE_SIZE];
+    p->head = (p->head + cnt) % PIPE_SIZE; p->count -= cnt; p->total_read += cnt;
+    return cnt;
+  }
+}
+// All n bytes, waiting while the pipe is full; -1 if it is (or gets) removed.
+static int pipe_write(int fd, const char *buf, int cnt) {
+  int e = pfd_entry(fd);
+  if (e < 0 || pfds[e].mode != 1 || cnt < 0) return -1;
+  int id = pfds[e].id, done = 0;
+  for (;;) {
+    if (!pfds[e].used || pfds[e].id != id || !pfd_live(e)) return -1;
+    Pipe *p = &pipes[pfds[e].pipe];
+    int k = PIPE_SIZE - p->count; if (k > cnt - done) k = cnt - done;
+    for (int j = 0; j < k; j++) p->buf[(p->head + p->count + j) % PIPE_SIZE] = buf[done + j];
+    p->count += k; p->total_written += k; done += k; pfds[e].wrote = 1;
+    if (done >= cnt) return cnt;
+    k_wait();
+  }
+}
+// A writer's close ends a message (an empty one if it wrote nothing). With
+// wait, a full bounds queue is waited out; cleanup (wait false) must not
+// switch, so there the message end is dropped instead.
+static void pipe_close(int e, bool wait) {
+  int id = pfds[e].id;
+  if (pfds[e].mode == 1) {
+    while (wait && pfds[e].used && pfds[e].id == id && pfd_live(e) && pipes[pfds[e].pipe].nbounds == MAX_BOUNDS) k_wait();
+    if (!pfds[e].used || pfds[e].id != id) return;                      // freed meanwhile
+    if (pfd_live(e)) { Pipe *p = &pipes[pfds[e].pipe]; if (p->nbounds < MAX_BOUNDS) p->bounds[p->nbounds++] = p->total_written; }
+  }
+  pfds[e].used = 0;
+}
+// A program ends: close the pipe fds it opened and remove the pipes it made
+// (level -1: every level, the task ends). Fds first: closing a writer ends
+// a message on another task's pipe.
+static void pipes_release(int task, int level) {
+  for (int e = 0; e < MAX_PIPE_FDS; e++) if (pfds[e].used && pfds[e].owner == task && (level < 0 || pfds[e].level == level)) pipe_close(e, false);
+  for (int i = 0; i < MAX_PIPES; i++) if (pipes[i].used && pipes[i].owner == task && (level < 0 || pipes[i].level == level)) pipes[i].used = 0;
+}
+
 static int k_open(const char *name, int flags) {
   char path[160]; resolve(name, path, sizeof path);
+  if (const char *pn = pipe_name(path)) { int i = find_pipe(pn); return i < 0 ? -1 : pipe_open(i, flags == OPEN_READ ? 0 : 1); }
   for (int i = 2; i < MAX_FD; i++) if (!fds[i]) {
     fds[i] = fsys->open(path, flags == OPEN_WRITE ? "w" : flags == OPEN_APPEND ? "a" : (flags & 1) ? "w" : "r");
     fd_owner[i] = cur_id();
@@ -168,6 +279,7 @@ static int k_kbhit() {
   return k;
 }
 static int k_read(int fd, char *buf, int n) {
+  if (is_pipe_fd(fd)) return pipe_read(fd, buf, n);
   if (fd >= SOCK_FD) return sock_recv(fd, buf, n, -1);
   if (fd == 0) { int i = 0; while (i < n) { buf[i++] = k_getc(); if (!con->kbhit()) break; } return i; }
   if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
@@ -176,6 +288,7 @@ static int k_read(int fd, char *buf, int n) {
 static int k_write(int fd, const char *buf, int n) {
   if (fd == 1) fd = stdout_fd;
   if (fd == 1) { for (int i = 0; i < n; i++) con->putc(buf[i]); return n; }
+  if (is_pipe_fd(fd)) return pipe_write(fd, buf, n);
   if (fd >= SOCK_FD) return sock_send(fd, buf, n);
   if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
   return fds[fd].write((const uint8_t *)buf, n);
@@ -252,7 +365,6 @@ static void u_free_all(int level) {     // the running task's procs[level]
   while (h->next != h) { Blk *b = h->next; h->next = b->next; free(b); }
   h->prev = h;
 }
-static char fmtbuf[1024];
 
 static int run_bin(const char *name, int argc, char **argv);
 static int k_spawn(const char *name, int argc, char **argv);
@@ -290,15 +402,21 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_redirect: { int old = stdout_fd; stdout_fd = A(0) ? A(0) : 1; return old; }
     // ---- files
     case SYS_open: return k_open((const char *)A(0), A(1));
-    case SYS_close: { int fd = A(0); if (fd >= SOCK_FD) { sock_close(fd); return 0; } if (fd >= 2 && fd < MAX_FD && fds[fd]) { fds[fd].close(); fds[fd] = File(); } return 0; }
+    case SYS_close: { int fd = A(0);
+      if (is_pipe_fd(fd)) { int e = pfd_entry(fd); if (e >= 0) pipe_close(e, true); return 0; }
+      if (fd >= SOCK_FD) { sock_close(fd); return 0; } if (fd >= 2 && fd < MAX_FD && fds[fd]) { fds[fd].close(); fds[fd] = File(); } return 0; }
     case SYS_read: return k_read(A(0), (char *)A(1), A(2));
     case SYS_write: return k_write(A(0), (const char *)A(1), A(2));
-    case SYS_seek: { int fd = A(0); if (fd < 2 || !fds[fd]) return -1;
+    case SYS_seek: { int fd = A(0); if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
       fds[fd].seek(A(1), A(2) == SEEK_BEGIN ? SeekSet : A(2) == SEEK_CURRENT ? SeekCur : SeekEnd); return fds[fd].position(); }
     case SYS_stat: { char path[160]; resolve((const char *)A(0), path, sizeof path);
+      if (const char *pn = pipe_name(path)) { int i = find_pipe(pn); if (i < 0) return -1;
+        stat_t *st = (stat_t *)A(1); st->size = pipes[i].count; st->isdir = 0; st->mtime = 0; return 0; }
       File f = fsys->open(path, "r"); if (!f) return -1;
       stat_t *st = (stat_t *)A(1); st->size = f.size(); st->isdir = f.isDirectory(); st->mtime = f.getLastWrite(); f.close(); return 0; }
-    case SYS_unlink: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fsys->remove(path) ? 0 : -1; }
+    case SYS_unlink: { char path[160]; resolve((const char *)A(0), path, sizeof path);
+      if (pipe_name(path)) return -1;      // only the owner's end removes a pipe
+      return fsys->remove(path) ? 0 : -1; }
     case SYS_rename: { char a[160], b[160]; resolve((const char *)A(0), a, sizeof a); resolve((const char *)A(1), b, sizeof b); return fsys->rename(a, b) ? 0 : -1; }
     case SYS_mkdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fsys->mkdir(path) ? 0 : -1; }
     case SYS_rmdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fsys->rmdir(path) ? 0 : -1; }
@@ -310,6 +428,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_closedir: { int d = A(0); if (d >= 0 && d < MAX_DIR) dir_used[d] = false; return 0; }
     case SYS_chdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1; strlcpy(cwd, path, sizeof cwd); return 0; }
     case SYS_getcwd: strlcpy((char *)A(0), cwd, A(1)); return A(0);
+    case SYS_mkpipe: return k_mkpipe((const char *)A(0));
     // ---- memory and strings
     case SYS_malloc: return (int)u_malloc(A(0));
     case SYS_free: u_free((void *)A(0)); return 0;
@@ -319,7 +438,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_strlen: return strlen((const char *)A(0));
     case SYS_strcmp: return strcmp((const char *)A(0), (const char *)A(1));
     case SYS_strcpy: return (int)strcpy((char *)A(0), (const char *)A(1));
-    case SYS_printf: { int l = k_format(fmtbuf, sizeof fmtbuf, (const char *)A(0), argv, n, 1); k_write(1, fmtbuf, l < (int)sizeof fmtbuf ? l : sizeof fmtbuf - 1); return l; }
+    case SYS_printf: { char *fb = cur->fmtbuf; int l = k_format(fb, sizeof cur->fmtbuf, (const char *)A(0), argv, n, 1); k_write(1, fb, l < (int)sizeof cur->fmtbuf ? l : sizeof cur->fmtbuf - 1); return l; }
     case SYS_sprintf: return k_format((char *)A(0), 1 << 30, (const char *)A(1), argv, n, 2);
     case SYS_atoi: return atoi((const char *)A(0));
     case SYS_strncmp: return strncmp((const char *)A(0), (const char *)A(1), A(2));
@@ -457,6 +576,7 @@ static int run_loaded(uint8_t *code, uint8_t *data, uint8_t *stack, uint32_t ent
   // leaked by the child: opened at this level by this task (another task's are not ours to close)
   for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self && !(pr->fd_mask & (1 << i))) { fds[i].close(); fds[i] = File(); }
   for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i] && sock_owner[i] == self && !(pr->sock_mask & (1 << i))) sock_close(SOCK_FD + i);
+  pipes_release(self, level);          // the pipe fds it opened and the pipes it made
   stdout_fd = saved_stdout;
   u_free_all(level);                   // memory the child malloc()ed and never freed
   t->nest = level - 1;
@@ -526,6 +646,7 @@ static void task_end(int code) {
   for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i] && sock_owner[i] == self) sock_close(SOCK_FD + i);
   for (int i = 0; i < MAX_DIR; i++) if (dir_used[i] && dir_owner[i] == self) dir_used[i] = false;
   if (server && server_owner == self) { server->stop(); delete server; server = nullptr; }
+  pipes_release(self, -1);               // all levels: it may have been killed deep inside
   t->exit_code = code;
   t->state = T_DONE;
   for (;;) k_yield();                    // task 0 is always runnable
@@ -578,6 +699,7 @@ static int k_spawn(const char *name, int argc, char **argv) {
   t->stdout_fd = stdout_fd;
   if (stdout_fd >= 2 && stdout_fd < MAX_FD) fd_owner[stdout_fd] = j;
   if (stdout_fd >= SOCK_FD && stdout_fd < SOCK_FD + MAX_SOCK) sock_owner[stdout_fd - SOCK_FD] = j;
+  if (pfd_entry(stdout_fd) >= 0) { pfds[stdout_fd - PIPE_FD].owner = j; pfds[stdout_fd - PIPE_FD].level = 0; }   // closed when the job ends
   uint32_t top = (uint32_t)(jstack[j - 1] + JSTACK_SIZE / 8);
   t->sys_sp = top;                       // run_loaded moves it below its own frames
   uint32_t *f = (uint32_t *)(top - CTX_FRAME);

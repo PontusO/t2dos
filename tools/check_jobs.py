@@ -4,6 +4,9 @@
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
 hog (getchar() forever), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
+The pipe cases use pecho (`pecho NAME` makes /pipe/NAME and /pipe/NAME.out and answers each
+message uppercased; "quit" answers "BYE" and exits 3) and pclient (`pclient CASE [NAME [TEXT]]`,
+the pipe driver, same output style; `start` spawns pecho, `finish` makes it quit).
 
   check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
                           compiler/cc (PC only, no board)
@@ -28,6 +31,22 @@ Cases (spawner CASE on the board):
                       a nested foreground `tick 2 400` returns 7; then kill the tick
   listen_owner        job A listens (prints "listen 0"); the foreground's listen and job B's
                       (prints "listen -1") fail while A runs; kill both (WiFi need not be up)
+  pipe_roundtrip      pclient start p1; `pclient send p1 hello` prints HELLO; pclient finish p1
+  reply_before_request  with pecho p1 running, `pclient early p1` spawns `pclient writer p1 abc`
+                      (sleeps 300 ms, then sends abc) and reads /pipe/p1.out at once: it blocks
+                      until pecho replies, prints ABC
+  shell_redirect      with pecho p1 running, the shell runs `echo hi > /pipe/p1`, then
+                      `cat /pipe/p1.out` prints HI
+  large_message       with pecho p1 running, a 2000-byte message (more than PIPE_SIZE) round
+                      trips intact: the writer blocks on the full pipe while pecho drains it
+  owner_exit_eof      `pclient orphan p1` reads /pipe/p1.out while pecho quits: BYE, end of
+                      message, then a blocked read returns 0 once pecho is done (exit 3); a
+                      writer on the removed pipe gets -1, open("/pipe/p1") fails
+  kill_pipe_reader    `pclient killer p2` spawns pecho p2, kills it while it waits on its empty
+                      pipe: kill returns 0, stat("/pipe/p2") fails
+  mkpipe_errors       `pclient mkpipe`: duplicate name, ninth pipe, names with '/', empty or too
+                      long give -1; open of a missing pipe -1, unlink -1, stat size, a message
+                      read back; then `pclient nopipe m0`: the exited program's pipes are gone
 """
 import os
 import re
@@ -41,9 +60,10 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'listener', 'spawner']
+PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient']
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
+PCLIENT = REMOTE + '/pclient.bin'
 EXEC_CASE = 'globals'                      # the tests/toolchain case fg_exec_with_job builds
 EXEC_SRCS = ['globals_a.c', 'globals_b.c']
 TICK_RE = re.compile(r'^tick \d+$')
@@ -204,10 +224,85 @@ def case_listen_owner(r):
     return good
 
 
+def pclient(r, name, args, wait=30.0):
+    out, code = r.run(PCLIENT + ' ' + args, wait)
+    good, ticks, rest = verdict(name + ' (pclient ' + args + ')', out, code)
+    return good, rest
+
+
+def with_pecho(r, name, body):
+    """start pecho p1, run body(), then make pecho quit (also when body failed)"""
+    good, rest = pclient(r, name, 'start p1')
+    try:
+        good = body() and good
+    finally:
+        g2, rest = pclient(r, name, 'finish p1')
+    return good and g2
+
+
+def case_pipe_roundtrip(r):
+    def body():
+        good, rest = pclient(r, 'pipe_roundtrip', 'send p1 hello')
+        if 'HELLO' not in rest:
+            good = fail('pipe_roundtrip: no HELLO line in %r' % rest)
+        return good
+    return with_pecho(r, 'pipe_roundtrip', body)
+
+
+def case_reply_before_request(r):
+    def body():
+        good, rest = pclient(r, 'reply_before_request', 'early p1')
+        if 'ABC' not in rest:
+            good = fail('reply_before_request: no ABC line in %r' % rest)
+        return good
+    return with_pecho(r, 'reply_before_request', body)
+
+
+def case_shell_redirect(r):
+    def body():
+        out, code = r.run('echo hi > /pipe/p1', 10.0)
+        good = True
+        if out or code:
+            good = fail('shell_redirect: echo hi > /pipe/p1 printed %r, exit %d' % (out, code))
+        out, code = r.run('cat /pipe/p1.out', 10.0)
+        if out != ['HI'] or code:
+            good = fail('shell_redirect: cat /pipe/p1.out printed %r, exit %d (want [\'HI\'], 0)' % (out, code))
+        return good
+    return with_pecho(r, 'shell_redirect', body)
+
+
+def case_large_message(r):
+    def body():
+        good, rest = pclient(r, 'large_message', 'large p1')
+        return good
+    return with_pecho(r, 'large_message', body)
+
+
+def case_owner_exit_eof(r):
+    good, rest = pclient(r, 'owner_exit_eof', 'start p1')
+    g2, rest = pclient(r, 'owner_exit_eof', 'orphan p1')
+    return good and g2
+
+
+def case_kill_pipe_reader(r):
+    good, rest = pclient(r, 'kill_pipe_reader', 'killer p2')
+    return good
+
+
+def case_mkpipe_errors(r):
+    good, rest = pclient(r, 'mkpipe_errors', 'mkpipe')
+    g2, rest = pclient(r, 'mkpipe_errors', 'nopipe m0')
+    return good and g2
+
+
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
-         ('listen_owner', case_listen_owner)]
+         ('listen_owner', case_listen_owner),
+         ('pipe_roundtrip', case_pipe_roundtrip), ('reply_before_request', case_reply_before_request),
+         ('shell_redirect', case_shell_redirect), ('large_message', case_large_message),
+         ('owner_exit_eof', case_owner_exit_eof), ('kill_pipe_reader', case_kill_pipe_reader),
+         ('mkpipe_errors', case_mkpipe_errors)]
 
 
 def check_board():
