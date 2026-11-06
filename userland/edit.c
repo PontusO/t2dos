@@ -1,7 +1,10 @@
 // edit.c - full-screen text editor for an ANSI/VT100 terminal (screen, minicom, picocom).
 //   edit file
 // Keys: arrows, Home End PgUp PgDn, Backspace Del Enter Tab
-//       ^O save   ^X quit   ^F find (^F again, Enter: next match)   ^S also saves, ^C and ^Q also quit
+//       ^O save   ^X quit   ^F find (^F again, Enter: next match)   ^S also saves, ^Q also quits
+//       ^B mark (again: clear)   ^K cut   ^C copy   ^U paste
+//       With a mark, ^K and ^C take the text between the mark and the cursor; without one,
+//       the current line (repeated ^K or ^C collect the following lines into one block).
 // ^O is the advertised save key: with flow control on (screen's default for serial lines)
 // the terminal swallows ^S as XOFF and freezes its output until ^Q.
 // Enter copies the indentation of the current line, except while text is being pasted.
@@ -15,6 +18,9 @@ int cur; int want;                     // cursor offset in the text, preferred d
 int top; int left;                     // offset of the first line shown, first column shown
 int H; int rows; int cols;             // screen height, text rows (H - 1), screen width
 int dirty; int quitarm;
+int mark;                              // the mark's text offset, -1 when there is none
+char *clip; int clen; int ccap;        // the cut/copy buffer
+int cliplines;                         // 1 when the last ^K/^C took a whole line (not a block)
 char *fname;
 char msg[128];
 char ob[4096]; int on;                 // output buffer, one write() per screen update
@@ -38,14 +44,14 @@ int gap_to(int pos) {
   while (gs < pos) { b[gs] = b[ge]; gs++; ge++; }
   return 0;
 }
-int ins(int c) {
+int ins(int c) {                       // every edit clears the mark
   if (gs == ge) { strcpy(msg, "buffer full"); return 0; }
-  gap_to(cur); b[gs] = c; gs++; cur++; dirty = 1;
+  gap_to(cur); b[gs] = c; gs++; cur++; dirty = 1; mark = -1;
   return 1;
 }
 int del(int pos) {                     // delete the character at pos, cursor goes to pos
   if (pos < 0 || pos >= len()) return 0;
-  gap_to(pos); ge++; cur = pos; dirty = 1;
+  gap_to(pos); ge++; cur = pos; dirty = 1; mark = -1;
   return 1;
 }
 int lstart(int p) { while (p > 0 && at(p - 1) != '\n') p--; return p; }
@@ -75,6 +81,9 @@ int more_below() {                     // is there text below the last screen ro
   while (r < rows) { p = lend(p); if (p >= n) return 0; p++; r++; }
   return 1;
 }
+// the marked block [s, e): sel_s()/sel_e(), only while mark >= 0
+int sel_s() { if (mark < cur) return mark; return cur; }
+int sel_e() { if (mark < cur) return cur; return mark; }
 int lineno() { int i; int n; n = 1; i = 0; while (i < cur) { if (at(i) == '\n') n++; i++; } return n; }
 
 // ------------------------------------------------------------------ screen
@@ -96,7 +105,7 @@ int status() {
   sprintf(line, " %s%s  line %d col %d   ", fname, dirty ? " [modified]" : "", lineno(), col_of(cur) + 1);
   n = strlen(line);
   if (msg[0]) { i = 0; while (msg[i] && n < 250) { line[n] = msg[i]; n++; i++; } }
-  else { strcpy(line + n, "^O save  ^X quit  ^F find"); n = strlen(line); }
+  else { strcpy(line + n, mark >= 0 ? "^K cut  ^C copy  ^B clear mark" : "^O save ^X quit ^F find ^B mark ^K cut ^C copy ^U paste"); n = strlen(line); }
   i = 0;
   while (i < cols - 1) { outc(i < n ? line[i] : ' '); i++; }
   csi("0m");
@@ -104,18 +113,21 @@ int status() {
 }
 
 int draw() {
-  int r; int p; int n; int x; int c; int w; int k; int cy; int more;
+  int r; int p; int n; int x; int c; int w; int k; int cy; int more; int s0; int s1; int hl; int on2;
   cy = scroll();
+  s0 = -1; s1 = -1; if (mark >= 0) { s0 = sel_s(); s1 = sel_e(); }
   csi("?25l");
   n = len(); p = top; more = 1;
   r = 0;
   while (r < rows) {
     gotoxy(r, 0); csi("K");
     if (more) {
-      x = 0;
+      x = 0; hl = 0;
       while (p < n && (c = at(p)) != '\n') {
         w = cwidth(c, x);
         k = x;
+        on2 = p >= s0 && p < s1;       // inside the marked block: reverse video
+        if (on2 != hl) { csi(on2 ? "7m" : "0m"); hl = on2; }
         while (k < x + w) {
           if (k >= left && k < left + cols) {
             if (c == '\t') outc(' ');
@@ -126,6 +138,7 @@ int draw() {
         }
         x += w; p++;
       }
+      if (hl) csi("0m");
       if (p >= n) more = 0; else p++;
     }
     else { csi("2m"); outc('~'); csi("0m"); }
@@ -238,6 +251,55 @@ int find() {
   return 1;
 }
 
+// put text [s, e) in the clipboard, after what is there when append is set
+int clip_put(int s, int e, int append) {
+  int n; char *nb;
+  if (!append) clen = 0;
+  n = clen + e - s;
+  if (n > ccap) {
+    nb = malloc(n + 1024);
+    if (!nb) { strcpy(msg, "out of memory"); return 0; }
+    if (clen) memcpy(nb, clip, clen);
+    if (clip) free(clip);
+    clip = nb; ccap = n + 1024;
+  }
+  while (s < e) { clip[clen] = at(s); clen++; s++; }
+  return 1;
+}
+// the current line with its newline: [lstart, end)
+int line_end() { int e; e = lend(cur); if (e < len()) e++; return e; }
+// ^K and ^C: the marked block, else the current line (again right after: the next line too)
+int cut(int append) {
+  int s; int e;
+  cliplines = mark < 0;
+  if (mark >= 0) { s = sel_s(); e = sel_e(); append = 0; }
+  else { s = lstart(cur); e = line_end(); }
+  if (s == e) { strcpy(msg, "nothing to cut"); return 0; }
+  if (!clip_put(s, e, append)) return 0;
+  gap_to(s); ge += e - s; cur = s; dirty = 1; mark = -1;
+  sprintf(msg, "cut %d bytes", clen);
+  return 1;
+}
+int copy(int append) {
+  int s; int e;
+  cliplines = mark < 0;
+  if (mark >= 0) { s = sel_s(); e = sel_e(); append = 0; }
+  else { s = lstart(cur); e = line_end(); }
+  if (s == e) { strcpy(msg, "nothing to copy"); return 0; }
+  if (!clip_put(s, e, append)) return 0;
+  if (mark >= 0) mark = -1;
+  else cur = e;                        // to the next line, so ^C again takes it too
+  sprintf(msg, "copied %d bytes", clen);
+  return 1;
+}
+int paste() {
+  int i;
+  if (!clen) { strcpy(msg, "nothing to paste"); return 0; }
+  if (clen > ge - gs) { strcpy(msg, "buffer full"); return 0; }
+  i = 0; while (i < clen) { ins(clip[i]); i++; }
+  return 1;
+}
+
 int newline() {                        // Enter: break the line, keep the indentation unless pasting
   int ls; int n; int i;
   ls = lstart(cur); n = 0;
@@ -248,7 +310,7 @@ int newline() {                        // Enter: break the line, keep the indent
 }
 
 int main(int argc, char **argv) {
-  int fd; int n; int k; int i; int size; int lastcr; struct stat_t st;
+  int fd; int n; int k; int i; int size; int lastcr; int lastk; struct stat_t st;
   if (argc < 2) { printf("usage: edit file\n"); return 1; }
   fname = argv[1];
   size = 0; msg[0] = 0;
@@ -267,7 +329,8 @@ int main(int argc, char **argv) {
     while (gs < size && (n = read(fd, b + gs, size - gs)) > 0) gs += n;
     close(fd);
   }
-  ge = cap; cur = 0; want = 0; top = 0; left = 0; dirty = 0; quitarm = 0; lastcr = 0;
+  ge = cap; cur = 0; want = 0; top = 0; left = 0; dirty = 0; quitarm = 0; lastcr = 0; lastk = 0;
+  mark = -1; clip = 0; clen = 0; ccap = 0; cliplines = 0;
 
   csi("?1049h");                       // alternate screen: the shell's screen comes back on exit
   term_size();
@@ -275,14 +338,21 @@ int main(int argc, char **argv) {
   while (1) {
     draw();
     k = getkey();
-    if (k != 24 && k != 17 && k != 3) quitarm = 0;
+    if (k != 24 && k != 17) quitarm = 0;
     if (k != K_NONE) msg[0] = 0;
-    if (k == 24 || k == 17 || k == 3) {   // ^X ^Q ^C
+    if (k == 24 || k == 17) {             // ^X ^Q
       if (dirty && !quitarm) { strcpy(msg, "unsaved changes, press again to quit"); quitarm = 1; }
       else break;
     }
     else if (k == 15 || k == 19) save();          // ^O ^S
     else if (k == 6) find();                      // ^F
+    else if (k == 2) {                            // ^B
+      if (mark >= 0) { mark = -1; strcpy(msg, "mark cleared"); }
+      else { mark = cur; strcpy(msg, "mark set"); }
+    }
+    else if (k == 11) { cut(lastk == 11 && cliplines); want = col_of(cur); }     // ^K
+    else if (k == 3) { copy(lastk == 3 && cliplines); want = col_of(cur); }      // ^C
+    else if (k == 21) { paste(); want = col_of(cur); }              // ^U
     else if (k == 13) { newline(); want = col_of(cur); }
     else if (k == 10) { if (!lastcr) newline(); want = col_of(cur); }
     else if (k == 127 || k == 8) { if (cur > 0) del(cur - 1); want = col_of(cur); }
@@ -297,6 +367,7 @@ int main(int argc, char **argv) {
     else if (k == K_PGUP) { i = 1; while (i < rows) { if (!up()) break; if (top > 0) top = lstart(top - 1); i++; } }
     else if (k == K_PGDN) { i = 1; while (i < rows) { if (!down()) break; if (more_below()) top = lend(top) + 1; i++; } }
     lastcr = k == 13;
+    if (k != K_NONE) lastk = k;
   }
   csi("2J"); csi("H"); csi("?1049l"); csi("?25h"); flush();
   return 0;

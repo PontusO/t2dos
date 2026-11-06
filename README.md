@@ -54,8 +54,16 @@ filesystem 7 MB. Reflashing the kernel keeps the filesystem.
 comes back when it quits.
 
     arrows Home End PgUp PgDn   move          Backspace Del Enter Tab   edit
-    ^O (or ^S)                  save          ^X (or ^C, ^Q)            quit, twice if unsaved
+    ^O (or ^S)                  save          ^X (or ^Q)                quit, twice if unsaved
     ^F                          find (Enter = next match, Esc cancels)
+    ^B                          set the mark (again: clear it)
+    ^K                          cut           ^C                        copy
+    ^U                          paste the cut or copied text at the cursor
+
+With a mark set, ^K and ^C take the text between the mark and the cursor
+(shown in reverse video). Without one they take the whole current line, and
+pressing them again right away adds the next line to the same block, so ^K^K^K
+cuts three lines and ^C^C^C copies three. ^U pastes as often as you like.
 
 Enter keeps the current line's indentation, except while text is pasted.
 Use ^O to save under `screen`: it has flow control on for serial lines, so ^S
