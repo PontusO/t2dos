@@ -55,11 +55,20 @@ Cases (spawner CASE on the board):
   sh_bg_redirect      `tick 3 50 > /tmp/t.txt &` prints only [1] tick; the file holds tick 1..3
   sh_bg_errors        `nosuch &`, `notprog.txt &`, a fifth `tick 0 1000 &` (too many jobs), the
                       help text
+  demosrv_pipe        (nested shell) `demosrv &`; `echo status > /pipe/demosrv`, `cat /pipe/demosrv.out`
+                      prints "demosrv: up N s, 1 requests"; echo hello gives hello; frob gives
+                      error: unknown command 'frob'; with the server running edit starts and
+                      quits (^Q) and the board's cc builds and runs a program; quit gives bye
+                      and the shell reports [1] done demosrv (exit 0)
+  demosrv_kill        `demosrv x &`, `kill 1`: its pipes are gone (cat /pipe/x: not found)
+  demosrv_tcp         only when the network is up (else SKIP): `demosrv -p 2323 &`, a PC socket to
+                      the board's IP reads the status line; then kill
   ctrl_c_pipe         with pecho p1 running, `cat /pipe/p1.out` blocks (no request); a Ctrl-C
                       byte ends the read, the prompt comes back and the board still answers
 """
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -70,7 +79,8 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient']
+PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv']
+SRCS = {'demosrv': os.path.join(ROOT, 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
 PCLIENT = REMOTE + '/pclient.bin'
@@ -87,7 +97,7 @@ def fail(msg):
 
 def build():
     os.makedirs(WORK, exist_ok=True)
-    jobs = [(os.path.join(WORK, p + '.bin'), os.path.join(JOBS, p + '.c')) for p in PROGS]
+    jobs = [(os.path.join(WORK, p + '.bin'), SRCS.get(p, os.path.join(JOBS, p + '.c'))) for p in PROGS]
     for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'userland', 'sh.c'))]:
         r = subprocess.run([CC, '-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
         if r.returncode != 0 or r.stdout or r.stderr:
@@ -433,6 +443,103 @@ def case_ctrl_c_pipe(r):
     return good and g2
 
 
+# ------------------------------------------------------------------ demosrv
+HELLO_C = b'int main() { printf("hi from cc\\n"); return 0; }\n'
+
+
+def demosrv_ask(r, name, text, want, secs=1.5):
+    """send text as one request to /pipe/demosrv and read the reply; want is a regex (full match)"""
+    sh_lines(r, 'echo %s > /pipe/demosrv' % text, 0.7)
+    got = sh_lines(r, 'cat /pipe/demosrv.out', secs)
+    got = [l for l in got if not l.startswith('[1] done')]
+    if len(got) != 1 or not re.match(want + '$', got[0]):
+        return fail('%s: request %r got %r, want /%s/' % (name, text, got, want))
+    return True
+
+
+def case_demosrv_pipe(r):
+    r.put(HELLO_C, REMOTE + '/hello.c')
+
+    def body():
+        n = 'demosrv_pipe'
+        good = expect(n, 'demosrv &', sh_lines(r, 'demosrv &', 1.0), ['[1] demosrv'])
+        good = demosrv_ask(r, n, 'status', r'demosrv: up \d+ s, 1 requests') and good
+        good = demosrv_ask(r, n, 'echo hello', 'hello') and good
+        good = demosrv_ask(r, n, 'frob', "error: unknown command 'frob'") and good
+        good = demosrv_ask(r, n, 'status', r'demosrv: up \d+ s, 4 requests') and good
+        # the server is running: a foreground editor and a toolchain run must behave
+        b = r.b
+        b.s.reset_input_buffer()
+        b._write(b'edit /tmp/e.txt\r')
+        time.sleep(1.0)
+        b._write(b'\x11')
+        raw = b._read(5.0, 0.5, True).decode('latin-1')
+        # the editor leaves its screen codes before the prompt: look at the end only
+        if not re.search(r'/\S*> $', raw):
+            good = fail('%s: no prompt after edit and ^Q with demosrv running (got %r)' % (n, raw[-120:]))
+        got = sh_lines(r, 'cc -o /tmp/h.bin hello.c', 20.0)
+        got = [l for l in got if not l.startswith('demosrv:')]
+        if got:
+            good = fail('%s: cc printed %r' % (n, got))
+        got = sh_lines(r, '/tmp/h.bin', 1.0)
+        if got != ['hi from cc']:
+            good = fail('%s: /tmp/h.bin printed %r' % (n, got))
+        sh_lines(r, 'echo quit > /pipe/demosrv', 0.7)
+        got = sh_lines(r, 'cat /pipe/demosrv.out', 1.5)
+        got += sh_lines(r, 'pwd', 1.0)
+        if [l for l in got if l == 'bye'] != ['bye']:
+            good = fail('%s: quit did not give bye: %r' % (n, got))
+        if got.count('[1] done demosrv (exit 0)') != 1:
+            good = fail('%s: no [1] done demosrv (exit 0) in %r' % (n, got))
+        return good
+    return in_shell(r, 'demosrv_pipe', body)
+
+
+def case_demosrv_kill(r):
+    def body():
+        n = 'demosrv_kill'
+        good = expect(n, 'demosrv x &', sh_lines(r, 'demosrv x &', 1.0), ['[1] demosrv'])
+        good = expect(n, 'kill 1', sh_lines(r, 'kill 1', 1.0), ['[1] done demosrv (exit -9)']) and good
+        good = expect(n, 'cat /pipe/x', sh_lines(r, 'cat /pipe/x', 0.7), ['cat: /pipe/x: not found']) and good
+        return good
+    return in_shell(r, 'demosrv_kill', body)
+
+
+def case_demosrv_tcp(r):
+    out, code = r.run('wifi', 10.0)
+    ip = None
+    for l in out:
+        m = re.match(r'^connected, ip (\S+)$', l.strip())
+        if m:
+            ip = m.group(1)
+    if ip is None:
+        print('SKIP demosrv_tcp: the network is not up')
+        return True
+
+    def body():
+        n = 'demosrv_tcp'
+        good = expect(n, 'demosrv -p 2323 &', sh_lines(r, 'demosrv -p 2323 &', 1.0), ['[1] demosrv'])
+        data = b''
+        try:
+            c = socket.create_connection((ip, 2323), timeout=10)
+            try:
+                c.settimeout(10)
+                while True:
+                    d = c.recv(256)
+                    if not d:
+                        break
+                    data += d
+            finally:
+                c.close()
+        except OSError as e:
+            good = fail('%s: connect to %s:2323: %s' % (n, ip, e))
+        if not re.match(r'^demosrv: up \d+ s, \d+ requests\n$', data.decode('latin-1')):
+            good = fail('%s: the connection gave %r' % (n, data))
+        sh_lines(r, 'kill 1', 1.0)
+        return good
+    return in_shell(r, 'demosrv_tcp', body)
+
+
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
@@ -443,6 +550,8 @@ CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('mkpipe_errors', case_mkpipe_errors),
          ('sh_bg_done', case_sh_bg_done), ('sh_jobs_kill', case_sh_jobs_kill),
          ('sh_bg_redirect', case_sh_bg_redirect), ('sh_bg_errors', case_sh_bg_errors),
+         ('demosrv_pipe', case_demosrv_pipe), ('demosrv_kill', case_demosrv_kill),
+         ('demosrv_tcp', case_demosrv_tcp),
          ('ctrl_c_pipe', case_ctrl_c_pipe)]   # last: on a kernel without it the board stays blocked
 
 
