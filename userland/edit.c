@@ -3,7 +3,7 @@
 // Keys: arrows, Home End PgUp PgDn, Backspace Del Enter Tab
 //       ^O save   ^X quit   ^F find (^F again, Enter: next match)   ^S also saves, ^Q also quits
 //       ^B mark (again: clear)   ^K cut   ^C copy   ^U paste
-//       With a mark, ^K and ^C take the text between the mark and the cursor; without one,
+//       With a mark, ^K and ^C take the text from the mark to the cursor, both included; without one,
 //       the current line (repeated ^K or ^C collect the following lines into one block).
 // ^O is the advertised save key: with flow control on (screen's default for serial lines)
 // the terminal swallows ^S as XOFF and freezes its output until ^Q.
@@ -81,9 +81,10 @@ int more_below() {                     // is there text below the last screen ro
   while (r < rows) { p = lend(p); if (p >= n) return 0; p++; r++; }
   return 1;
 }
-// the marked block [s, e): sel_s()/sel_e(), only while mark >= 0
+// the marked block [s, e): sel_s()/sel_e(), only while mark >= 0. Both ends are in it: the
+// character at the mark and the one under the cursor (none past the end of the text)
 int sel_s() { if (mark < cur) return mark; return cur; }
-int sel_e() { if (mark < cur) return cur; return mark; }
+int sel_e() { int e; e = mark; if (mark < cur) e = cur; if (e < len()) e++; return e; }
 int lineno() { int i; int n; n = 1; i = 0; while (i < cur) { if (at(i) == '\n') n++; i++; } return n; }
 
 // ------------------------------------------------------------------ screen

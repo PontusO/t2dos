@@ -60,8 +60,8 @@ comes back when it quits.
     ^K                          cut           ^C                        copy
     ^U                          paste the cut or copied text at the cursor
 
-With a mark set, ^K and ^C take the text between the mark and the cursor
-(shown in reverse video). Without one they take the whole current line, and
+With a mark set, ^K and ^C take the text from the mark to the cursor, both
+ends included (shown in reverse video). Without one they take the whole current line, and
 pressing them again right away adds the next line to the same block, so ^K^K^K
 cuts three lines and ^C^C^C copies three. ^U pastes as often as you like.
 
