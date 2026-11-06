@@ -513,8 +513,23 @@ def case_demosrv_tcp(r):
         if m:
             ip = m.group(1)
     if ip is None:
-        print('SKIP demosrv_tcp: the network is not up')
-        return True
+        # network down: -p must say so and carry on pipe-only
+        def down_body():
+            n = 'demosrv_tcp (network down)'
+            got = sh_lines(r, 'demosrv -p 2323 &', 1.0)
+            good = expect(n, 'demosrv -p 2323 &', got, ['[1] demosrv', 'demosrv: network is down'])
+            sh_lines(r, 'echo status > /pipe/demosrv', 0.7)
+            got = sh_lines(r, 'cat /pipe/demosrv.out', 1.5)
+            if len(got) != 1 or not re.match(r'^demosrv: up \d+ s, 1 requests$', got[0]):
+                good = fail('%s: status over the pipe got %r' % (n, got))
+            sh_lines(r, 'echo quit > /pipe/demosrv', 0.7)
+            got = sh_lines(r, 'cat /pipe/demosrv.out', 1.5) + sh_lines(r, 'pwd', 1.0)
+            if 'bye' not in got or got.count('[1] done demosrv (exit 0)') != 1:
+                good = fail('%s: quit gave %r' % (n, got))
+            return good
+        good = in_shell(r, 'demosrv_tcp', down_body)
+        print('SKIP demosrv_tcp: the network is not up (real TCP not tested)')
+        return good
 
     def body():
         n = 'demosrv_tcp'

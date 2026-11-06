@@ -31,7 +31,9 @@
 //     exits or is killed, its pipes disappear at once, with any unread data.
 //   - A message ends when its writer closes. read() returns the bytes, then 0 once
 //     at the end of the message. read() on an empty pipe waits (a switch point).
-//   - stat() on a pipe gives size = bytes waiting, so size > 0 means a read will not wait.
+//   - stat() on a pipe gives size = bytes queued and mtime = complete messages queued
+//     (pipes have no time). Bytes alone are not enough: a writer may have sent half a
+//     request and not closed yet. When mtime > 0, reading one message will not wait.
 //   - A reply is written by opening the .out pipe, writing, and closing it: one
 //     reply, one message. A client reading .out before the reply exists just waits.
 #include "sys.h"
@@ -152,7 +154,7 @@ int main(int argc, char **argv) {
       busy = 0;
       sock = accept(0);                          // 0: do not wait
       if (sock >= 0) { serve_tcp(sock); busy = 1; }
-      if (stat(inpath, &st) == 0 && st.size > 0) {   // a request is waiting: read will not block
+      if (stat(inpath, &st) == 0 && st.mtime > 0) {  // a whole request is queued: read will not block
         read_request(fd);
         quit = handle();
         busy = 1;

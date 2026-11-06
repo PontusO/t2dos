@@ -55,7 +55,8 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
 // jobs(buf, max) fills this
 struct job_t { int id; int state; int exit_code; char name[32]; };
-// stat() fills this
+// stat() fills this. For a /pipe/ file, size is the bytes queued and mtime (pipes have no time) is the
+// number of complete messages queued: when mtime > 0 a read of the next message will not wait
 struct stat_t { int size; int isdir; int mtime; };
 // readdir() fills this
 struct dirent_t { char name[64]; int size; int isdir; };

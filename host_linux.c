@@ -191,7 +191,7 @@ int sys(int num, int n, int *argv) {
     case SYS_seek: return lseek(A(0), A(1), A(2));
     case SYS_stat: { const char *in = (const char *)A(0);
       { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
-        struct stat_t *o = (struct stat_t *)A(1); o->size = pipes[i].count; o->isdir = 0; o->mtime = 0; return 0; } }
+        struct stat_t *o = (struct stat_t *)A(1); o->size = pipes[i].count; o->isdir = 0; o->mtime = pipes[i].nbounds; /* pipes have no time: mtime = complete messages queued */ return 0; } }
       struct stat st; if (stat(hostpath((char *)A(0), p1), &st)) return -1;
       struct stat_t *o = (struct stat_t *)A(1); o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = st.st_mtime; return 0; }
     case SYS_unlink: { const char *in = (char *)A(0);

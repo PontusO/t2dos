@@ -424,7 +424,7 @@ extern "C" int sys(int num, int n, int *argv) {
       fds[fd].seek(A(1), A(2) == SEEK_BEGIN ? SeekSet : A(2) == SEEK_CURRENT ? SeekCur : SeekEnd); return fds[fd].position(); }
     case SYS_stat: { char path[160]; resolve((const char *)A(0), path, sizeof path);
       if (const char *pn = pipe_name(path)) { int i = find_pipe(pn); if (i < 0) return -1;
-        stat_t *st = (stat_t *)A(1); st->size = pipes[i].count; st->isdir = 0; st->mtime = 0; return 0; }
+        stat_t *st = (stat_t *)A(1); st->size = pipes[i].count; st->isdir = 0; st->mtime = pipes[i].nbounds; /* pipes have no time: mtime = complete messages queued */ return 0; }
       File f = fsys->open(path, "r"); if (!f) return -1;
       stat_t *st = (stat_t *)A(1); st->size = f.size(); st->isdir = f.isDirectory(); st->mtime = f.getLastWrite(); f.close(); return 0; }
     case SYS_unlink: { char path[160]; resolve((const char *)A(0), path, sizeof path);
