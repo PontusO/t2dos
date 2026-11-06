@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Check background jobs on the board: spawn, yield, jobs, kill and cooperative switching.
+
+The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
+hog (getchar() forever) and spawner (the foreground driver: `spawner CASE` prints one
+"ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
+
+  check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
+                          compiler/cc (PC only, no board)
+  check_jobs.py --board   --build, upload the programs to /src/jobs/ and sh.bin to /bin/,
+                          record `free`, run every case, then `free` must show the same
+                          free PSRAM as before the first case
+
+Cases (spawner CASE on the board):
+  spawn_basic         spawn `tick 3 100`, sleep 1000: jobs() has one entry, done, exit 7,
+                      named tick; a second jobs() returns 0; tick 1..3 appear on the console
+  spawn_errors        /nosuch.bin gives SPAWN_NOTFOUND, a non-T2CC file SPAWN_BADPROG; four
+                      `tick 0 1000` run, the fifth gives SPAWN_FULL; kill of each returns 0,
+                      a second kill -1; jobs() reports four done with JOB_KILLED
+  kill_sleeping       spawn `tick 0 5000`, kill it inside its sleep: 0, done with JOB_KILLED
+  kill_getchar        spawn hog (blocked in getchar in the background); the foreground still
+                      reads the line this script types; kill of the hog returns 0
+  redirect_isolation  spawn `tick 3 100`, the foreground redirects to /tmp/r.txt and writes
+                      "fg" while sleeping 500: the file holds exactly "fg", the ticks are on
+                      the console
+  fg_exec_with_job    with `tick 0 300` running, the board's cc builds the tests/toolchain
+                      case `globals` (cc execs as and ld), its output equals globals.expected;
+                      a nested foreground `tick 2 400` returns 7; then kill the tick
+"""
+import os
+import re
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+JOBS = os.path.join(ROOT, 'tests', 'jobs')
+TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
+WORK = os.path.join(ROOT, 'build', 'jobs')
+CC = os.path.join(ROOT, 'compiler', 'cc')
+PROGS = ['tick', 'hog', 'spawner']
+REMOTE = '/src/jobs'
+SPAWNER = REMOTE + '/spawner.bin'
+EXEC_CASE = 'globals'                      # the tests/toolchain case fg_exec_with_job builds
+EXEC_SRCS = ['globals_a.c', 'globals_b.c']
+TICK_RE = re.compile(r'^tick \d+$')
+FREE_RE = re.compile(r'^psram\s+\d+ bytes, (\d+) free$')
+
+
+def fail(msg):
+    print('FAIL ' + msg)
+    return False
+
+
+def build():
+    os.makedirs(WORK, exist_ok=True)
+    jobs = [(os.path.join(WORK, p + '.bin'), os.path.join(JOBS, p + '.c')) for p in PROGS]
+    for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'userland', 'sh.c'))]:
+        r = subprocess.run([CC, '-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
+        if r.returncode != 0 or r.stdout or r.stderr:
+            return fail('cc %s: exit %d, %r' % (os.path.relpath(src, ROOT), r.returncode, r.stdout + r.stderr))
+    print('ok: built %s and root/bin/sh.bin' % ', '.join(p + '.bin' for p in PROGS))
+    return True
+
+
+# ------------------------------------------------------------------ board
+def split(lines):
+    """the job's tick lines and the rest"""
+    ticks = [l for l in lines if TICK_RE.match(l)]
+    rest = [l for l in lines if not TICK_RE.match(l)]
+    return ticks, rest
+
+
+def verdict(name, lines, code):
+    """spawner's own checks: no FAIL line, PASS last, exit 0"""
+    ticks, rest = split(lines)
+    good = code == 0 and rest and rest[-1] == 'PASS' and not any(l.startswith('FAIL') for l in rest)
+    if not good:
+        fail('%s: spawner exit %d, output:' % (name, code))
+        for l in lines:
+            print('    ' + l)
+    return bool(good), ticks, rest
+
+
+def ticks_in_order(name, ticks, n):
+    want = ['tick %d' % k for k in range(1, n + 1)]
+    if ticks != want:
+        return fail('%s: console ticks %r, want %r' % (name, ticks, want))
+    return True
+
+
+def psram_free(r):
+    out, code = r.run('free', 10.0)
+    for l in out:
+        m = FREE_RE.match(l.strip())
+        if m:
+            return int(m.group(1))
+    raise r.board.BoardError('free: no psram line in %r' % out)
+
+
+def run_typing(r, cmd, wait_for, text, wait=30.0):
+    """run cmd, type text once wait_for appears on a line; return (lines, exit code) like Remote.run"""
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(cmd.encode() + b'\r')
+    raw = b''
+    start = time.time()
+    typed = False
+    while time.time() - start < wait:
+        d = b.s.read(65536)
+        raw += d
+        txt = raw.decode('latin-1').replace('\r', '\n')
+        if not typed and ('\n' + wait_for + '\n') in txt:
+            b._write(text.encode() + b'\r')
+            typed = True
+        last = txt.split('\n')[-1]
+        if not d and r.board.PROMPT_RE.match(last) and len(txt.split('\n')) > 1:
+            break
+    raw = raw.decode('latin-1')
+    lines = [l.rstrip() for l in raw.replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+    if not lines or not lines[0].strip().endswith(cmd.strip()) or not r.board.PROMPT_RE.match(lines[-1]):
+        raise r.board.BoardError('no answer from the board: it may have hung, reset it (got %r)' % raw[-120:])
+    out = []
+    code = 0
+    for l in lines[1:]:
+        if r.board.PROMPT_RE.match(l):
+            continue
+        if r.board.EXIT_RE.match(l):
+            code = int(l[6:].split(',')[0])
+            continue
+        out.append(l)
+    while out and not out[-1]:
+        out.pop()
+    if not typed:
+        out.append('(the script never saw %r, so it typed nothing)' % wait_for)
+    return out, code
+
+
+def case_spawn_basic(r):
+    out, code = r.run(SPAWNER + ' basic', 30.0)
+    good, ticks, rest = verdict('spawn_basic', out, code)
+    return ticks_in_order('spawn_basic', ticks, 3) and good
+
+
+def case_spawn_errors(r):
+    out, code = r.run(SPAWNER + ' errors', 60.0)
+    good, ticks, rest = verdict('spawn_errors', out, code)
+    return good
+
+
+def case_kill_sleeping(r):
+    out, code = r.run(SPAWNER + ' sleeping', 30.0)
+    good, ticks, rest = verdict('kill_sleeping', out, code)
+    if ticks:
+        good = fail('kill_sleeping: the killed job printed %r' % ticks)
+    return good
+
+
+def case_kill_getchar(r):
+    out, code = run_typing(r, SPAWNER + ' getchar', 'ready', 'hello jobs')
+    good, ticks, rest = verdict('kill_getchar', out, code)
+    return good
+
+
+def case_redirect_isolation(r):
+    out, code = r.run(SPAWNER + ' redirect', 30.0)
+    good, ticks, rest = verdict('redirect_isolation', out, code)
+    return ticks_in_order('redirect_isolation', ticks, 3) and good
+
+
+def case_fg_exec_with_job(r):
+    d = '%s/%s' % (REMOTE, EXEC_CASE)
+    r.run('mkdir ' + d, 10.0)
+    for s in EXEC_SRCS:
+        r.put(os.path.join(TOOLCHAIN, s), '%s/%s' % (d, s))
+    r.run('cd ' + d, 10.0)
+    try:
+        out, code = r.run(SPAWNER + ' exec', 300.0)
+    finally:
+        r.run('cd /', 10.0)
+    good, ticks, rest = verdict('fg_exec_with_job', out, code)
+    want = open(os.path.join(TOOLCHAIN, EXEC_CASE + '.expected')).read().rstrip('\n').split('\n')
+    try:
+        i = next(k for k, l in enumerate(rest) if l.startswith('ok cc ='))
+        got = rest[i + 1:i + 1 + len(want)]
+    except StopIteration:
+        got = []
+    if got != want:
+        good = fail('fg_exec_with_job: %s.bin printed %r, want %r' % (EXEC_CASE, got, want))
+    if len(ticks) < 2:
+        good = fail('fg_exec_with_job: only %d tick lines (the job and the nested tick both print)' % len(ticks))
+    return good
+
+
+CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
+         ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
+         ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job)]
+
+
+def check_board():
+    from check_toolchain import Remote
+    r = Remote()
+    for d in ('/src', REMOTE, '/tmp'):
+        r.run('mkdir ' + d, 10.0)
+    for p in PROGS:
+        r.put(os.path.join(WORK, p + '.bin'), '%s/%s.bin' % (REMOTE, p))
+    r.put(b'not a T2CC program\n', REMOTE + '/notprog.txt')
+    r.put(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), '/bin/sh.bin')
+    before = psram_free(r)
+    print('free PSRAM before: %d' % before)
+    ok = True
+    for name, fn in CASES:
+        try:
+            good = fn(r)
+        except r.board.BoardError as e:
+            good = fail('%s: %s' % (name, e))
+            print('%s %s' % ('FAIL', name))
+            return False
+        print('%s %s' % ('PASS' if good else 'FAIL', name))
+        ok = ok and good
+    after = psram_free(r)
+    if after != before:
+        ok = fail('free PSRAM %d after the cases, %d before' % (after, before))
+    else:
+        print('ok free PSRAM after: %d (equal)' % after)
+    return ok
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] in ('--build', '--board'):
+        if not build():
+            return 1
+        if argv[1] == '--build':
+            return 0
+        try:
+            ok = check_board()
+        except Exception as e:
+            print('check_jobs.py: %s' % e)
+            return 1
+        print('%s: board' % ('ok' if ok else 'FAILED'))
+        return 0 if ok else 1
+    print(__doc__.strip())
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
