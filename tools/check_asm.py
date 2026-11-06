@@ -235,7 +235,7 @@ def build_corpus():
     bins = sorted(glob.glob(os.path.join(ROOT, 'root', 'bin', '*.bin')))
     for t in sorted(glob.glob(os.path.join(ROOT, 'compiler', 'tests', '*.c'))):
         base = os.path.join(out, os.path.basename(t)[:-2])
-        for cmd in ([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-I', os.path.dirname(t), '-o', base + '.s', t],
+        for cmd in ([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data', '-I', os.path.dirname(t), '-o', base + '.s', t],
                     [os.path.join(ROOT, 'build', 'host', 'as'), '-o', base + '.o', base + '.s'],
                     [os.path.join(ROOT, 'build', 'host', 'ld'), '-o', base + '.bin', base + '.o']):
             r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)

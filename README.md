@@ -103,7 +103,7 @@ runs `build/host/as` and `build/host/ld` (or the ones in the directory named by
 `$T2_TOOLS`). Intermediate files go to `/tmp` (created when missing) and are
 removed again, also after an error. Every tool is silent on success.
 
-    cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
+    cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
 
 - Inputs by suffix: `.c` is compiled and assembled, `.s` assembled, `.o` and
   `.a` go to `ld` as they are, all in command-line order; `-l` archives come last.
@@ -111,6 +111,8 @@ removed again, also after an error. Every tool is silent on success.
 - `-c` stops at objects, `-S` at assembly (`.c` inputs only). Each output is the
   input's base name with `.o` or `.s`, in the current directory; `-o` names it
   when there is exactly one input.
+- `-mshort-data` makes `-S`/`-c` output use the short data references, as if
+  the file's data came first in the program (see "Data references" below).
 - `-l name` links `libname.a`, searched in each `-L dir` in order, then the
   current directory, then `/lib`. `-lname` and `-Ldir` work too.
 - `-I dir` adds an include directory (`#include "file"` also searches the
@@ -144,18 +146,23 @@ symbol: f (in x.o)`). Examples:
     cc -c sq.c cube.c; ar rc libm2.a sq.o cube.o      a library ...
     cc -o p.bin p.c -L . -l m2                        ... and a program using it
 
-Data limit across files: `cc` addresses a global of its own file with the
-short `addw r0, r9, #name` while the global's offset in that file's data is
-below 4 KB (strings likewise). `ld` puts the files' data one after the other,
-so after linking that offset grows by the data of every earlier file and must
-still be below 4096. When it is not, `ld` stops with
+Data references: code reaches a global as `r9` plus the global's offset in the
+program's data, and `cc` picks the smallest instruction form that reaches it:
+`addw r0, r9, #name` (4 bytes) below 4 KB, `movw.16` and `add.w` (8 bytes)
+below 64 KB, `movw`, `movt` and `add.w` (12 bytes) above that. When `cc` builds
+the whole program, it knows where `ld` will put each file's data (after the data
+of the files before it; libraries come after all of them), so every file gets
+the short form where it fits, and a single-file program is the same as before.
+With `-S` or `-c`, `cc` cannot know what comes before the file in the link, so
+it uses the 12-byte form for every data reference. `-mshort-data` compiles as
+if the file's data came first, which is right for the first object of a
+program. If that guess is wrong, `ld` stops instead of producing a broken
+program:
 
-    ld: data offset of counter (/tmp/cc3f2a_2_main.o) is 5000, too far for addw
+    ld: data offset of counter (main.o) is 5000, too far for addw
 
-(the global, and the temporary object named after the source that refers to
-it). Put the files with big data last, or keep big buffers in the last file:
-`cc -o p.bin main.c big.c`, not `cc -o p.bin big.c main.c`, when big.c has
-`char buf[5000];`.
+(the global, and the object that refers to it). References to `extern`
+variables always use the 12-byte form.
 
 C and assembly call each other with cc's convention: the arguments on the
 stack, the first one deepest, popped by the caller; the result in r0. Keep

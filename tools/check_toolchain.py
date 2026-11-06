@@ -54,6 +54,8 @@ CASES = [
       ['cc', '-o', 'names.bin', 'names.c', 'nl.o']]),
     ('datalimit', ['datalimit_main.c', 'datalimit_big.c'],
      [['cc', '-o', 'datalimit.bin', 'datalimit_main.c', 'datalimit_big.c']]),
+    ('datalimit_rev', ['datalimit_big.c', 'datalimit_main.c'],
+     [['cc', '-o', 'datalimit_rev.bin', 'datalimit_big.c', 'datalimit_main.c']]),
     ('lib_use', ['lib_use.c', 'lib_square.c', 'lib_cube.c'],
      [['cc', '-c', 'lib_square.c', 'lib_cube.c'],
       ['mkdir', 'lib'],
@@ -137,21 +139,26 @@ def check_symbols():
     os.makedirs(wd)
     for src, want in sorted(SYMBOLS.items()):
         shutil.copyfile(os.path.join(TESTS, src), os.path.join(wd, src))
-        code, out = run(['cc', '-c', src], wd)
+        code, out = run(['cc', '-c', '-mshort-data', src], wd)
         if code != 0 or out:
             ok = fail('symbols %s: cc -c exit %d, %r' % (src, code, out))
             continue
         got = nm_syms(os.path.join(wd, src[:-2] + '.o'))
         if not want <= got:
             ok = fail('symbols %s: missing %r (nm has %r)' % (src, sorted(want - got), sorted(got)))
-    # extern references are movw/movt pairs to the symbol; the reference to late after its
-    # definition is the normal addw .Ldata+N (a .data section relocation)
+    # extern references are movw/movt pairs to the symbol; with -mshort-data the reference to
+    # late after its definition is the short addw form
     r = subprocess.run([OBJDUMP, os.path.join(wd, 'globals_a.o')], capture_output=True, text=True).stdout
     for sym, n in (('counter', None), ('late', 1)):      # None: at least one
         for kind in ('R_DATA_MOVW', 'R_DATA_MOVT'):
             k = len(re.findall(r'\b%s %s\+0\b' % (kind, sym), r))
             if (n is None and k < 1) or (n is not None and k != n):
                 ok = fail('globals_a.o: %d %s relocations to %s, want %s' % (k, kind, sym, n or 'some'))
+    # without -mshort-data, -c cannot know where the data lands: every data reference is movw/movt
+    code, out = run(['cc', '-c', '-o', 'ga_long.o', 'globals_a.c'], wd)
+    r = subprocess.run([OBJDUMP, os.path.join(wd, 'ga_long.o')], capture_output=True, text=True).stdout
+    if code != 0 or re.search(r'\bR_DATA_(ADDW|MOVW16)\b', r) or not re.search(r'\bR_DATA_MOVT late\+0\b', r):
+        ok = fail('globals_a.o without -mshort-data: data references are not all movw/movt')
     code, out = run(['cc', '-S', '-o', 'ga.s', 'globals_a.c'], wd)
     asm = open(os.path.join(wd, 'ga.s')).read() if code == 0 else ''
     if '#:lower16:counter' not in asm or '#:upper16:counter' not in asm or 'add.w\tr0, r9, r1' not in asm:
@@ -163,7 +170,7 @@ def check_lib():
     """only lib_square.o of libtc.a is linked: the code size is lib_use.o + lib_square.o"""
     from check_link import layout
     wd = os.path.join(WORK, 'lib_use')
-    code, out = run(['cc', '-c', 'lib_use.c'], wd)
+    code, out = run(['cc', '-c', '-mshort-data', 'lib_use.c'], wd)   # first object: as cc lib_use.c
     if code != 0 or out:
         return fail('lib_use: cc -c lib_use.c: %r' % out)
     hdr, good = bin_header(os.path.join(wd, 'lib_use.bin'))
@@ -221,7 +228,7 @@ def check_driver_pc():
             return fail('driver %s: exit %d, output %r, want exit %d, %r' % (' '.join(cmd), code, out, status, want))
         return True
 
-    usage = ('usage: cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] '
+    usage = ('usage: cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] '
              'file.c|file.s|file.o|file.a...\n')
     ok = expect(['cc'], usage, 1) and ok
     ok = expect(['cc', 'notes.txt'], 'cc: notes.txt: unknown file type\n', 1) and ok
@@ -257,13 +264,16 @@ def check_driver_pc():
                 'fake as: -o /tmp/ccXXXX_1_lib_square.o /tmp/ccXXXX_1_lib_square.s\n', 3, wd, env) and ok
     if tmp_files() - before:
         ok = fail('driver: temporary files left after a failing as: %r' % sorted(tmp_files() - before))
-    # the data limit (README): the big data first pushes the other file's addw reference past 4095;
-    # ld names the global and the temporary object named after its source, and no .bin is left
+    # the data limit (README): cc picks each reference's form from where ld puts the data, so the
+    # big data first still links (the datalimit_rev case runs it). An object compiled with
+    # -mshort-data and linked after it has an addw past 4095: ld names the global and the
+    # object, and no .bin is left
     for s in ('datalimit_main.c', 'datalimit_big.c'):
         shutil.copyfile(os.path.join(TESTS, s), os.path.join(wd, s))
+    ok = expect(['cc', '-c', '-mshort-data', 'datalimit_main.c'], '', 0) and ok
     open(os.path.join(wd, 'dl.bin'), 'w').write('an older output\n')
-    ok = expect(['cc', '-o', 'dl.bin', 'datalimit_big.c', 'datalimit_main.c'],
-                'ld: data offset of counter (/tmp/ccXXXX_2_datalimit_main.o) is 5000, too far for addw\n', 1) and ok
+    ok = expect(['cc', '-o', 'dl.bin', 'datalimit_big.c', 'datalimit_main.o'],
+                'ld: data offset of counter (datalimit_main.o) is 5000, too far for addw\n', 1) and ok
     if os.path.exists(os.path.join(wd, 'dl.bin')):
         ok = fail('driver: dl.bin is still there after the ld error')
     return ok

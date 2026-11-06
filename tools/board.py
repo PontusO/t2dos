@@ -135,7 +135,7 @@ class Board:
         binp = os.path.join(bdir, name + '.bin')
         asm = os.path.join(bdir, name + '.s')
         obj = os.path.join(bdir, name + '.o')
-        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S'] + flags.split() + ['-o', asm, test_c], check=True)
+        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data'] + flags.split() + ['-o', asm, test_c], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', obj, asm], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'ld'), '-o', binp, obj], check=True)
         self.put(binp, '/src/%s.bin' % name)

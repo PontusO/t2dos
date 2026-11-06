@@ -1,5 +1,6 @@
-// the data limit across files (README, Toolchain): linked after a file with 5000 bytes of data,
-// this file's addw reference to counter would be past 4095; linked first (as here) it works
+// the data limit across files (README, Toolchain): cc gives counter's reference the form that
+// reaches its linked offset, so this links before (datalimit) and after (datalimit_rev) the 5000
+// bytes of datalimit_big.c; only an object built with -mshort-data and linked after it fails
 int counter;
 int fill();
 int unused_proto(int x);

@@ -2,7 +2,7 @@
 // (RP2350). Written in the subset of C it compiles, so it can build itself.
 //
 // Build on a PC as a cross compiler:   gcc -O2 -I . -o compiler/cc compiler/cc.c   (from the repo root)
-// Use:  cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
+// Use:  cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
 //   cc compiles each .c to assembly itself, then runs as on it and ld on all the objects
 //   (/bin/as.bin and /bin/ld.bin on the board; on the PC build/host/as and build/host/ld,
 //   or the ones in $T2_TOOLS). -S stops at the .s, -c at the .o; else the output is a .bin.
@@ -240,11 +240,18 @@ int ldref(struct Sym *s, int n) {
   else { ls(".Ldata+"); ls(dec(n)); }
   return 0;
 }
+// Where this file's data lands in the linked program, set by the driver before compile():
+// dbase is the data offset ld will give it (the data of the objects before it, each aligned
+// to 4, as ld lays them out), and dlong is 1 when that is unknown (-S and -c without
+// -mshort-data: the object may be linked after any amount of data).
+int dbase; int dlong;
 // r0 = r9 + off (the data offset in this file): s + n, s a global of this file at off - n, or
-// .Ldata + off when s is 0. The form depends on off, so it is the same whatever ld adds.
+// .Ldata + off when s is 0. The form is the smallest that fits the linked offset dbase + off;
+// ld still checks it.
 int lea_data(struct Sym *s, int n, int off) {
-  if (off < 4096) { lnew(L_INS); ls("addw\tr0, r9, #"); ldref(s, n); lend(); return 0; }
-  if (off < 65536) { lnew(L_INS); ls("movw.16\tr1, #"); ldref(s, n); lend(); }
+  if (!dlong) off = dbase + off;
+  if (!dlong && off < 4096) { lnew(L_INS); ls("addw\tr0, r9, #"); ldref(s, n); lend(); return 0; }
+  if (!dlong && off < 65536) { lnew(L_INS); ls("movw.16\tr1, #"); ldref(s, n); lend(); }
   else {
     lnew(L_INS); ls("movw\tr1, #:lower16:"); ldref(s, n); lend();
     lnew(L_INS); ls("movt\tr1, #:upper16:"); ldref(s, n); lend();
@@ -2074,6 +2081,20 @@ int assemble(char *src, char *obj) {
   return 0;
 }
 int exists(char *path) { int fd; fd = open(path, 0, 0); if (fd < 0) return 0; close(fd); return 1; }
+// the data size in the header of the object obj (t2obj_hdr.data_size, bytes 12..15);
+// 0 if it cannot be read (ld then reports the file)
+int objdsize(char *obj) {
+  int fd; int v; char *b;
+  b = malloc(16); memset(b, 0, 16); v = 0;
+  fd = open(obj, 0, 0);
+  if (fd >= 0) {
+    if (read(fd, b, 16) == 16) v = (b[12] & 255) | ((b[13] & 255) << 8) | ((b[14] & 255) << 16) | ((b[15] & 255) << 24);
+    close(fd);
+  }
+  free(b);
+  if (v < 0) v = 0;
+  return v;
+}
 // libNAME.a in the -L directories, the current directory, /lib; 0 if not found
 char *findlib(char *name, char **ldirs, int nldir) {
   char *path; int i;
@@ -2092,12 +2113,13 @@ char *findlib(char *name, char **ldirs, int nldir) {
 
 int main(int argc, char **argv) {
   int i; int mode; int nin; char **in; int nlib; char **libs; char **ldirs; int nldir; char *a; char *dn; char *dv;
-  char *out; char *s; char *o; char **av; int nav; int r;
+  char *out; char *s; char *o; char **av; int nav; int r; int shortdata; int dend;
   ofd = -1; outname = 0; incdir = 0; ntmp = 0; ntmpn = 0; out = 0;
   in = malloc(64 * sizeof(char *)); libs = malloc(64 * sizeof(char *)); ldirs = malloc(64 * sizeof(char *));
   dnames = malloc(64 * sizeof(char *)); dvals = malloc(64 * sizeof(char *));
   tmpf = malloc(160 * sizeof(char *)); nin = 0; nlib = 0; nldir = 0; ndefs = 0;
   mode = 0;                                     // 0: link a .bin, 1: -c, 2: -S
+  shortdata = 0; dbase = 0; dlong = 0;
   i = 1;
   while (i < argc) {
     a = argv[i];
@@ -2108,6 +2130,7 @@ int main(int argc, char **argv) {
     if (!strcmp(a, "-o")) { out = argv[i + 1]; i = i + 2; }
     else if (!strcmp(a, "-S")) { mode = 2; i = i + 1; }
     else if (!strcmp(a, "-c")) { if (mode != 2) mode = 1; i = i + 1; }
+    else if (!strcmp(a, "-mshort-data")) { shortdata = 1; i = i + 1; }
     else if (!strcmp(a, "-I")) { incdir = argv[i + 1]; i = i + 2; }
     else if (!strcmp(a, "-D")) {                // a copy: every compile() defines it again
       dn = malloc(strlen(argv[i + 1]) + 1); strcpy(dn, argv[i + 1]); dv = strchr(dn, '=');
@@ -2121,7 +2144,7 @@ int main(int argc, char **argv) {
     else if (a[0] == '-') { printf("cc: unknown option %s\n", a); return 1; }
     else { in[nin] = a; nin = nin + 1; i = i + 1; }
   }
-  if (!nin) { printf("usage: cc [-o out] [-S|-c] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...\n"); return 1; }
+  if (!nin) { printf("usage: cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...\n"); return 1; }
   i = 0;
   while (i < nin) {
     s = in[i];
@@ -2133,6 +2156,7 @@ int main(int argc, char **argv) {
   if (mode == 1 && out && nin != 1) { printf("cc: -o with -c needs exactly one input\n"); return 1; }
   if (mode == 2 && out && nin != 1) { printf("cc: -o with -S needs exactly one input\n"); return 1; }
   init_tools(argv[0]);
+  if (mode && !shortdata) dlong = 1;            // -S, -c: where the data lands is unknown
   tmppre = malloc(32); sprintf(tmppre, "/tmp/cc%x_", tmp_id() & 65535);
 
   if (mode == 2) {                              // -S: NAME.s, or out
@@ -2159,11 +2183,15 @@ int main(int argc, char **argv) {
     if (!s) { printf("cc: library %s not found\n", libs[i]); return 1; }
     libs[i] = s; i = i + 1;
   }
-  i = 0;
+  // each file's data goes where ld puts it: after the data of the objects before it, aligned
+  // to 4 when it has any; archive members come after all objects, so .a inputs move nothing
+  i = 0; dend = 0;
   while (i < nin) {
     s = in[i];
+    dbase = (dend + 3) & -4;
     if (endswith(s, ".c")) { o = newtmp(in[i], i + 1, "s"); compile(s, o); s = o; }
     if (endswith(s, ".s")) { o = newtmp(in[i], i + 1, "o"); assemble(s, o); s = o; }
+    if (endswith(s, ".o")) { r = objdsize(s); if (r > 0) dend = dbase + r; }
     av[nav] = s; nav = nav + 1;
     i = i + 1;
   }
