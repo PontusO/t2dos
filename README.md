@@ -238,7 +238,12 @@ Rules for jobs:
   /src> beat &
   too many jobs
   ```
-- A job inherits the current directory. `cmd > file &` and `cmd >> file &`
+- After `&` the shell lets the new job run until it first waits (a `sleep`,
+  a read of an empty pipe, ...) and only then reads the next command. So
+  whatever the job creates before that, such as a server's pipes, is there
+  for the next line, also in a script.
+- A job inherits the current directory; a `cd` inside the job changes only
+  the job's. `cmd > file &` and `cmd >> file &`
   send the job's output to the file, which stays open until the job ends:
 
   ```
@@ -509,11 +514,10 @@ bye
 
 The `demosrv: ...` lines are the server's log, printed on the console when it
 handles a request (the shell does not redraw its prompt after them, so just
-type the next command). The job needs a moment after `&` to make its pipes (it
-starts as soon as the shell waits for your next key), so type the first
-request by hand rather than in the same breath. `cat` on the reply pipe waits
-until the reply exists; if you read before sending a request, press Ctrl-C to
-give up. `quit` ends the server; it lets the client read the reply first.
+type the next command). The pipes exist once `[1] demosrv` is printed, so the
+first request can follow at once, also on the next line of a script. `cat` on
+the reply pipe waits until the reply exists; if you read before sending a
+request, press Ctrl-C to give up. `quit` ends the server; it lets the client read the reply first.
 `kill N` also works, but then any unread reply is lost.
 
 With `-p port` the server also answers each TCP connection on that port with
@@ -815,12 +819,18 @@ like any program; with `> file &` its output goes to the file instead.
 
 A server follows three steps, as `userland/demosrv.c` shows:
 
-1. Create the resources first: the pipes (`mkpipe`), a `listen` socket, and
-   open what you will read. If one fails, print why and return.
+1. Create the resources first, before the first call that waits: the pipes
+   (`mkpipe`), a `listen` socket, and open what you will read. The shell runs
+   a new job until its first wait before it takes the next command, so what
+   exists by then is there for the next line of a script. If one fails, print
+   why and return.
 2. Loop: wait for work, handle it, reply. When the program waits on two
    things at once (a pipe and a socket), no single call can wait for both, so
    check each without waiting (`accept(0)`, `stat` on the pipe) and call
-   `yield()` when neither had anything.
+   `yield()` when neither had anything. `accept` returns a socket fd (100 and
+   up) for a connection, 0 when nobody connected in time (always for
+   `accept(0)` with no one waiting) and -1 without a listener, so test
+   `sock > 0`.
 3. Leave cleanly. A program's pipes disappear the moment it exits, with any
    unread data, so wait until the client has read the last reply.
 
@@ -853,7 +863,8 @@ How pipes behave:
 - **Waiting.** `read` of an empty pipe waits for a writer, and `write` to a
   full pipe waits for a reader. Both are switch points, so other tasks run
   meanwhile. In a foreground program, Ctrl-C ends the wait: `read` returns 0
-  and `write` returns -1.
+  and `write` returns -1. This works also when other keys were typed before
+  the Ctrl-C; those keys are kept for the program (up to 64 of them).
 - **Size.** A pipe buffers 512 bytes. A longer message goes through in pieces
   as the reader consumes it. At most 8 pipes exist at a time. Two writers
   that write at the same time interleave their bytes, so give each pipe one

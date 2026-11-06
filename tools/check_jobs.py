@@ -2,6 +2,7 @@
 """Check background jobs on the board: spawn, yield, jobs, kill and cooperative switching.
 
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
+exectick (`exectick DIR`: chdir DIR, print "exectick cwd DIR", then exec `tick 0 1000`),
 hog (getchar() forever), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
 The pipe cases use pecho (`pecho NAME` makes /pipe/NAME and /pipe/NAME.out and answers each
@@ -63,8 +64,17 @@ Cases (spawner CASE on the board):
   demosrv_kill        `demosrv x &`, `kill 1`: its pipes are gone (cat /pipe/x: not found)
   demosrv_tcp         only when the network is up (else SKIP): `demosrv -p 2323 &`, a PC socket to
                       the board's IP reads the status line; then kill
+  sh_script_spawn     (nested shell) `sh srv.sh`, a script of `demosrv &`, `echo status >
+                      /pipe/demosrv`, `cat /pipe/demosrv.out`: the shell runs a new job to its
+                      first wait before the next line, so the status line comes back; then quit
+  job_exec_kill       (nested shell) `exectick /tmp &`: the job's cd does not move the
+                      foreground (pwd is still /src/jobs); kill 1 while the job is one exec level
+                      down (in tick's sleep) reports [1] done exectick (exit -9), and free PSRAM
+                      equals the value before the spawn
   ctrl_c_pipe         with pecho p1 running, `cat /pipe/p1.out` blocks (no request); a Ctrl-C
-                      byte ends the read, the prompt comes back and the board still answers
+                      byte ends the read, the prompt comes back and the board still answers;
+                      then the same with a CR typed before the Ctrl-C (the CR is kept and
+                      read by the shell as an empty line)
 """
 import os
 import re
@@ -79,7 +89,7 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv']
+PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick']
 SRCS = {'demosrv': os.path.join(ROOT, 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
@@ -425,20 +435,25 @@ def case_sh_bg_errors(r):
 def case_ctrl_c_pipe(r):
     good, rest = pclient(r, 'ctrl_c_pipe', 'start p1')
     b = r.b
-    b.s.reset_input_buffer()
-    b._write(b'cat /pipe/p1.out\r')
-    raw = b._read(1.5, 1.5).decode('latin-1')
-    last = raw.replace('\r', '\n').split('\n')[-1]
-    if r.board.PROMPT_RE.match(last):
-        good = fail('ctrl_c_pipe: cat /pipe/p1.out did not block (got %r)' % raw)
-    b._write(b'\x03')
-    raw = b._read(5.0, 0.3, True).decode('latin-1')
-    last = raw.replace('\r', '\n').split('\n')[-1]
-    if not r.board.PROMPT_RE.match(last):
-        return fail('ctrl_c_pipe: no prompt after Ctrl-C (got %r); the board needs a reset' % raw)
-    out, code = r.run('pwd', 10.0)
-    if out != ['/'] or code:
-        good = fail('ctrl_c_pipe: pwd printed %r, exit %d' % (out, code))
+    for before in (b'', b'\r'):
+        what = 'Ctrl-C' if not before else '%r then Ctrl-C' % before.decode()
+        b.s.reset_input_buffer()
+        b._write(b'cat /pipe/p1.out\r')
+        raw = b._read(1.5, 1.5).decode('latin-1')
+        last = raw.replace('\r', '\n').split('\n')[-1]
+        if r.board.PROMPT_RE.match(last):
+            good = fail('ctrl_c_pipe: cat /pipe/p1.out did not block (got %r)' % raw)
+        if before:
+            b._write(before)               # pending ahead of the Ctrl-C: fg_break must look past it
+            time.sleep(0.5)
+        b._write(b'\x03')
+        raw = b._read(5.0, 0.5, True).decode('latin-1')
+        last = raw.replace('\r', '\n').split('\n')[-1]
+        if not r.board.PROMPT_RE.match(last):
+            return fail('ctrl_c_pipe: no prompt after %s (got %r); the board needs a reset' % (what, raw))
+        out, code = r.run('pwd', 10.0)
+        if out != ['/'] or code:
+            good = fail('ctrl_c_pipe: after %s, pwd printed %r, exit %d' % (what, out, code))
     g2, rest = pclient(r, 'ctrl_c_pipe', 'finish p1')
     return good and g2
 
@@ -555,6 +570,46 @@ def case_demosrv_tcp(r):
     return in_shell(r, 'demosrv_tcp', body)
 
 
+SRV_SH = b'demosrv &\necho status > /pipe/demosrv\ncat /pipe/demosrv.out\n'
+
+
+def case_sh_script_spawn(r):
+    r.put(SRV_SH, REMOTE + '/srv.sh')
+
+    def body():
+        n = 'sh_script_spawn'
+        got = sh_lines(r, 'sh srv.sh', 3.0)
+        good = True
+        if '[1] demosrv' not in got or any('cannot' in l or 'not found' in l for l in got) or \
+                not any(re.match(r'^demosrv: up \d+ s, 1 requests$', l) for l in got):
+            good = fail('%s: `sh srv.sh` printed %r, want [1] demosrv and the status line' % (n, got))
+        sh_lines(r, 'echo quit > /pipe/demosrv', 0.7)
+        got = sh_lines(r, 'cat /pipe/demosrv.out', 1.5) + sh_lines(r, 'pwd', 1.0)
+        if 'bye' not in got or got.count('[1] done demosrv (exit 0)') != 1:
+            good = fail('%s: quit gave %r' % (n, got))
+        return good
+    return in_shell(r, 'sh_script_spawn', body)
+
+
+def case_job_exec_kill(r):
+    def body():
+        n = 'job_exec_kill'
+        before = psram_free(r)
+        cmd = 'exectick /tmp &'
+        good = expect(n, cmd, sh_lines(r, cmd, 2.5), ['[1] exectick', 'exectick cwd /tmp'])
+        good = expect(n, 'pwd', sh_lines(r, 'pwd', 0.5), [REMOTE]) and good
+        good = expect(n, 'jobs', sh_lines(r, 'jobs', 0.5), ['[1] running exectick']) and good
+        good = expect(n, 'kill 1', sh_lines(r, 'kill 1', 1.5), ['[1] done exectick (exit -9)']) and good
+        got = sh_lines(r, 'jobs', 1.5)
+        if got:
+            good = fail('%s: `jobs` after the kill printed %r, want nothing (no job, no tick)' % (n, got))
+        after = psram_free(r)
+        if after != before:
+            good = fail('%s: free PSRAM %d after the kill, %d before the spawn' % (n, after, before))
+        return good
+    return in_shell(r, 'job_exec_kill', body)
+
+
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
@@ -567,6 +622,7 @@ CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('sh_bg_redirect', case_sh_bg_redirect), ('sh_bg_errors', case_sh_bg_errors),
          ('demosrv_pipe', case_demosrv_pipe), ('demosrv_kill', case_demosrv_kill),
          ('demosrv_tcp', case_demosrv_tcp),
+         ('sh_script_spawn', case_sh_script_spawn), ('job_exec_kill', case_job_exec_kill),
          ('ctrl_c_pipe', case_ctrl_c_pipe)]   # last: on a kernel without it the board stays blocked
 
 

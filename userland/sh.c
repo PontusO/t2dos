@@ -124,7 +124,11 @@ int execute(char *cmd) {
   if (bg) {                            // a job: its stdout is the redirect target, whose fd is the job's now
     r = spawn(path, argc, argv);
     if (redir) { redirect(old); if (r < 0) close(fd); }
-    if (r > 0) { printf("[%d] %s\n", r, argv[0]); return 0; }
+    if (r > 0) {
+      printf("[%d] %s\n", r, argv[0]);
+      yield();                         // the job runs to its first wait (a server makes its pipes) before the next command
+      return 0;
+    }
     if (r == SPAWN_NOTFOUND) printf("%s: not found\n", argv[0]);
     else if (r == SPAWN_BADPROG) printf("%s: not a valid program\n", argv[0]);
     else if (r == SPAWN_NOMEM) printf("%s: out of memory\n", argv[0]);

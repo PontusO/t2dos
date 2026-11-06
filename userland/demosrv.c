@@ -15,7 +15,10 @@
 // The pattern every background program follows, in the order of main() below:
 //
 //   1. Create your resources: your pipes (mkpipe), a listener (listen), and open
-//      what you will read. Do it first; if something fails, say so and exit.
+//      what you will read. Do it first, before your first waiting call; if
+//      something fails, say so and exit. After `prog &` the shell lets the new job
+//      run until its first wait and only then takes the next command, so a
+//      script's next line (echo ... > /pipe/NAME) finds the pipes made by then.
 //   2. Loop forever: WAIT for work, HANDLE it, REPLY, and YIELD when there was
 //      nothing to do.
 //   3. Leave cleanly: finish what the client is still reading, then return.
@@ -153,7 +156,7 @@ int main(int argc, char **argv) {
       // neither had anything.
       busy = 0;
       sock = accept(0);                          // 0: do not wait
-      if (sock >= 0) { serve_tcp(sock); busy = 1; }
+      if (sock > 0) { serve_tcp(sock); busy = 1; }   // 0 is "nobody waiting", not a socket
       if (stat(inpath, &st) == 0 && st.mtime > 0) {  // a whole request is queued: read will not block
         read_request(fd);
         quit = handle();

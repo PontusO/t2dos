@@ -197,12 +197,29 @@ static int k_mkpipe(const char *nm) {
   }
   return -1;
 }
-// Ctrl-C ends a foreground pipe wait: true (and the byte is taken) if the
-// foreground task is running and the next console byte is 3. Jobs never read keys.
+// Console bytes fg_break took off the console while looking for a Ctrl-C. The
+// foreground reads them before the console's own, so no keystroke is lost.
+#define TYPEAHEAD 64
+static uint8_t tahead[TYPEAHEAD];
+static int ta_head, ta_n;
+static int con_kbhit() { return ta_n + con->kbhit(); }
+static int con_getc() {
+  if (!ta_n) return con->getc();
+  int c = tahead[ta_head]; ta_head = (ta_head + 1) % TYPEAHEAD; ta_n--;
+  return c;
+}
+// Ctrl-C ends a foreground pipe wait: true if the foreground task is running and
+// a 3 is among the pending console bytes. The bytes before it are kept for the
+// program (beyond TYPEAHEAD they are dropped), the 3 is taken, the bytes after it
+// stay unread. Jobs never read keys.
 static bool fg_break() {
-  if (cur != tasks || con->peek() != 3) return false;
-  con->getc();
-  return true;
+  if (cur != tasks) return false;
+  while (con->kbhit()) {
+    int c = con->getc();
+    if (c == 3) return true;
+    if (ta_n < TYPEAHEAD) tahead[(ta_head + ta_n++) % TYPEAHEAD] = c;
+  }
+  return false;
 }
 static int pipe_open(int i, int mode) {
   static int next_id;
@@ -285,16 +302,16 @@ static int k_open(const char *name, int flags) {
 }
 // Only the foreground reads keys: in a background task getchar waits forever
 // (other tasks run meanwhile, and kill ends it) and kbhit is 0.
-static int k_getc() { if (cur != tasks) for (;;) k_wait(); return con->getc(); }
+static int k_getc() { if (cur != tasks) for (;;) k_wait(); return con_getc(); }
 static int k_kbhit() {
   if (cur != tasks) { k_yield(); return 0; }
-  int k = con->kbhit(); if (!k) { k_yield(); k = con->kbhit(); }
+  int k = con_kbhit(); if (!k) { k_yield(); k = con_kbhit(); }
   return k;
 }
 static int k_read(int fd, char *buf, int n) {
   if (is_pipe_fd(fd)) return pipe_read(fd, buf, n);
   if (fd >= SOCK_FD) return sock_recv(fd, buf, n, -1);
-  if (fd == 0) { int i = 0; while (i < n) { buf[i++] = k_getc(); if (!con->kbhit()) break; } return i; }
+  if (fd == 0) { int i = 0; while (i < n) { buf[i++] = k_getc(); if (!con_kbhit()) break; } return i; }
   if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
   return fds[fd].read((uint8_t *)buf, n);
 }
@@ -572,8 +589,10 @@ static int run_loaded(uint8_t *code, uint8_t *data, uint8_t *stack, uint32_t ent
   Proc *pr = &t->procs[level];
   pr->heap.next = pr->heap.prev = &pr->heap;
   pr->code = code; pr->data = data; pr->stack = stack;       // freed by task_end if the task is killed
-  pr->fd_mask = 0; for (int i = 2; i < MAX_FD; i++) if (fds[i]) pr->fd_mask |= 1 << i;   // fds that belong to the parent
-  pr->sock_mask = 0; for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i]) pr->sock_mask |= 1 << i;
+  // what this task's parent level already holds; other tasks' slots are left out, so a slot
+  // another task frees and the child reuses is still the child's to close
+  pr->fd_mask = 0; for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self) pr->fd_mask |= 1 << i;
+  pr->sock_mask = 0; for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i] && sock_owner[i] == self) pr->sock_mask |= 1 << i;
   t->nest = level;
   int saved_stdout = stdout_fd;
   int ret;

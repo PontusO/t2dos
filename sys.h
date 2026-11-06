@@ -53,6 +53,8 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 // kill(job): marks a running job to end (exit code JOB_KILLED); returns 0 once it has ended, -1 if no such running job
 // mkpipe(name): name is WITHOUT the /pipe/ prefix (mkpipe("x") creates /pipe/x), owned by the caller; name is at most 31 chars with no '/'; returns 0, or -1 if it exists, the table is full or the name is invalid
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
+// accept(timeout_ms): >0 a connection's socket fd (they start at 100), 0 nobody connected within the timeout
+// (accept(0) never waits), -1 no listener or no free socket.  timeout -1 = wait forever.  Test sock > 0, not >= 0
 // jobs(buf, max) fills this
 struct job_t { int id; int state; int exit_code; char name[32]; };
 // stat() fills this. For a /pipe/ file, size is the bytes queued and mtime (pipes have no time) is the
