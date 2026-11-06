@@ -132,7 +132,8 @@ recovery> sh                           (start the shell again)
 ## 2. The shell
 
 The shell prints the current directory as its prompt and runs one command
-line at a time.
+line at a time. A command can also be started in the background, see
+[Background jobs](#background-jobs).
 
 ### Running programs
 
@@ -163,6 +164,8 @@ cat: nosuch.txt: not found
 cd [dir]        change directory (no argument: /)
 pwd             print the current directory
 exit [code]     leave the shell (the kernel's recovery prompt takes over)
+jobs            list the background jobs
+kill N          end background job N
 help            a one-line summary
 ```
 
@@ -175,7 +178,87 @@ help            a one-line summary
 /src> echo one more line >> files.txt
 ```
 
-Only the output is redirected; there are no pipes.
+Only the output is redirected; there are no shell pipes (`a | b`). Programs
+can talk through [named pipes](#named-pipes) instead.
+
+### Background jobs
+
+A command line that ends in `&` starts the program as a background job and
+gives the prompt back at once. The shell prints the job's number:
+
+```
+/src> beat &
+[1] beat
+/src> beat 1
+beat 2
+beat 3
+```
+
+`beat` is the small program from
+[Writing a background program](#writing-a-background-program): it prints a
+line every second, three times, then ends. Its output appears on the console
+while you keep working, mixed with whatever you type. When a job ends, the
+shell reports it at the next prompt:
+
+```
+/src> jobs
+[1] done beat (exit 0)
+```
+
+`jobs` lists the running jobs and the ended ones that have not been reported
+yet:
+
+```
+/src> beat &
+[1] beat
+/src> beat &
+[2] beat
+/src> jobs
+[1] running beat
+[2] running beat
+```
+
+`kill N` ends job N. The job's exit code is -9, and its pipes and memory are
+freed:
+
+```
+/> demosrv &
+[1] demosrv
+/> kill 1
+[1] done demosrv (exit -9)
+/> kill 9
+kill: no job 9
+```
+
+Rules for jobs:
+
+- At most 4 jobs run at once. A fifth `&` prints `too many jobs`:
+
+  ```
+  /src> beat &
+  too many jobs
+  ```
+- A job inherits the current directory. `cmd > file &` and `cmd >> file &`
+  send the job's output to the file, which stays open until the job ends:
+
+  ```
+  /src> beat >> /tmp/b.txt &
+  [1] beat
+  /src> cat /tmp/b.txt
+  beat 1
+  beat 2
+  beat 3
+  [1] done beat (exit 0)
+  ```
+
+- Jobs keep running when the shell exits. The exit reports are printed by
+  the shell at its next prompt.
+- Keys always go to the foreground program. A job that calls `getchar` just
+  waits, and never gets a key.
+- Tasks switch only when a program waits (see
+  [Writing a background program](#writing-a-background-program)). One effect:
+  while `cc` runs, the jobs wait, because `cc` compiles without waiting.
+  They continue when `cc` ends.
 
 ### Line editing and history
 
@@ -378,6 +461,71 @@ demo.
 /> blink 25 3
 ```
 
+### Background
+
+`jobs`, `kill` and `&` are part of the shell, see
+[Background jobs](#background-jobs).
+
+#### demosrv
+
+```
+demosrv [name] [-p port]
+```
+
+A small server that answers requests sent through a named pipe. It is the
+reference for writing your own background program (its source is
+`userland/demosrv.c`, and every step is commented). Run it as a job:
+
+```
+/> demosrv &
+[1] demosrv
+```
+
+It makes two pipes, `/pipe/NAME` for requests and `/pipe/NAME.out` for replies
+(`NAME` is `demosrv` unless you give another name). One request is one
+message: write it with `echo`, then read the reply with `cat`. The requests are
+`status`, `echo TEXT` and `quit`:
+
+```
+/> echo status > /pipe/demosrv
+/> demosrv: status
+cat /pipe/demosrv.out
+demosrv: up 0 s, 1 requests
+/> echo echo hello there > /pipe/demosrv
+/> demosrv: echo
+cat /pipe/demosrv.out
+hello there
+/> echo foo > /pipe/demosrv
+/> demosrv: foo
+cat /pipe/demosrv.out
+error: unknown command 'foo'
+/> echo quit > /pipe/demosrv
+/> demosrv: quit
+cat /pipe/demosrv.out
+bye
+/> jobs
+[1] done demosrv (exit 0)
+```
+
+The `demosrv: ...` lines are the server's log, printed on the console when it
+handles a request (the shell does not redraw its prompt after them, so just
+type the next command). The job needs a moment after `&` to make its pipes (it
+starts as soon as the shell waits for your next key), so type the first
+request by hand rather than in the same breath. `cat` on the reply pipe waits
+until the reply exists; if you read before sending a request, press Ctrl-C to
+give up. `quit` ends the server; it lets the client read the reply first.
+`kill N` also works, but then any unread reply is lost.
+
+With `-p port` the server also answers each TCP connection on that port with
+its status line (this needs the WiFi up, see [wifi](#wifi)):
+
+```
+/> demosrv -p 5000 &
+```
+
+A second server needs another name: `demosrv two &` uses `/pipe/two` and
+`/pipe/two.out`.
+
 ### Text editor
 
 ```
@@ -572,9 +720,9 @@ pointers.
 
 | Group | Functions |
 |---|---|
-| Process | `exit(code)`, `exec(path, argc, argv)` (runs a program, returns its exit code), `millis()`, `sleep(ms)`, `sysinfo(kind)` |
+| Process | `exit(code)`, `exec(path, argc, argv)` (runs a program, returns its exit code), `millis()`, `sleep(ms)`, `sysinfo(kind)`, `spawn(path, argc, argv)` (starts a background job, returns its number), `yield()`, `jobs(buf, max)`, `kill(job)` |
 | Console | `putchar(c)`, `getchar()` (waits for a key), `kbhit()` (1 if a key is waiting), `conctl(cmd, a, b)`, `redirect(fd)` |
-| Files | `open(path, mode)` (mode `OPEN_READ`, `OPEN_WRITE`, `OPEN_APPEND`; -1 on error), `close(fd)`, `read(fd, buf, n)`, `write(fd, buf, n)`, `seek(fd, offset, whence)`, `stat(path, &st)`, `unlink(path)`, `rename(old, new)`, `mkdir(path)`, `rmdir(path)`, `chdir(path)`, `getcwd(buf, n)` |
+| Files | `open(path, mode)` (mode `OPEN_READ`, `OPEN_WRITE`, `OPEN_APPEND`; -1 on error), `mkpipe(name)`, `close(fd)`, `read(fd, buf, n)`, `write(fd, buf, n)`, `seek(fd, offset, whence)`, `stat(path, &st)`, `unlink(path)`, `rename(old, new)`, `mkdir(path)`, `rmdir(path)`, `chdir(path)`, `getcwd(buf, n)` |
 | Directories | `opendir(path)`, `readdir(d, &entry)` (1 while there are entries), `closedir(d)` |
 | Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
@@ -620,6 +768,109 @@ int main() {
   return 0;
 }
 ```
+
+### Writing a background program
+
+Any program can run as a job (`prog &`). Nothing changes in how you write it,
+with one rule that matters a great deal: **T2DOS does not preempt.** The
+foreground program, the shell and every job take turns, and a task gives up
+the processor only when it calls something that waits:
+
+- `getchar`, `kbhit`, `sleep`, `recv`, `accept` (with a timeout),
+- `read` of an empty named pipe, `write` to a full one,
+- `yield()`, which lets another task run and returns 1 if one did, else 0.
+
+A job that loops without ever calling one of these freezes the whole board,
+the keyboard included. There is no way out except cutting the power, so a
+polling loop must call `yield()` (or `sleep`) in every round. Anything else
+the program does, such as reading a file or printing, runs to the end without
+interruption.
+
+A job that only waits is cheap. This one prints a line every second:
+
+```c
+#include "sys.h"
+int main(int argc, char **argv) {
+  int i;
+  for (i = 1; i <= 3; i++) {
+    sleep(1000);
+    printf("beat %d\n", i);
+  }
+  return 0;
+}
+```
+
+```
+/src> cc -o beat.bin beat.c
+/src> beat &
+[1] beat
+/src> beat 1
+beat 2
+beat 3
+```
+
+(While `cc` itself runs, the jobs are paused, because the compiler never
+waits. They continue when it ends.) A job reaches the console with `printf`
+like any program; with `> file &` its output goes to the file instead.
+
+A server follows three steps, as `userland/demosrv.c` shows:
+
+1. Create the resources first: the pipes (`mkpipe`), a `listen` socket, and
+   open what you will read. If one fails, print why and return.
+2. Loop: wait for work, handle it, reply. When the program waits on two
+   things at once (a pipe and a socket), no single call can wait for both, so
+   check each without waiting (`accept(0)`, `stat` on the pipe) and call
+   `yield()` when neither had anything.
+3. Leave cleanly. A program's pipes disappear the moment it exits, with any
+   unread data, so wait until the client has read the last reply.
+
+`spawn(path, argc, argv)` starts a job from a program: it returns the job
+number (1 to 4) or a negative `SPAWN_` code (see
+[System calls](#system-calls)). `jobs(buf, max)` fills an array of
+`struct job_t` and `kill(job)` ends a job.
+
+### Named pipes
+
+A named pipe is a file name under `/pipe/` that programs use to send each
+other messages. A program makes one with `mkpipe("name")` (the name without
+the `/pipe/` prefix, at most 31 characters, no `/`), which creates
+`/pipe/name`. After that the ordinary `open`, `read`, `write` and `close`
+work on it, from C or from the shell (`echo hi > /pipe/name`, `cat /pipe/name`).
+
+```c
+mkpipe("work");                          /* creates /pipe/work, owned by this program */
+fd = open("/pipe/work", OPEN_READ);
+n = read(fd, buf, 512);                  /* waits until a message arrives */
+```
+
+How pipes behave:
+
+- **Messages.** The bytes a writer sends are one message, which ends when the
+  writer closes the pipe. A reader gets the bytes, and then `read` returns 0
+  once at the end of the message. The next `read` starts the next message.
+  So `echo status > /pipe/x` is exactly one message. To read a whole
+  message, call `read` until it returns 0.
+- **Waiting.** `read` of an empty pipe waits for a writer, and `write` to a
+  full pipe waits for a reader. Both are switch points, so other tasks run
+  meanwhile. In a foreground program, Ctrl-C ends the wait: `read` returns 0
+  and `write` returns -1.
+- **Size.** A pipe buffers 512 bytes. A longer message goes through in pieces
+  as the reader consumes it. At most 8 pipes exist at a time. Two writers
+  that write at the same time interleave their bytes, so give each pipe one
+  writer at a time.
+- **Owner.** The program that made the pipe owns it. When the owner exits or
+  is killed, the pipe disappears at once with any unread data. Readers that
+  are waiting get 0.
+- **stat.** `stat("/pipe/x", &st)` gives `st.size`, the bytes buffered, and
+  `st.mtime`, the number of complete messages waiting. Pipes have no time, so
+  `mtime` is reused. When `st.mtime > 0`, reading one message will not wait.
+  The byte count alone does not say that: the writer may have sent half a
+  request and not closed yet.
+- **Not listed.** `/pipe` has no directory listing; `ls /pipe` says not found.
+
+A reply is a second pipe: the server reads `/pipe/NAME`, writes one message
+to `/pipe/NAME.out` per request, and the client reads that. A client that
+reads `NAME.out` before the reply exists just waits for it.
 
 ### The C language subset
 
@@ -1097,6 +1348,14 @@ instructions inside IT blocks, and macros (`.macro`, `.rept`).
   data base. Arguments go on the stack, first argument deepest; the result
   is in `r0`.
 - The current directory lives in the kernel and is shared by all programs.
+- Background jobs: up to 4 programs run beside the foreground program, each
+  with its own code, data, stack and kernel stack. Tasks switch cooperatively,
+  only in the calls listed under
+  [Writing a background program](#writing-a-background-program), and never in
+  the middle of a file, flash or WiFi operation. A job inherits the current
+  directory when it starts. Memory a job allocates is freed when it ends.
+  A program that starts another with `exec` inside a job should keep the
+  nesting shallow: each job has only an 8 KB kernel stack.
 - System calls run on a 16 KB kernel stack in SRAM, because PSRAM cannot be
   reached while the flash is being written.
 
@@ -1107,6 +1366,35 @@ has a fixed number in `sys.h`, grouped: process 0+, console 16+, files 32+,
 memory and strings 64+, network 80+, board 96+, and 128+ free for user
 extensions. The kernel sees `sys(num, nargs, argv)`, where `argv[nargs-1]`
 is the first argument.
+
+#### Jobs and pipes
+
+| Call | Number | Meaning |
+|---|---|---|
+| `spawn(path, argc, argv)` | 5 | start `path` as a background job; returns its number 1 to `MAX_JOBS` (4), or a `SPAWN_` error |
+| `yield()` | 6 | let another runnable task run; returns 1 if one did, else 0 |
+| `jobs(buf, max)` | 7 | fill `buf` (an array of `struct job_t`) with the job table, return how many entries it wrote; the slots of jobs reported as done are freed |
+| `kill(job)` | 8 | end a running job (its exit code becomes `JOB_KILLED`, -9); returns 0 once it has ended, -1 if there is no such running job |
+| `mkpipe(name)` | 47 | create `/pipe/name` (the name without the prefix, up to 31 characters, no `/`), owned by the caller; returns 0, or -1 if it exists, the table is full or the name is invalid |
+
+```c
+struct job_t { int id; int state; int exit_code; char name[32]; };
+```
+
+`state` is `JOB_RUNNING` (1) or `JOB_DONE` (2); `exit_code` is the program's
+exit code once it is done. `spawn` returns these errors:
+
+| Code | Name | Cause |
+|---|---|---|
+| -1 | `SPAWN_NOTFOUND` | no such file |
+| -2 | `SPAWN_BADPROG` | not a T2DOS program |
+| -3 | `SPAWN_NOMEM` | not enough memory |
+| -4 | `SPAWN_FULL` | 4 jobs already exist |
+| -5 | `SPAWN_UNSUPPORTED` | this system cannot run jobs (the Linux test harness `host_linux`) |
+
+`stat` on a `/pipe/` file fills `size` with the bytes buffered and `mtime`
+with the number of complete messages waiting. The behaviour of pipes is
+described in [Named pipes](#named-pipes).
 
 ### Network protocol
 
@@ -1137,8 +1425,9 @@ linker/ld.c       the linker
 binutils/         ar, nm, objdump
 lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
-                  write, edit, blink, wifi, get, send, rls, nc
-tests/            assembler, linker, object and toolchain tests
+                  write, edit, blink, wifi, get, send, rls, nc, demosrv
+tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
+                  programs for the background job checks
 tools/            board.py (board access), fileserver.py, the check scripts
 host_linux.c      the kernel's system calls on Linux, to run programs under qemu-arm
 root/             the filesystem image that make fills: /bin, /lib, /src
@@ -1179,7 +1468,14 @@ With the board connected (and no `screen` on the port):
 python3 tools/check_link.py --board
 python3 tools/check_toolchain.py --board      # builds and runs the cases with cc on the board
 python3 tools/check_toolchain.py --selfhost   # the board rebuilds the toolchain identically
+python3 tools/check_jobs.py --board           # background jobs and named pipes on the board
 ```
+
+`check_jobs.py` uploads the programs of `tests/jobs/`, runs every case
+(spawn, kill, redirection, `exec` inside a job, pipes) and checks that the
+free PSRAM is the same afterwards. `check_ref.py` lists `userland/sh.c` and
+`userland/demosrv.c` as excluded ("newer builtins"): they use calls that the
+reference compiler does not know, so they cannot be compared with it.
 
 ### Self-hosting
 
@@ -1203,6 +1499,10 @@ features that the previous `cc` already supports.
 - Boot into the shell from flash; files survive reset and reflashing.
 - The shell, redirection, scripts, line editing and history; the file and
   system commands; PSRAM is fully returned after every program.
+- Background jobs: `&`, `jobs`, `kill`, the exit reports, the limit of 4,
+  output to a file, and cooperative switching between the shell and jobs.
+  Named pipes between jobs and the shell, `demosrv` in pipe mode, and
+  Ctrl-C ending a wait on a pipe. `tools/check_jobs.py --board` runs these.
 - `edit` through `screen`, including cut, copy, paste and the mark.
 - The toolchain: every case in `tests/toolchain/` (C calling assembly,
   assembly calling C, globals shared with `extern`, symbols named like
@@ -1219,7 +1519,19 @@ features that the previous `cc` already supports.
 ### Not yet verified, known gaps
 
 - SD card: not tested yet (the kernel expects it on SPI0 with CS on GP17).
-- Network tools: tested only under qemu, not on real hardware.
+- Network tools: tested only under qemu, not on real hardware. This includes
+  `demosrv -p`, the TCP mode of the reference server.
+- No preemption. A job that never calls a waiting function freezes the board
+  and only a power cycle helps. The CPU is never idle while jobs exist: they
+  and the shell poll in turn.
+- At most 4 jobs and 8 named pipes.
+- A job has an 8 KB kernel stack, so `exec` nested deeply inside a job can
+  overflow it.
+- The recovery prompt (after `exit` from the shell) pauses the jobs until the
+  shell runs again.
+- `cat` of a reply pipe waits until a reply arrives; press Ctrl-C to give up.
+- The shell has no `|` pipes. `host_linux.c` does not run jobs (`spawn`
+  returns `SPAWN_UNSUPPORTED`).
 - Uploading a whole `root/` tree to the flash filesystem is manual (`put` per
   file).
 - No `static`: all globals of a program share one namespace.
