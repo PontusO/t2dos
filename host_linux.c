@@ -89,7 +89,6 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
 static int run_bin(const char *name, int argc, char **argv);
 static int millis_() { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec * 1000 + tv.tv_usec / 1000; }
 static int kbhit() { struct pollfd p = { 0, POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
-static int k_write(int fd, const char *buf, int n) { if (fd == 1) fd = stdout_fd; return write(fd, buf, n); }
 static int listen_fd = -1; static char ipbuf[20] = "127.0.0.1";
 static int sock_recv(int fd, char *buf, int n, int timeout) {
   struct pollfd p = { fd, POLLIN, 0 }; int r = poll(&p, 1, timeout);
@@ -112,14 +111,30 @@ static struct { int used; char name[32]; int owner; char buf[PIPE_SIZE]; int hea
 static struct { int pipe, mode, owner, wrote; } pfd[MAX_PIPE_FDS];
 
 static int is_pipename(const char *p) { return strncmp(p, "/pipe/", 6) == 0 && p[6] != 0; }
+// resolved pipe name (the part after /pipe/) for a user path, or 0 if it is not under /pipe/
+static const char *pipe_path(const char *in, char *buf, int sz) { resolve(in, buf, sz); return is_pipename(buf) ? buf + 6 : 0; }
 static int find_pipe(const char *name) { for (int i = 0; i < MAX_PIPES; i++) if (pipes[i].used && !strcmp(pipes[i].name, name)) return i; return -1; }
 static void pipe_remove(int i) { pipes[i].used = 0; }
 static void owner_pipes_remove(int owner) { for (int i = 0; i < MAX_PIPES; i++) if (pipes[i].used && pipes[i].owner == owner) pipe_remove(i); }
 // next message boundary at or after pos, or -1
 static int next_bound(int i, long pos) { int b = -1; for (int k = 0; k < pipes[i].nbounds; k++) if (pipes[i].bounds[k] >= pos && (b < 0 || pipes[i].bounds[k] < b)) b = pipes[i].bounds[k]; return b; }
 static void bound_drop(int i, long at) { for (int k = 0; k < pipes[i].nbounds; k++) if (pipes[i].bounds[k] == at) pipes[i].bounds[k] = pipes[i].bounds[--pipes[i].nbounds]; }
-static int pfd_find(int fd) { for (int i = 0; i < MAX_PIPE_FDS; i++) if (pfd[i].pipe >= 0 && pfd[i].owner == nest && pfd[i].mode == fd - PIPE_FD) return i; return -1; }
-static int pfd_alloc(int pipe, int mode) { for (int i = 0; i < MAX_PIPE_FDS; i++) if (pfd[i].pipe < 0) { pfd[i].pipe = pipe; pfd[i].mode = mode; pfd[i].owner = nest; pfd[i].wrote = 0; return PIPE_FD + mode; } return -1; }
+static int pfd_find(int fd) { int i = fd - PIPE_FD; if (i >= 0 && i < MAX_PIPE_FDS && pfd[i].pipe >= 0) return i; return -1; }
+static int pfd_alloc(int pipe, int mode) { for (int i = 0; i < MAX_PIPE_FDS; i++) if (pfd[i].pipe < 0) { pfd[i].pipe = pipe; pfd[i].mode = mode; pfd[i].owner = nest; pfd[i].wrote = 0; return PIPE_FD + i; } return -1; }
+static int pipe_write(int e, const char *buf, int n) {
+  if (e < 0 || pfd[e].mode != 1) return -1;
+  int i = pfd[e].pipe; if (!pipes[i].used) return -1;
+  if (n > PIPE_SIZE - pipes[i].count) n = PIPE_SIZE - pipes[i].count;   // one task: a full pipe cannot drain, short write
+  if (n < 0) n = 0;
+  for (int k = 0; k < n; k++) pipes[i].buf[(pipes[i].head + pipes[i].count + k) % PIPE_SIZE] = buf[k];
+  pipes[i].count += n; pipes[i].total_written += n; pfd[e].wrote = 1;
+  return n;
+}
+static int k_write(int fd, const char *buf, int n) {
+  if (fd == 1) fd = stdout_fd;
+  if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) return pipe_write(pfd_find(fd), buf, n);
+  return write(fd, buf, n);
+}
 
 int sys(int num, int n, int *argv) {
   char p1[300], p2[300];
@@ -139,16 +154,17 @@ int sys(int num, int n, int *argv) {
     case SYS_conctl: return 0;
     case SYS_redirect: { int old = stdout_fd; stdout_fd = A(0) ? A(0) : 1; return old; }
     case SYS_open: { const char *in = (const char *)A(0); int fl = A(1);
-      if (is_pipename(in)) { int i = find_pipe(in); if (i < 0) return -1;
-        return pfd_alloc(i, fl == OPEN_READ ? 0 : 1); }
+      { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
+        return pfd_alloc(i, fl == OPEN_READ ? 0 : 1); } }
       int f = fl == OPEN_WRITE ? O_WRONLY | O_CREAT | O_TRUNC : fl == OPEN_APPEND ? O_WRONLY | O_CREAT | O_APPEND : (fl & 1) ? O_WRONLY | O_CREAT | O_TRUNC : O_RDONLY;
       return open(hostpath((char *)A(0), p1), f, 0644); }
     case SYS_close: { int fd = A(0);
       if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) { int e = pfd_find(fd);
         if (e >= 0) { int i = pfd[e].pipe;
-          if (pipes[i].used && pfd[e].mode == 1) { while (pipes[i].nbounds == 8) ;   // one task: never blocks
-            pipes[i].bounds[pipes[i].nbounds++] = pipes[i].total_written; }
-          pfd[e].pipe = -1; }
+          pfd[e].pipe = -1;
+          if (pipes[i].used && pfd[e].mode == 1) {
+            if (pipes[i].nbounds == 8) return -1;     // one task: nobody could drain it
+            pipes[i].bounds[pipes[i].nbounds++] = pipes[i].total_written; } }
         return 0; }
       return close(fd); }
     case SYS_read: { int fd = A(0), n = A(2); char *buf = (char *)A(1);
@@ -160,31 +176,23 @@ int sys(int num, int n, int *argv) {
           bound_drop(i, b); return 0; }
         long pos = pipes[i].total_read; int avail = pipes[i].count;
         int b = next_bound(i, pos); if (b >= 0 && b - pos < avail) avail = b - pos;
-        if (n < avail) n = avail;
-        memcpy(buf, pipes[i].buf + pipes[i].head, n);
+        if (n > avail) n = avail;
+        for (int k = 0; k < n; k++) buf[k] = pipes[i].buf[(pipes[i].head + k) % PIPE_SIZE];
         pipes[i].head = (pipes[i].head + n) % PIPE_SIZE; pipes[i].count -= n;
         pipes[i].total_read += n;
         if (pipes[i].total_read == b) bound_drop(i, b);
         return n; }
       return read(fd, (void *)A(1), n); }
     case SYS_write: { int fd = A(0), n = A(2); const char *buf = (const char *)A(1);
-      if (fd == 1) fd = stdout_fd;
-      if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) { int e = pfd_find(fd);
-        if (e < 0 || pfd[e].mode != 1) return -1;
-        int i = pfd[e].pipe; if (!pipes[i].used) return -1;
-        while (pipes[i].count == PIPE_SIZE) ;         // one task: never blocks
-        memcpy(pipes[i].buf + (pipes[i].head + pipes[i].count) % PIPE_SIZE, buf, n);
-        pipes[i].count += n; pipes[i].total_written += n; pfd[e].wrote = 1;
-        return n; }
       return k_write(fd, buf, n); }
     case SYS_seek: return lseek(A(0), A(1), A(2));
     case SYS_stat: { const char *in = (const char *)A(0);
-      if (is_pipename(in)) { int i = find_pipe(in); if (i < 0) return -1;
-        struct stat_t *o = (struct stat_t *)A(1); o->size = pipes[i].count; o->isdir = 0; o->mtime = 0; return 0; }
+      { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
+        struct stat_t *o = (struct stat_t *)A(1); o->size = pipes[i].count; o->isdir = 0; o->mtime = 0; return 0; } }
       struct stat st; if (stat(hostpath((char *)A(0), p1), &st)) return -1;
       struct stat_t *o = (struct stat_t *)A(1); o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = st.st_mtime; return 0; }
     case SYS_unlink: { const char *in = (char *)A(0);
-      if (is_pipename(in)) return -1;                // only the owner's exit removes a pipe
+      { char rp[300]; if (pipe_path(in, rp, sizeof rp)) return -1; }   // only the owner's exit removes a pipe
       return unlink(hostpath((char *)A(0), p1)); }
     case SYS_rename: return rename(hostpath((char *)A(0), p1), hostpath((char *)A(1), p2));
     case SYS_mkdir: return mkdir(hostpath((char *)A(0), p1), 0755);
@@ -199,10 +207,10 @@ int sys(int num, int n, int *argv) {
     case SYS_closedir: { int d = A(0); if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
     case SYS_chdir: { struct stat st; if (stat(hostpath((char *)A(0), p1), &st) || !S_ISDIR(st.st_mode)) return -1; resolve((char *)A(0), cwd, sizeof cwd); return 0; }
     case SYS_getcwd: strncpy((char *)A(0), cwd, A(1)); return A(0);
-    case SYS_mkpipe: { const char *nm = (const char *)A(0) + 6;   // the part after /pipe/
-      if (!is_pipename((const char *)A(0)) || strlen(nm) > 31 || strchr(nm, '/')) return -1;
-      if (find_pipe((const char *)A(0)) >= 0) return -1;
-      for (int i = 0; i < MAX_PIPES; i++) if (!pipes[i].used) { memset(&pipes[i], 0, sizeof pipes[i]); pipes[i].used = 1; strcpy(pipes[i].name, (const char *)A(0)); pipes[i].owner = nest; return 0; }
+    case SYS_mkpipe: { const char *nm = (const char *)A(0);   // the part after /pipe/
+      if (!nm[0] || strlen(nm) > 31 || strchr(nm, '/')) return -1;
+      if (find_pipe(nm) >= 0) return -1;
+      for (int i = 0; i < MAX_PIPES; i++) if (!pipes[i].used) { memset(&pipes[i], 0, sizeof pipes[i]); pipes[i].used = 1; strcpy(pipes[i].name, nm); pipes[i].owner = nest; return 0; }
       return -1; }
     case SYS_malloc: return (int)malloc(A(0));
     case SYS_free: free((void *)A(0)); return 0;
@@ -266,12 +274,14 @@ static int run_bin(const char *name, int argc, char **argv) {
   if (setjmp(jbs[nest]) == 0) ret = run(code + hdr[4] + 1, (void *)sys, data, stack + (1 << 20) - 64, argc, argv);
   else ret = exit_codes[nest];
   owner_pipes_remove(nest);          // this task's pipes end with it; its pipe fds die too
+  for (int i = 0; i < MAX_PIPE_FDS; i++) if (pfd[i].owner == nest) pfd[i].pipe = -1;   // fds opened by this level
   stdout_fd = saved_stdout; nest--;
   munmap(code, hdr[1] + 4096); free(data); free(stack);
   return ret;
 }
 
 int main(int argc, char **argv) {
+  for (int i = 0; i < MAX_PIPE_FDS; i++) pfd[i].pipe = -1;
   if (argc < 2) { fprintf(stderr, "usage: host_linux [-r rootdir] prog.bin [args]\n"); return 1; }
   if (!strcmp(argv[1], "-r")) { strcpy(root, argv[2]); argv += 2; argc -= 2; }
   if (isatty(0)) { struct termios t; tcgetattr(0, &t); t.c_lflag &= ~(ICANON | ECHO); tcsetattr(0, TCSANOW, &t); }
