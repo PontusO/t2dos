@@ -94,6 +94,7 @@ struct Console {
   virtual void putc(int c) = 0;
   virtual int getc() = 0;          // blocking
   virtual int kbhit() = 0;
+  virtual int peek() = 0;          // the next byte without taking it, -1 if none
   virtual void ctl(int cmd, int a, int b) {}
   virtual int width() { return 80; }
   virtual int height() { return 24; }
@@ -103,6 +104,7 @@ struct SerialConsole : Console {
   void putc(int c) override { if (c == '\n') Serial.write('\r'); Serial.write((char)c); }
   int getc() override { while (!Serial.available()) { k_wait(); } return Serial.read(); }
   int kbhit() override { return Serial.available(); }
+  int peek() override { return Serial.available() ? Serial.peek() : -1; }
   void ctl(int cmd, int a, int b) override {
     if (cmd == CON_CLEAR) Serial.print("\033[2J\033[H");
     else if (cmd == CON_GOTO) Serial.printf("\033[%d;%dH", b + 1, a + 1);
@@ -195,6 +197,13 @@ static int k_mkpipe(const char *nm) {
   }
   return -1;
 }
+// Ctrl-C ends a foreground pipe wait: true (and the byte is taken) if the
+// foreground task is running and the next console byte is 3. Jobs never read keys.
+static bool fg_break() {
+  if (cur != tasks || con->peek() != 3) return false;
+  con->getc();
+  return true;
+}
 static int pipe_open(int i, int mode) {
   static int next_id;
   for (int e = 0; e < MAX_PIPE_FDS; e++) if (!pfds[e].used) {
@@ -216,7 +225,7 @@ static int pipe_read(int fd, char *buf, int cnt) {
     Pipe *p = &pipes[pfds[e].pipe];
     int pos = p->total_read, b = next_bound(p, pos);
     if (b == pos) { bound_drop(p, b); return 0; }
-    if (p->count == 0) { k_wait(); continue; }
+    if (p->count == 0) { if (fg_break()) return 0; k_wait(); continue; }
     int avail = p->count; if (b >= 0 && b - pos < avail) avail = b - pos;
     if (cnt > avail) cnt = avail;
     if (cnt < 0) cnt = 0;
@@ -237,6 +246,7 @@ static int pipe_write(int fd, const char *buf, int cnt) {
     for (int j = 0; j < k; j++) p->buf[(p->head + p->count + j) % PIPE_SIZE] = buf[done + j];
     p->count += k; p->total_written += k; done += k; pfds[e].wrote = 1;
     if (done >= cnt) return cnt;
+    if (fg_break()) return -1;             // what was copied stays in the pipe
     k_wait();
   }
 }
@@ -246,7 +256,10 @@ static int pipe_write(int fd, const char *buf, int cnt) {
 static void pipe_close(int e, bool wait) {
   int id = pfds[e].id;
   if (pfds[e].mode == 1) {
-    while (wait && pfds[e].used && pfds[e].id == id && pfd_live(e) && pipes[pfds[e].pipe].nbounds == MAX_BOUNDS) k_wait();
+    while (wait && pfds[e].used && pfds[e].id == id && pfd_live(e) && pipes[pfds[e].pipe].nbounds == MAX_BOUNDS) {
+      if (fg_break()) { pfds[e].used = 0; return; }   // Ctrl-C: freed, the message end is dropped
+      k_wait();
+    }
     if (!pfds[e].used || pfds[e].id != id) return;                      // freed meanwhile
     if (pfd_live(e)) { Pipe *p = &pipes[pfds[e].pipe]; if (p->nbounds < MAX_BOUNDS) p->bounds[p->nbounds++] = p->total_written; }
   }

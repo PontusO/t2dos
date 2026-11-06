@@ -11,11 +11,18 @@ cc's stub begins with push {r4, lr} = 0xB510) has run-before-main initializer co
 now lives in a .t2init function, so its layout differs: it is excluded here and checked by
 behaviour on the board instead.
 
-Prints "identical: N, excluded (init code): M, different: K" and the names of the different
-files; exit status 1 if K > 0. Work files go to build/s/ref/.
+A file the reference cc rejects with "undefined function: NAME(" for a builtin newer than
+the reference cc (NEWER_BUILTINS: spawn, yield, jobs, kill, mkpipe) cannot be compared
+either: it is excluded too and checked by behaviour on the board (check_jobs.py). Any other
+reference failure counts as different.
+
+Prints "identical: N, excluded (init code): M, excluded (newer builtins): B, different: K",
+the excluded files on one line per class and the names of the different files; exit
+status 1 if K > 0. Work files go to build/s/ref/.
 """
 import glob
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -24,6 +31,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'ref')
 REF_CC = os.path.join(ROOT, 'build', 'ref', 'cc')
 CC = os.path.join(ROOT, 'compiler', 'cc')
+NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe')   # unknown to the reference cc
+UNDEF_RE = re.compile(r'undefined function: (\w+)\(')
+
+
+def newer_builtin(msg):
+    """the reference cc failed only because the source calls a builtin it predates"""
+    m = UNDEF_RE.search(msg)
+    return bool(m) and m.group(1) in NEWER_BUILTINS
 
 
 def sources():
@@ -63,6 +78,7 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     same = []
     excluded = []
+    newer = []
     diff = []
     for src, flags in srcs:
         name = src.replace('/', '-')[:-2]
@@ -73,7 +89,10 @@ def main():
                 os.remove(f)
         st, msg = run([REF_CC] + flags + ['-o', ref, src])
         if st != 0:
-            diff.append((src, 'reference cc failed: ' + msg))
+            if newer_builtin(msg):
+                newer.append(src)
+            else:
+                diff.append((src, 'reference cc failed: ' + msg))
             continue
         if has_init_stub(ref):
             excluded.append(src)
@@ -89,9 +108,12 @@ def main():
         else:
             k = next((i for i in range(min(len(a), len(b))) if a[i] != b[i]), min(len(a), len(b)))
             diff.append((src, 'first difference at byte %d (sizes %d and %d)' % (k, len(a), len(b))))
-    print('identical: %d, excluded (init code): %d, different: %d' % (len(same), len(excluded), len(diff)))
+    print('identical: %d, excluded (init code): %d, excluded (newer builtins): %d, different: %d' %
+          (len(same), len(excluded), len(newer), len(diff)))
     if excluded:
-        print('excluded: ' + ' '.join(excluded))
+        print('excluded (init code): ' + ' '.join(excluded))
+    if newer:
+        print('excluded (newer builtins): ' + ' '.join(newer))
     for src, why in diff:
         print('different: %s: %s' % (src, why))
     return 1 if diff else 0

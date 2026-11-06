@@ -47,6 +47,16 @@ Cases (spawner CASE on the board):
   mkpipe_errors       `pclient mkpipe`: duplicate name, ninth pipe, names with '/', empty or too
                       long give -1; open of a missing pipe -1, unlink -1, stat size, a message
                       read back; then `pclient nopipe m0`: the exited program's pipes are gone
+  sh_bg_done          (the shell cases run in a nested /bin/sh.bin, this branch's shell, in
+                      /src/jobs) `tick 2 100 &` prints [1] tick, the ticks follow; after a
+                      foreground `tick 1 400` the next prompt reports [1] done tick (exit 7)
+  sh_jobs_kill        `tick 0 1000 &`, `jobs` shows [1] running tick, `kill 1` reports
+                      [1] done tick (exit -9); `kill 9` says no job, `kill` prints the usage
+  sh_bg_redirect      `tick 3 50 > /tmp/t.txt &` prints only [1] tick; the file holds tick 1..3
+  sh_bg_errors        `nosuch &`, `notprog.txt &`, a fifth `tick 0 1000 &` (too many jobs), the
+                      help text
+  ctrl_c_pipe         with pecho p1 running, `cat /pipe/p1.out` blocks (no request); a Ctrl-C
+                      byte ends the read, the prompt comes back and the board still answers
 """
 import os
 import re
@@ -295,6 +305,134 @@ def case_mkpipe_errors(r):
     return good and g2
 
 
+# ------------------------------------------------------------------ shell job control
+PROMPT_PREFIX_RE = re.compile(r'^\S*> ')
+
+
+def sh_lines(r, cmd, secs):
+    """type cmd into the shell, read for secs seconds; the output lines without the echo,
+    prompts, "[exit N, T ms]" lines and empty lines (job output may follow a prompt, so no final prompt is required)"""
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(cmd.encode() + b'\r')
+    raw = b._read(secs, secs + 1.0).decode('latin-1')
+    lines = [l.rstrip() for l in raw.replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+    if not lines or not lines[0].strip().endswith(cmd.strip()):
+        raise r.board.BoardError('no echo of %r from the board (got %r)' % (cmd, raw[-120:]))
+    out = []
+    for l in lines[1:]:
+        while PROMPT_PREFIX_RE.match(l):
+            l = PROMPT_PREFIX_RE.sub('', l, 1)
+        if l.strip() and not r.board.PROMPT_RE.match(l) and not r.board.EXIT_RE.match(l):
+            out.append(l)
+    return out
+
+
+def expect(name, cmd, got, want):
+    """want: the exact lines (tick lines from jobs ignored)"""
+    ticks, rest = split(got)
+    if rest != want:
+        return fail('%s: `%s` printed %r, want %r' % (name, cmd, got, want))
+    return True
+
+
+def in_shell(r, name, body):
+    """run body() in a nested /bin/sh.bin started in REMOTE, then exit it"""
+    r.run('cd ' + REMOTE, 10.0)
+    out, code = r.run('/bin/sh.bin', 30.0)
+    if 'T2DOS shell, type help' not in out:
+        r.run('cd /', 10.0)
+        return fail('%s: /bin/sh.bin printed %r' % (name, out))
+    try:
+        got = sh_lines(r, 'jobs', 0.5)  # an older sh without job control would run `tick 0 1000 &` forever
+        if got:
+            good = fail('%s: `jobs` printed %r, want nothing (no job control, or jobs left over)' % (name, got))
+        else:
+            good = body()
+    finally:
+        r.run('exit', 10.0)
+        r.run('cd /', 10.0)
+    return good
+
+
+def case_sh_bg_done(r):
+    def body():
+        cmd = 'tick 2 100 &'
+        got = sh_lines(r, cmd, 1.0)
+        good = expect('sh_bg_done', cmd, got, ['[1] tick'])
+        good = ticks_in_order('sh_bg_done', split(got)[0], 2) and good
+        cmd = 'tick 1 400'
+        got = sh_lines(r, cmd, 1.5)
+        return expect('sh_bg_done', cmd, got, ['[1] done tick (exit 7)']) and good
+    return in_shell(r, 'sh_bg_done', body)
+
+
+def case_sh_jobs_kill(r):
+    def body():
+        good = True
+        for cmd, secs, want in [('tick 0 1000 &', 0.5, ['[1] tick']), ('jobs', 0.5, ['[1] running tick']),
+                                ('kill 1', 1.0, ['[1] done tick (exit -9)']), ('jobs', 0.5, []),
+                                ('kill 9', 0.5, ['kill: no job 9']), ('kill', 0.5, ['usage: kill N'])]:
+            good = expect('sh_jobs_kill', cmd, sh_lines(r, cmd, secs), want) and good
+        return good
+    return in_shell(r, 'sh_jobs_kill', body)
+
+
+def case_sh_bg_redirect(r):
+    def body():
+        cmd = 'tick 3 50 > /tmp/t.txt &'
+        got = sh_lines(r, cmd, 1.0)
+        good = True
+        if got != ['[1] tick']:
+            good = fail('sh_bg_redirect: `%s` printed %r, want [\'[1] tick\'] (the ticks go to the file)' % (cmd, got))
+        good = expect('sh_bg_redirect', 'pwd', sh_lines(r, 'pwd', 0.5), [REMOTE, '[1] done tick (exit 7)']) and good
+        data = r.fetch('/tmp/t.txt')
+        if data != b'tick 1\ntick 2\ntick 3\n':
+            good = fail('sh_bg_redirect: /tmp/t.txt holds %r' % data)
+        return good
+    return in_shell(r, 'sh_bg_redirect', body)
+
+
+def case_sh_bg_errors(r):
+    def body():
+        good = True
+        steps = [('nosuch &', 0.5, ['nosuch: not found']),
+                 ('notprog.txt &', 0.5, ['notprog.txt: not a valid program'])]
+        for k in range(1, 5):
+            steps.append(('tick 0 1000 &', 0.3, ['[%d] tick' % k]))
+        steps.append(('tick 0 1000 &', 0.3, ['too many jobs']))
+        for k in range(1, 5):
+            steps.append(('kill %d' % k, 0.5, ['[%d] done tick (exit -9)' % k]))
+        for cmd, secs, want in steps:
+            good = expect('sh_bg_errors', cmd, sh_lines(r, cmd, secs), want) and good
+        got = sh_lines(r, 'help', 0.5)
+        if not any('cmd & runs in the background, jobs, kill N' in l for l in got):
+            good = fail('sh_bg_errors: help printed %r' % got)
+        return good
+    return in_shell(r, 'sh_bg_errors', body)
+
+
+def case_ctrl_c_pipe(r):
+    good, rest = pclient(r, 'ctrl_c_pipe', 'start p1')
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(b'cat /pipe/p1.out\r')
+    raw = b._read(1.5, 1.5).decode('latin-1')
+    last = raw.replace('\r', '\n').split('\n')[-1]
+    if r.board.PROMPT_RE.match(last):
+        good = fail('ctrl_c_pipe: cat /pipe/p1.out did not block (got %r)' % raw)
+    b._write(b'\x03')
+    raw = b._read(5.0, 0.3, True).decode('latin-1')
+    last = raw.replace('\r', '\n').split('\n')[-1]
+    if not r.board.PROMPT_RE.match(last):
+        return fail('ctrl_c_pipe: no prompt after Ctrl-C (got %r); the board needs a reset' % raw)
+    out, code = r.run('pwd', 10.0)
+    if out != ['/'] or code:
+        good = fail('ctrl_c_pipe: pwd printed %r, exit %d' % (out, code))
+    g2, rest = pclient(r, 'ctrl_c_pipe', 'finish p1')
+    return good and g2
+
+
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
@@ -302,7 +440,10 @@ CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('pipe_roundtrip', case_pipe_roundtrip), ('reply_before_request', case_reply_before_request),
          ('shell_redirect', case_shell_redirect), ('large_message', case_large_message),
          ('owner_exit_eof', case_owner_exit_eof), ('kill_pipe_reader', case_kill_pipe_reader),
-         ('mkpipe_errors', case_mkpipe_errors)]
+         ('mkpipe_errors', case_mkpipe_errors),
+         ('sh_bg_done', case_sh_bg_done), ('sh_jobs_kill', case_sh_jobs_kill),
+         ('sh_bg_redirect', case_sh_bg_redirect), ('sh_bg_errors', case_sh_bg_errors),
+         ('ctrl_c_pipe', case_ctrl_c_pipe)]   # last: on a kernel without it the board stays blocked
 
 
 def check_board():
