@@ -1,6 +1,6 @@
 // spawner.c - foreground driver for the background job tests (tools/check_jobs.py).
 // spawner CASE runs one case, prints one line per check ("ok ..." or "FAIL ...")
-// and then PASS or FAIL. Cases: basic errors sleeping getchar redirect exec.
+// and then PASS or FAIL. Cases: basic errors sleeping getchar redirect exec listen.
 // Every case leaves the job table empty (all jobs ended and reported by jobs()).
 #include "sys.h"
 
@@ -173,15 +173,49 @@ int case_exec() {
   return 0;
 }
 
+// a listener belongs to its task: while job A listens, the foreground's and job B's
+// listen() return -1 (B prints "listen -1"); killing A frees it (no listener is left)
+int case_listen() {
+  int a; int b; int r; int n; int i; int good;
+  av[0] = "listener"; av[1] = "7001"; av[2] = 0;
+  a = spawn("/src/jobs/listener.bin", 2, av);
+  sprintf(msg, "spawn listener 7001 = %d", a);
+  check(a >= 1 && a <= MAX_JOBS);
+  sleep(300);                          // A prints "listen 0"
+  r = listen(7002);
+  sprintf(msg, "foreground listen while job %d listens = %d (want -1)", a, r);
+  check(r == -1);
+  av[1] = "7003";
+  b = spawn("/src/jobs/listener.bin", 2, av);
+  sprintf(msg, "spawn listener 7003 = %d", b);
+  check(b >= 1 && b <= MAX_JOBS);
+  sleep(300);                          // B prints "listen -1"
+  r = kill(a);
+  sprintf(msg, "kill %d = %d", a, r);
+  check(r == 0);
+  r = kill(b);
+  sprintf(msg, "kill %d = %d", b, r);
+  check(r == 0);
+  n = jobs(jb, 8);
+  good = n == 2;
+  i = 0;
+  while (i < n) { if (jb[i].state != JOB_DONE || jb[i].exit_code != JOB_KILLED) good = 0; i = i + 1; }
+  sprintf(msg, "jobs: %d done, killed", n);
+  check(good);
+  empty();
+  return 0;
+}
+
 int main(int argc, char **argv) {
   fails = 0;
-  if (argc < 2) { printf("usage: spawner basic|errors|sleeping|getchar|redirect|exec\n"); return 2; }
+  if (argc < 2) { printf("usage: spawner basic|errors|sleeping|getchar|redirect|exec|listen\n"); return 2; }
   if (!strcmp(argv[1], "basic")) case_basic();
   else if (!strcmp(argv[1], "errors")) case_errors();
   else if (!strcmp(argv[1], "sleeping")) case_sleeping();
   else if (!strcmp(argv[1], "getchar")) case_getchar();
   else if (!strcmp(argv[1], "redirect")) case_redirect();
   else if (!strcmp(argv[1], "exec")) case_exec();
+  else if (!strcmp(argv[1], "listen")) case_listen();
   else { printf("unknown case %s\n", argv[1]); return 2; }
   if (fails) printf("FAIL\n"); else printf("PASS\n");
   return 0;

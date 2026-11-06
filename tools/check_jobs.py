@@ -2,7 +2,7 @@
 """Check background jobs on the board: spawn, yield, jobs, kill and cooperative switching.
 
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
-hog (getchar() forever) and spawner (the foreground driver: `spawner CASE` prints one
+hog (getchar() forever), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
 
   check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
@@ -26,6 +26,8 @@ Cases (spawner CASE on the board):
   fg_exec_with_job    with `tick 0 300` running, the board's cc builds the tests/toolchain
                       case `globals` (cc execs as and ld), its output equals globals.expected;
                       a nested foreground `tick 2 400` returns 7; then kill the tick
+  listen_owner        job A listens (prints "listen 0"); the foreground's listen and job B's
+                      (prints "listen -1") fail while A runs; kill both (WiFi need not be up)
 """
 import os
 import re
@@ -39,7 +41,7 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'spawner']
+PROGS = ['tick', 'hog', 'listener', 'spawner']
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
 EXEC_CASE = 'globals'                      # the tests/toolchain case fg_exec_with_job builds
@@ -193,9 +195,19 @@ def case_fg_exec_with_job(r):
     return good
 
 
+def case_listen_owner(r):
+    out, code = r.run(SPAWNER + ' listen', 30.0)
+    good, ticks, rest = verdict('listen_owner', out, code)
+    got = [l for l in rest if l.startswith('listen ')]
+    if got != ['listen 0', 'listen -1']:
+        good = fail('listen_owner: the jobs printed %r, want job A "listen 0", then job B "listen -1"' % got)
+    return good
+
+
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
-         ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job)]
+         ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
+         ('listen_owner', case_listen_owner)]
 
 
 def check_board():

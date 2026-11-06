@@ -335,7 +335,9 @@ extern "C" int sys(int num, int n, int *argv) {
       return SOCK_FD + i; }
     case SYS_send: return sock_send(A(0), (const char *)A(1), A(2));
     case SYS_recv: return sock_recv(A(0), (char *)A(1), A(2), A(3));
-    case SYS_listen: if (server) { server->stop(); delete server; } server = new WiFiServer(A(0)); server->begin(); server_owner = cur_id(); return 0;
+    case SYS_listen:                      // a running task's listener is its own: only it may replace it
+      if (server && server_owner != cur_id() && tasks[server_owner].state == T_RUN) return -1;
+      if (server) { server->stop(); delete server; } server = new WiFiServer(A(0)); server->begin(); server_owner = cur_id(); return 0;
     case SYS_accept: { if (!server) return -1; int to = A(0); uint32_t t0 = millis();
       for (;;) {
         { WiFiClient c = server->accept(); if (c) { int i = sock_alloc(); if (i < 0) { c.stop(); return -1; } socks[i] = c; return SOCK_FD + i; } }  // c is gone before k_wait (kill unwinds past it)
