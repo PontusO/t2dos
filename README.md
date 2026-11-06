@@ -1,342 +1,1230 @@
-# T2DOS: a DOS-class OS for the RP2350, with a self-hosting C compiler
+# T2DOS User's Manual
 
-One program at a time, flat memory, kernel in the Arduino sketch, everything
-else is a T2CC program on the SD card (or, without a card, in on-board flash).
+T2DOS is a small DOS-class operating system for the RP2350 (tested on the
+iLabs CPico 2350). It runs one program at a time in flat memory, with a shell,
+file tools, a full-screen editor, network tools and a complete C development
+toolchain: a C compiler (`cc`), an assembler (`as`), a linker with libraries
+(`ld`, `ar`) and the inspection tools `nm` and `objdump`. The toolchain runs
+on the board itself and rebuilds itself there, byte-identical to the PC build.
 
-## Layout
-    sys.h             syscall ABI: numbers, flags, structs. Shared by kernel, compiler, programs
-    compiler/cc.c     the compiler and driver: C to assembly, then as and ld (gcc builds it as a
-                      PC cross compiler, compiler/cc; it compiles itself on the board)
-    compiler/tests/   language tests: test.c test3.c test4.c ...
-    assembler/as.c    the assembler: GNU syntax Thumb-2 to T2DOS objects
-    linker/ld.c       the linker: objects and archives to a .bin
-    binutils/         ar (archives), nm (symbols), objdump (disassembler)
-    lib/t2obj.h .c    the object and archive formats, shared by as, ld and the binutils
-    tests/            asm/ (as), link/ (ld, ar), obj/ (nm, objdump), toolchain/ (cc driver)
-    kernel/kernel.ino the kernel (arduino-pico; SDFS on SPI, set SD_CS; LittleFS fallback)
-    host_linux.c      the same kernel contract on Linux/ARM, run binaries with qemu-arm
-    userland/*.c      sh ls cat cp mv rm mkdir rmdir echo hexdump free put write edit blink
-                      wifi get send rls nc (network)
-    lib/net.c         client helpers for the file protocol, #include "net.c"
-    tools/fileserver.py  Linux side: python3 fileserver.py dir [port]
-    root/             filesystem image: /bin/*.bin  /lib/sys.h /lib/net.c /lib/t2obj.h /lib/t2obj.c  /src/
-    Makefile          make all; make check; make ref; make host
+The kernel is an Arduino sketch. Everything else is a program on the SD card,
+or, when no card is found, in the board's flash.
 
-## Building the kernel
-Tested on the iLabs CPico 2350 with arduino-pico 6.2.0 (`rp2040:rp2040`).
-The sketch includes `sys.h` from the repo root:
+Contents
 
-    FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
-    arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel kernel
-    arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel
+1. [Getting started](#1-getting-started)
+2. [The shell](#2-the-shell)
+3. [Command reference](#3-command-reference)
+4. [The editor](#4-the-editor)
+5. [Writing programs in C](#5-writing-programs-in-c)
+6. [The toolchain](#6-the-toolchain)
+7. [Assembly language](#7-assembly-language)
+8. [System reference](#8-system-reference)
+9. [Building T2DOS from source](#9-building-t2dos-from-source)
+10. [Status](#10-status)
 
-The `flash=` layout gives the kernel 1 MB (it uses about 184 KB) and the
-filesystem 7 MB. Reflashing the kernel keeps the filesystem.
+---
 
-## Bootstrapping
-1. `make` (needs gcc). Copy `root/` to the SD card.
-2. Flash `kernel.ino`. It boots `/bin/sh.bin`; if that is missing you get a
-   `recovery>` prompt with `put name size` (raw bytes follow), `ls`, `mkdir`, `run`.
-   No SD card: the kernel falls back to LittleFS in on-board flash (banner says
-   `fs flash`, formatted on first use). On the CPico 2350 build with the
-   `flash=8388608_7340032` layout: 1 MB for the kernel, 7 MB filesystem. Fill it
-   with `put` from the recovery prompt or the shell, one file at a time.
-3. On the board: `cd /src`, `write hello.c` (type it, end with `.`),
-   `cc -o hello.bin hello.c`, `hello`.
-   `put` works from the shell too; from a PC:
-   `(printf 'put cc.bin %d\n' $(stat -c%s cc.bin); cat cc.bin) > /dev/ttyACM0`
-4. `/autoexec.sh` runs at shell start; `sh script` runs any script.
-   At the prompt, Up and Down scroll through the last 16 command lines.
+## 1. Getting started
 
-## Editor
-`edit file` is a full-screen editor for an ANSI/VT100 terminal, e.g.
-`screen /dev/ttyACM0 115200`. It reads the window size from the terminal
-(falls back to 80x24) and uses the alternate screen, so the shell output
-comes back when it quits.
+### What you need
 
-    arrows Home End PgUp PgDn   move          Backspace Del Enter Tab   edit
-    ^O (or ^S)                  save          ^X (or ^Q)                quit, twice if unsaved
-    ^F                          find (Enter = next match, Esc cancels)
-    ^B                          set the mark (again: clear it)
-    ^K                          cut           ^C                        copy
-    ^U                          paste the cut or copied text at the cursor
+- An RP2350 board with PSRAM: the iLabs CPico 2350 (8 MB PSRAM) is the tested one.
+- Optional: an SD card on SPI0 with CS on GP17. Without one, T2DOS uses a
+  7 MB filesystem in the board's flash.
+- A Linux PC with gcc, `arduino-cli` and the arduino-pico core
+  (`rp2040:rp2040`, tested with 6.2.0), and a terminal program such as
+  `screen`.
 
-With a mark set, ^K and ^C take the text from the mark to the cursor, both
-ends included (shown in reverse video). Without one they take the whole current line, and
-pressing them again right away adds the next line to the same block, so ^K^K^K
-cuts three lines and ^C^C^C copies three. ^U pastes as often as you like.
+### Build and install
 
-Enter keeps the current line's indentation, except while text is pasted.
-Use ^O to save under `screen`: it has flow control on for serial lines, so ^S
-freezes its output until ^Q (or turn it off with `defflow off` in ~/.screenrc).
-Closing the terminal window detaches `screen` but keeps the port open; quit
-it with Ctrl-A k, or `screen -r` to get back in.
-Long lines scroll horizontally; tabs are 8 columns. The edit buffer is the
-file size plus 256 KB, so one session can add up to 256 KB of text.
+On the PC, in the repository:
 
-## Network
-    wifi ssid password        join (kernel: WiFi.begin, 15 s timeout);  wifi  -> status and IP
-    rls  host[:port] [dir]    list files on the server
-    get  host[:port] remote [local]
-    send host[:port] local [remote]
-    nc host port | nc -l port raw TCP terminal, Ctrl-] quits
-Default port 7777. Protocol: one request per connection, GET name / PUT name
-size + bytes / LS [dir], reply "OK [size]\n" + data or "ERR text\n".
-Syscalls 80..88: net_join net_status net_ip connect send recv(fd,buf,n,timeout_ms)
-listen accept(timeout_ms) sock_avail. Socket fds are 100+ and also work with
-read/write/close; exec closes sockets a child leaked.
+```sh
+make                                   # the PC cross compiler and every program, into root/
+FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
+arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel kernel
+arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel
+```
 
-## Kernel contract
-- Programs are position independent Thumb-2: `r7` frame, `r8` = kernel
-  `sys()`, `r9` = data base, args on the stack (first arg deepest), result in r0.
-- `sys(num, nargs, argv)`, `argv[nargs-1]` is the first argument. Numbers in sys.h,
-  grouped: process 0+, console 16+, files 32+, memory/strings 64+, network 80+,
-  board 96+, user 128+.
-- `exec(path, argc, argv)` loads a binary into fresh code (SRAM) + data + 256 KB
-  stack (PSRAM), runs it, frees everything, returns its exit code. Nesting up to 4.
-  Files the child leaked are closed, memory it `malloc`ed is freed;
-  `redirect(fd)` is restored. `malloc` returns zeroed memory.
-- Syscalls run on a 16 KB kernel stack in SRAM, not the program's PSRAM stack
-  (PSRAM is unreachable while flash is being written).
-- fd 0/1 are the console; `redirect(fd)` routes fd 1 and printf to a file (the
-  shell implements `> file` and `>> file` with it). cwd lives in the kernel.
-- Console is a driver interface (`putc/getc/kbhit/ctl/width/height`); the serial
-  driver is in; a display+keyboard driver is the same five methods.
-- `printf`/`sprintf` are kernel-side: `%[-][0][width][.prec]d u x c s f e g %%`; `%f %e %g` take a float.
+The `flash=` layout gives the kernel 1 MB and the flash filesystem 7 MB.
+Reflashing the kernel keeps the filesystem.
 
-## Toolchain
-`cc` works like gcc's driver: it compiles each `.c` to assembly itself, runs
-`as` on every `.s`, then `ld` on all the objects. On the board the tools are
-`/bin/as.bin` and `/bin/ld.bin` (run with `exec`); the PC build `compiler/cc`
-runs `build/host/as` and `build/host/ld` (or the ones in the directory named by
-`$T2_TOOLS`). Intermediate files go to `/tmp` (created when missing) and are
-removed again, also after an error. Every tool is silent on success.
+Then put the files on the board:
 
-    cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file.c|file.s|file.o|file.a...
+- **SD card:** copy the contents of `root/` to the card.
+- **Flash filesystem:** upload each file over the serial line with `put`
+  (see [put](#put)). For example, from the PC:
 
-- Inputs by suffix: `.c` is compiled and assembled, `.s` assembled, `.o` and
-  `.a` go to `ld` as they are, all in command-line order; `-l` archives come last.
-- Without `-S`/`-c` the result is a `.bin`: `a.bin` unless `-o` names it.
-- `-c` stops at objects, `-S` at assembly (`.c` inputs only). Each output is the
-  input's base name with `.o` or `.s`, in the current directory; `-o` names it
-  when there is exactly one input.
-- `-mshort-data` makes `-S`/`-c` output use the short data references, as if
-  the file's data came first in the program (see "Data references" below).
-- `-l name` links `libname.a`, searched in each `-L dir` in order, then the
-  current directory, then `/lib`. `-lname` and `-Ldir` work too.
-- `-I dir` adds an include directory (`#include "file"` also searches the
-  current directory and `/lib`); `-D NAME[=value]` defines a macro (value 1).
-- When a step fails, its own message is what you see, and `cc` exits with that
-  step's exit code (1 for a compile error).
+  ```sh
+  f=root/bin/sh.bin; (printf 'put /bin/sh.bin %d\n' $(stat -c%s $f); cat $f) > /dev/ttyACM0
+  ```
 
-The other tools:
+  The board needs everything in `root/bin/` in `/bin`, and `root/lib/*` in
+  `/lib` (the headers and sources the compiler includes).
 
-    as [-o out.o] file.s             assemble (default output: file.o)
-    ld [-o out.bin] [-e entry] file.o... lib.a...
-                                     link; the entry is main unless -e names one; an
-                                     archive member is linked only when it defines a
-                                     symbol that is still undefined
-    ar rc lib.a a.o b.o...           create an archive, or replace and append members
-    ar t lib.a                       list the members
-    ar x lib.a [member...]           extract (all members without names)
-    nm file.o|lib.a...               symbols: T/t text, D/d data, A/a absolute (upper
-                                     case global, lower case local), U undefined
-    objdump file.o|lib.a|prog.bin... header, symbols, relocations, disassembly, data
+### Connect
 
-Separate compilation: `extern int counter;`, `extern char name[];` and
-`extern` prototypes declare what another file defines. Every global function
-and variable is visible to the other files (there is no `static` yet). A call
-of a function that no file defines is reported by `ld` (`ld: undefined
-symbol: f (in x.o)`). Examples:
+```sh
+screen /dev/ttyACM0 115200
+```
 
-    cc -o prog.bin main.c util.c                      two C files in one step
-    cc -c util.c; cc -o prog.bin main.c util.o        or one at a time
-    cc -o mixed.bin main.c fast.s                     C and assembly together
-    cc -c sq.c cube.c; ar rc libm2.a sq.o cube.o      a library ...
-    cc -o p.bin p.c -L . -l m2                        ... and a program using it
+After a reset the kernel prints a banner and starts the shell (the numbers
+vary):
 
-Data references: code reaches a global as `r9` plus the global's offset in the
-program's data, and `cc` picks the smallest instruction form that reaches it:
-`addw r0, r9, #name` (4 bytes) below 4 KB, `movw.16` and `add.w` (8 bytes)
-below 64 KB, `movw`, `movt` and `add.w` (12 bytes) above that. When `cc` builds
-the whole program, it knows where `ld` will put each file's data (after the data
-of the files before it; libraries come after all of them), so every file gets
-the short form where it fits, and a single-file program is the same as before.
-With `-S` or `-c`, `cc` cannot know what comes before the file in the link, so
-it uses the 12-byte form for every data reference. `-mshort-data` compiles as
-if the file's data came first, which is right for the first object of a
-program. If that guess is wrong, `ld` stops instead of producing a broken
-program:
+```
+T2DOS kernel  psram 8388608  sram free 412345  fs flash
+T2DOS shell, type help
+/>
+```
 
-    ld: data offset of counter (main.o) is 5000, too far for addw
+`fs flash` or `fs sd` says which filesystem is in use. To leave `screen`,
+press Ctrl-A then k. Closing the terminal window only detaches `screen` and
+keeps the port busy; `screen -r` gets you back in.
 
-(the global, and the object that refers to it). References to `extern`
-variables always use the 12-byte form.
+`screen` has flow control on for serial lines, so Ctrl-S freezes its output
+until Ctrl-Q. Turn it off with `defflow off` in `~/.screenrc` if that gets in
+the way.
 
-C and assembly call each other with cc's convention: the arguments on the
-stack, the first one deepest, popped by the caller; the result in r0. Keep
-`r7`, `r8` and `r9` (C functions save `r7` and `lr` and use `r0` to `r4`, saving
-`r4` when they use it). tests/toolchain/ has a working example of each case.
+### A first session
 
-## Assembly
-`as` takes the subset of GNU's unified syntax that cc and hand-written code
-need: the ARMv8-M mainline integer instructions with their narrow and wide
-forms (`.n`, `.w`), IT blocks, and the single precision FPU instructions
-(`vadd.f32`, `vldr`, `vmov`, `vcvt`, `vpush`, ...). The encodings equal
-arm-none-eabi-as with `-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16`
-(tools/check_asm.py compares them byte for byte). Directives: `.syntax
-unified`, `.thumb`, `.thumb_func`, `.text`, `.data`, `.global`/`.globl`,
-`.extern`, `.equ`/`.set`, `.byte`, `.hword`/`.short`, `.word`, `.ascii`,
-`.asciz`/`.string`, `.space`/`.zero`, `.align`, `.balign`, `.t2init`.
-Comments: `@`, `//`, `/* */`, and `#` at the start of a line.
+```
+/> cd /src
+/src> edit hello.c
+```
 
-The code model (what the kernel and ld expect): code is position independent,
-`r9` holds the data base and `r8` the kernel's syscall entry. The value of a
-data symbol is its offset in the data, so data lives at `r9 + offset`:
+Type the program, press Ctrl-O to save and Ctrl-X to quit:
 
-    addw    r0, r9, #counter          @ offsets 0 to 4095
-    movw.16 r1, #counter              @ offsets up to 65535
-    add.w   r0, r9, r1
-    movw    r1, #:lower16:counter     @ any offset
-    movt    r1, #:upper16:counter
-    add.w   r0, r9, r1
+```c
+#include "sys.h"
+int main(int argc, char **argv) {
+  printf("hello from T2DOS, %d args\n", argc);
+  return 0;
+}
+```
 
-`.word label` in `.data` stores the label's section offset (the value ld
-gives the symbol), not an address: a function pointer table in `.data` does
-not work, since calling through it jumps to an offset. Take function
-addresses at run time with `fnaddr`. `.align`/`.balign` go up to 4 bytes
-(ld aligns each section to 4). As in GNU as, `sp` and `pc` are refused where
-ARMv8-M makes them unpredictable (`r13 not allowed here`, `r15 not allowed
-here`), and `add rd, pc, #imm` is `adr`.
+Compile and run it:
 
-`b`, `b<cond>` and `bl` to another file's functions are relocated by ld.
-T2DOS pseudo-instructions (GNU as has no such forms):
+```
+/src> cc -o hello.bin hello.c
+/src> hello a b
+hello from T2DOS, 3 args
+```
 
-- `fnaddr rd, sym`: `rd` = the Thumb address of the function `sym`, PC
-  relative (10 bytes: `movw rd, #lo; movt rd, #hi; add rd, pc`).
-- `movw.16 rd, #sym`: a `movw` of a data offset that must fit 16 bits (no
-  `movt` follows).
-- `.t2init sym`: `sym` is a run-before-main routine; ld's entry stub calls
-  each one in link order before `main`. cc uses it for global initializers
-  that need code.
+`cc` prints nothing when it succeeds. `hello` runs `hello.bin` from the
+current directory.
 
-Symbol operands: `#sym` and `#sym+n` (with `addw` and `movw.16`),
-`#:lower16:sym` and `#:upper16:sym` (with `movw` and `movt`), plain `sym` for
-branches and `fnaddr`. Labels starting with `.L` stay inside the file. Not
-supported: literal pools (`ldr r0, =x`, `ldr r0, label`), writeback and
+### The recovery prompt
+
+If `/bin/sh.bin` is missing, or the shell exits, the kernel shows a minimal
+prompt that can still load files and run programs:
+
+```
+recovery> put /bin/sh.bin 5025         (then send the raw bytes)
+recovery> ls /bin
+recovery> mkdir /src
+recovery> run /bin/ls.bin /src
+recovery> sh                           (start the shell again)
+```
+
+---
+
+## 2. The shell
+
+The shell prints the current directory as its prompt and runs one command
+line at a time.
+
+### Running programs
+
+A command is a program name followed by arguments separated by spaces:
+
+```
+/src> ls /bin
+/src> cp hello.c hello.bak
+```
+
+The shell looks for `name.bin` in the current directory first, then in
+`/bin`. A name that contains a dot is used as given (`tool.bin`,
+`/bin/ls.bin`). Arguments are split at spaces; there is no quoting. A line
+holds up to 255 characters and 15 arguments.
+
+When a program ends with a non-zero exit code, the shell reports it with the
+run time:
+
+```
+/src> cat nosuch.txt
+cat: nosuch.txt: not found
+[exit 1, 12 ms]
+```
+
+### Built-in commands
+
+```
+cd [dir]        change directory (no argument: /)
+pwd             print the current directory
+exit [code]     leave the shell (the kernel's recovery prompt takes over)
+help            a one-line summary
+```
+
+### Output redirection
+
+`> file` writes a program's output to a file, `>> file` appends to it:
+
+```
+/src> ls /bin > files.txt
+/src> echo one more line >> files.txt
+```
+
+Only the output is redirected; there are no pipes.
+
+### Line editing and history
+
+- Backspace erases the last character, Ctrl-C discards the line.
+- Up and Down scroll through the last 16 command lines. A recalled line can
+  be edited before pressing Enter. Down past the newest line brings back what
+  you had started typing.
+
+### Scripts
+
+A script is a text file with one command per line; empty lines and lines
+starting with `#` are skipped.
+
+```sh
+# build.sh: build and run the example
+cc -o hello.bin hello.c
+hello
+```
+
+```
+/src> sh build.sh
+hello from T2DOS, 1 args
+```
+
+`/autoexec.sh`, if it exists, runs every time the shell starts.
+
+---
+
+## 3. Command reference
+
+Example outputs show the format; sizes and numbers vary.
+
+### Files and directories
+
+#### ls
+
+```
+ls [file|dir...]
+```
+
+Lists a directory (default: the current one) with sizes, or shows one file.
+
+```
+/> ls /src
+     112  hello.c
+    5025  hello.bin
+   <dir>  old/
+2 files, 5137 bytes
+```
+
+#### cat
+
+```
+cat file...
+```
+
+Prints files to the console, one after another.
+
+```
+/src> cat hello.c
+```
+
+#### cp
+
+```
+cp src dst
+```
+
+Copies a file.
+
+```
+/src> cp hello.c /src/old/hello.c
+```
+
+#### mv
+
+```
+mv old new
+```
+
+Renames or moves a file.
+
+```
+/src> mv hello.bak hello.old
+```
+
+#### rm
+
+```
+rm file...
+```
+
+Deletes files.
+
+```
+/src> rm hello.old hello.bin
+```
+
+#### mkdir, rmdir
+
+```
+mkdir dir...
+rmdir dir...
+```
+
+Create or remove directories. `rmdir` only removes empty directories.
+
+```
+/> mkdir /src/lib
+/> rmdir /src/lib
+```
+
+#### hexdump
+
+```
+hexdump file
+```
+
+Shows a file as hex bytes and characters, 16 bytes a line.
+
+```
+/src> hexdump hello.c
+000000  23 69 6e 63 6c 75 64 65 20 22 73 79 73 2e 68 22  #include "sys.h"
+000010  0a 69 6e 74 20 6d 61 69 6e 28 69 6e 74 20 61 72  .int main(int ar
+```
+
+#### write
+
+```
+write file
+```
+
+Types lines into a file from the console, a quick alternative to the editor.
+A line with a single `.` ends the input.
+
+```
+/src> write notes.txt
+enter text, end with a single . on a line
+first line
+second line
+.
+```
+
+#### put
+
+```
+put file size
+```
+
+Receives exactly `size` raw bytes from the console and stores them in
+`file`. This is how files get onto the board without an SD card reader or a
+network. Send the command and the bytes from the PC in one go (with no
+`screen` session open on the port):
+
+```sh
+f=hello.c; (printf 'put /src/hello.c %d\n' $(stat -c%s $f); cat $f) > /dev/ttyACM0
+```
+
+The same `put` works at the recovery prompt.
+
+### System
+
+#### free
+
+```
+free
+```
+
+Shows free memory and disk space.
+
+```
+/> free
+sram free     412345 bytes
+psram        8388608 bytes, 8126464 free
+disk            7168 KB, 1234 KB used
+```
+
+#### echo
+
+```
+echo [word...]
+```
+
+Prints its arguments, separated by single spaces. Handy with `>`:
+
+```
+/> echo cc -o hello.bin hello.c > /src/build.sh
+```
+
+#### blink
+
+```
+blink [pin] [count]
+```
+
+Blinks a GPIO pin `count` times (defaults: pin 25, 10 times), as a board I/O
+demo.
+
+```
+/> blink 25 3
+```
+
+### Text editor
+
+```
+edit file
+```
+
+A full-screen editor. See [The editor](#4-the-editor).
+
+### Network
+
+The network tools use the board's WiFi and a small file server on the PC.
+
+#### wifi
+
+```
+wifi ssid password
+wifi
+```
+
+Joins a network (15 s timeout), or shows the status.
+
+```
+/> wifi homenet secret123
+joining homenet...
+connected, ip 192.168.1.42
+/> wifi
+connected, ip 192.168.1.42
+```
+
+#### The PC file server
+
+`rls`, `get` and `send` talk to `tools/fileserver.py` on the PC, which serves
+one directory (default port 7777):
+
+```sh
+python3 tools/fileserver.py ~/t2files 7777
+```
+
+#### rls
+
+```
+rls host[:port] [dir]
+```
+
+Lists files on the server.
+
+```
+/> rls 192.168.1.10
+/> rls 192.168.1.10:7777 projects
+```
+
+#### get
+
+```
+get host[:port] remote [local]
+```
+
+Downloads a file from the server. The default local name is the remote
+file's name without its directory.
+
+```
+/src> get 192.168.1.10 game.c
+/src> get 192.168.1.10 projects/game.c game2.c
+```
+
+#### send
+
+```
+send host[:port] local [remote]
+```
+
+Uploads a file to the server. The default remote name is the local file's
+name without its directory.
+
+```
+/src> send 192.168.1.10 hello.c
+/src> send 192.168.1.10 hello.bin builds/hello.bin
+```
+
+#### nc
+
+```
+nc host port
+nc -l port
+```
+
+A raw TCP terminal: what you type is sent, what arrives is printed. `-l`
+waits for one incoming connection first. Ctrl-] quits.
+
+```
+/> nc 192.168.1.10 23
+/> nc -l 5000
+```
+
+### Development
+
+`cc`, `as`, `ld`, `ar`, `nm` and `objdump` are described in
+[The toolchain](#6-the-toolchain), with examples.
+
+---
+
+## 4. The editor
+
+```
+edit file
+```
+
+`edit` is a full-screen editor for an ANSI/VT100 terminal such as `screen`.
+It reads the window size from the terminal (80x24 if it cannot), and uses
+the alternate screen, so the shell's output comes back when it quits. A new
+file is created when you save.
+
+### Keys
+
+```
+arrows, Home, End, PgUp, PgDn     move
+Backspace, Del, Enter, Tab        edit
+^O (or ^S)                        save
+^X (or ^Q)                        quit (press twice to leave without saving)
+^F                                find (^F again or Enter: next match, Esc: cancel)
+^B                                set the mark (again: clear it)
+^K                                cut
+^C                                copy
+^U                                paste the cut or copied text at the cursor
+```
+
+The bottom line shows the file name, `[modified]` when there are unsaved
+changes, the line and column, and the keys.
+
+### Cut, copy and paste
+
+Without a mark, `^K` and `^C` take the whole current line. Pressing them
+again right away adds the next line to the same block:
+
+```
+^K^K^K        cut three lines
+^C^C          copy two lines (the cursor moves down as it copies)
+^U            paste them, as often as you like
+```
+
+To work on any part of the text, set the mark with `^B` at one end, move the
+cursor to the other end (the block shows in reverse video), then press `^K`
+or `^C`. The block includes the characters at both ends. Typing or deleting
+clears the mark.
+
+Example: to duplicate a function, put the cursor on its first character,
+press `^B`, move to its closing `}`, press `^C`, move to where the copy goes,
+and press `^U`.
+
+### Notes
+
+- Enter keeps the current line's indentation, except while text is being
+  pasted from the terminal (so pasted code keeps its own layout).
+- Use `^O` to save under `screen`: with `screen`'s flow control on, `^S`
+  freezes the terminal until `^Q`.
+- Long lines scroll horizontally; tabs are 8 columns.
+- One session can add up to 256 KB of text to a file.
+
+---
+
+## 5. Writing programs in C
+
+### Hello, world
+
+```c
+#include "sys.h"
+int main(int argc, char **argv) {
+  int i;
+  for (i = 0; i < argc; i++) printf("argument %d: %s\n", i, argv[i]);
+  return 0;
+}
+```
+
+```
+/src> cc -o args.bin args.c
+/src> args one two
+argument 0: args
+argument 1: one
+argument 2: two
+```
+
+`main`'s return value is the program's exit code. `#include "sys.h"` gives
+the constants (`OPEN_READ`, `PIN_OUTPUT`, ...) and the structs (`stat_t`,
+`dirent_t`). `#include <...>` lines are accepted and ignored, so standard C
+code with `#include <stdio.h>` compiles as it is.
+
+### The library
+
+The library functions are built into the compiler and run in the kernel, so
+they cost no code in the program. All arguments and results are ints or
+pointers.
+
+| Group | Functions |
+|---|---|
+| Process | `exit(code)`, `exec(path, argc, argv)` (runs a program, returns its exit code), `millis()`, `sleep(ms)`, `sysinfo(kind)` |
+| Console | `putchar(c)`, `getchar()` (waits for a key), `kbhit()` (1 if a key is waiting), `conctl(cmd, a, b)`, `redirect(fd)` |
+| Files | `open(path, mode)` (mode `OPEN_READ`, `OPEN_WRITE`, `OPEN_APPEND`; -1 on error), `close(fd)`, `read(fd, buf, n)`, `write(fd, buf, n)`, `seek(fd, offset, whence)`, `stat(path, &st)`, `unlink(path)`, `rename(old, new)`, `mkdir(path)`, `rmdir(path)`, `chdir(path)`, `getcwd(buf, n)` |
+| Directories | `opendir(path)`, `readdir(d, &entry)` (1 while there are entries), `closedir(d)` |
+| Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
+| Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
+| Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)` |
+| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)` |
+
+`printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
+a width and a precision (`%-8s`, `%04x`, `%.3f`). fd 0 and 1 are the console;
+`redirect(fd)` sends fd 1 and `printf` to a file. `conctl` takes `CON_CLEAR`,
+`CON_GOTO` (column, row) and `CON_COLOR` (foreground, background, 0 to 7).
+`sysinfo` takes `INFO_SRAM_FREE`, `INFO_PSRAM_TOTAL`, `INFO_PSRAM_FREE`,
+`INFO_DISK_TOTAL_KB` and `INFO_DISK_USED_KB`. Socket fds also work with
+`read`, `write` and `close`; `recv` returns 0 on a timeout and -1 when the
+connection is closed.
+
+A program that counts the lines of a file:
+
+```c
+#include "sys.h"
+char buf[512];
+int main(int argc, char **argv) {
+  int fd; int n; int lines; int i;
+  if (argc < 2) { printf("usage: lines file\n"); return 1; }
+  fd = open(argv[1], OPEN_READ);
+  if (fd < 0) { printf("cannot open %s\n", argv[1]); return 1; }
+  lines = 0;
+  while ((n = read(fd, buf, 512)) > 0)
+    for (i = 0; i < n; i++) if (buf[i] == '\n') lines++;
+  close(fd);
+  printf("%d lines\n", lines);
+  return 0;
+}
+```
+
+A program that drives a pin:
+
+```c
+#include "sys.h"
+int main() {
+  int i;
+  gpio_mode(25, PIN_OUTPUT);
+  for (i = 0; i < 5; i++) { gpio_write(25, 1); sleep(200); gpio_write(25, 0); sleep(200); }
+  return 0;
+}
+```
+
+### The C language subset
+
+`cc` compiles a large subset of C. It is written in that subset itself, which
+is what lets it compile itself on the board.
+
+**Types:** `int`, `char`, `short`, `void`, `unsigned` and `signed` forms,
+`long` (32 bits, same as `int`), `float` (and `double`, which is the same
+32-bit float), pointers, structs (named or anonymous, with array members),
+`typedef`, `enum`, arrays of any dimension.
+
+**Statements and operators:** `if`/`else`, `while`, `for`, `switch`/`case`/
+`default`, `break`, `continue`, `return`; all operators including `?:`,
+`++`/`--`, the compound assignments (`+= -= *= /= %= &= |= ^= <<= >>=`) and
+the comma operator; `sizeof(type)`; casts; prototypes; `extern`.
+
+**Integer rules** follow C: `char` and `short` promote to `int`; with an
+`unsigned int` operand, comparisons, `/`, `%` and `>>` are unsigned; casts,
+stores and `return` truncate to the target type. Literals take `u` and `l`
+suffixes; hex constants above `0x7FFFFFFF` are unsigned.
+
+**Strings and characters:** escapes `\n \t \r \b \a \f \v \e \\ \' \"`, octal
+`\033` and hex `\x1b`. Adjacent string literals join (`"T2DOS " VERSION`).
+
+**Initializers**, global and local:
+
+```c
+int x = 5, y = x * 2;
+char *s = "hi";
+char buf[] = "abc";
+int a[5] = {1, 2};                 /* the rest is zero */
+int t[] = {1, 2, 3,};              /* size from the list */
+struct pt { int x; int y; } pts[] = { {1, 2}, {3, 4} };
+int (*ops[])(int, int) = { add, sub };
+```
+
+Nested aggregates need their own braces; there are no designators. Constant
+global initializers go straight into the data; the others run as code before
+`main`.
+
+**Multi-dimensional arrays:** `int m[3][4]`, `int cube[2][3][4]`,
+`char names[][8] = {"a", "b"}`, parameters `int m[][4]`, pointers to arrays
+`int (*p)[4] = m;`. Only the first dimension may be left empty.
+
+**Function pointers:**
+
+```c
+typedef int (*op)(int, int);
+int add(int a, int b) { return a + b; }
+int apply(op f, int x, int y) { return f(x, y); }
+int main() { op f = add; printf("%d\n", apply(f, 2, 3)); return 0; }
+```
+
+Also arrays of function pointers, struct members (`s->fn(x)`), `(*fp)(x)`,
+and functions returning function pointers. Builtins such as `printf` cannot
+be taken as function pointers.
+
+**Float:** single precision on the RP2350's FPU. Literals (`1.5`, `.5`,
+`1e-3`, `2.5f`) are rounded correctly at compile time. Mixed int and float
+arithmetic is float; comparisons follow IEEE.
+
+```c
+float r = 2.0;
+printf("area %.3f\n", 3.14159 * r * r);        /* area 12.566 */
+```
+
+**Preprocessor:** `#include "file"` (searched in the current directory, the
+`-I` directory and `/lib`), `#define` with object-like and function-like
+macros, multi-line bodies with `\`, `#x`, `a ## b`, variadic macros with
+`__VA_ARGS__`, `#undef`, and conditional compilation with `#if`, `#ifdef`,
+`#ifndef`, `#elif`, `#else`, `#endif`, `defined`, `#error`. `__T2CC__` is
+predefined; `cc -D NAME[=value]` defines a macro.
+
+```c
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define LOG(fmt, ...) printf("log: " fmt "\n", __VA_ARGS__)
+#ifdef DEBUG
+  LOG("x is %d", x);
+#endif
+```
+
+**Not supported:** `static`, `const`, `do`/`while`, `goto`, `sizeof` of an
+expression (only `sizeof(type)`), functions of your own with `...` (variadic
+macros work), struct assignment (`a = b` with structs is an error; copy with
+`memcpy`), 64-bit integers, `long long` and real doubles.
+
+The tests in `compiler/tests/` show each feature in use (test4.c function
+pointers, test5.c initializers, test6.c arrays, test7.c unsigned and short,
+test8.c the comma operator, test9.c macros, test10.c conditional compilation,
+test11.c float, test12.c addresses of struct members).
+
+---
+
+## 6. The toolchain
+
+### How it fits together
+
+```
+ file.c --cc--> file.s --as--> file.o --+
+ file.s ------------as-------> file.o --+--ld--> program.bin
+ lib.a (made by ar from .o files) ------+
+```
+
+`cc` drives the whole chain: it compiles each `.c` to assembly itself, runs
+`as` on every assembly file, then `ld` on all the objects and libraries. You
+normally only type `cc`. The tools are separate programs in `/bin`;
+intermediate files go to `/tmp` and are removed afterwards, also after an
+error. Every tool is silent when it succeeds.
+
+### cc
+
+```
+cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file...
+```
+
+| Option | Meaning |
+|---|---|
+| `-o out` | the output name (default `a.bin`) |
+| `-c` | stop at object files: `file.o` for each input |
+| `-S` | stop at assembly: `file.s` for each `.c` input |
+| `-I dir` | another directory for `#include "..."` |
+| `-D name[=v]` | define a macro (value 1 by default) |
+| `-L dir` | another directory to search for libraries |
+| `-l name` | link the library `libname.a` (searched in the `-L` directories, the current directory, then `/lib`) |
+| `-mshort-data` | with `-S`/`-c`: use the short data references (see [Data references](#data-references)) |
+
+Inputs are recognized by suffix: `.c` (compiled), `.s` (assembled), `.o` and
+`.a` (linked). With `-c` or `-S` and exactly one input, `-o` names the output;
+otherwise each output takes the input's name with the new suffix, in the
+current directory.
+
+Examples:
+
+```
+/src> cc hello.c                               one file, output a.bin
+/src> cc -o hello.bin hello.c                  one file, named output
+/src> cc -o counter.bin main.c count.c         two C files in one step
+/src> cc -c count.c                            compile only: count.o
+/src> cc -o counter.bin main.c count.o         ... and link it later
+/src> cc -o useadd.bin useadd.c add3.s         C and assembly together
+/src> cc -S sq.c                               look at the generated assembly: sq.s
+/src> cc -D DEBUG -o dbg.bin prog.c            with a macro defined
+```
+
+### Programs in several files
+
+Every global function and variable is visible to the other files of a
+program. Declare what another file defines with `extern` and a prototype:
+
+```c
+/* count.c */
+int counter;
+int bump(int n) { counter = counter + n; return counter; }
+```
+
+```c
+/* main.c */
+extern int counter;
+int bump(int n);
+int main() { bump(2); bump(3); printf("counter = %d\n", counter); return 0; }
+```
+
+```
+/src> cc -o counter.bin main.c count.c
+/src> counter
+counter = 5
+```
+
+### Libraries
+
+A library is an archive of object files. `ld` links only the members the
+program needs: a member is linked when it defines a symbol that is still
+undefined.
+
+```c
+/* sq.c */
+int square(int x) { return x * x; }
+```
+
+```c
+/* cube.c */
+int cube(int x) { return x * x * x; }
+```
+
+```c
+/* p.c */
+int square(int x);
+int main() { printf("%d\n", square(7)); return 0; }
+```
+
+```
+/src> cc -c sq.c cube.c
+/src> ar rc libm2.a sq.o cube.o
+/src> cc -o p.bin p.c -L . -l m2
+/src> p
+49
+```
+
+Only `sq.o` ends up in `p.bin`. A member is linked whole, so put one
+function (or a group that is always used together) in each source file of
+a library. Libraries installed in `/lib` are found without `-L`.
+
+### Mixing C and assembly
+
+C and assembly call each other with one convention: arguments are pushed on
+the stack from first to last (so the first one is deepest), the caller
+removes them, and the result is in `r0`. Assembly code must keep `r7`, `r8`
+and `r9`, and save `r4` when it uses it.
+
+```asm
+@ add3.s: int add3(int a, int b, int c)
+        .syntax unified
+        .thumb
+        .text
+        .global add3
+add3:
+        ldr     r0, [sp, #8]          @ a
+        ldr     r1, [sp, #4]          @ b
+        ldr     r2, [sp]              @ c
+        add     r0, r0, r1
+        add     r0, r0, r2
+        bx      lr
+```
+
+```c
+/* useadd.c */
+int add3(int a, int b, int c);
+int main() { printf("%d\n", add3(1, 20, 300)); return 0; }
+```
+
+```
+/src> cc -o useadd.bin useadd.c add3.s
+/src> useadd
+321
+```
+
+`tests/toolchain/` in the repository has more examples: assembly calling C,
+assembly reading C's globals, and a callback from assembly into C.
+
+### Error messages
+
+Each tool reports its own errors, with the file and line where there is one,
+and `cc` stops with that tool's exit code:
+
+```
+/src> cc bad.c
+bad.c:1: error: bad expression near token 59
+/src> cc undef.c
+ld: undefined symbol: nothere (in /tmp/cc29ae_1_undef.o)
+/src> as bad.s
+bad.s:1: error: immediate out of range
+```
+
+The temporary object names end with the source's name (`..._undef.o` came
+from `undef.c`).
+
+### as
+
+```
+as [-o out.o] file.s
+```
+
+Assembles one file (default output: the same name with `.o`). See
+[Assembly language](#7-assembly-language).
+
+```
+/src> as -o add3.o add3.s
+```
+
+### ld
+
+```
+ld [-o out.bin] [-e entry] file.o... lib.a...
+```
+
+Links objects and libraries into a program (default `a.bin`). The entry
+point is `main` unless `-e` names another function. Objects are always
+linked; library members only when needed.
+
+```
+/src> ld -o useadd.bin useadd.o add3.o
+/src> ld -o p.bin p.o libm2.a
+```
+
+### ar
+
+```
+ar rc lib.a file.o...       create a library, or replace and add members
+ar t lib.a                  list the members
+ar x lib.a [member...]      extract members (all when none are named)
+```
+
+```
+/src> ar rc libm2.a sq.o cube.o
+/src> ar t libm2.a
+sq.o
+cube.o
+/src> ar x libm2.a cube.o
+```
+
+### nm
+
+```
+nm file.o|lib.a...
+```
+
+Lists symbols: `T` code, `D` data, `A` absolute values, `U` undefined (used
+here, defined elsewhere). Lower case letters are local symbols.
+
+```
+/src> nm count.o
+00000000 T bump
+00000000 D counter
+/src> nm libm2.a
+libm2.a(sq.o):
+00000000 T square
+libm2.a(cube.o):
+00000000 T cube
+```
+
+### objdump
+
+```
+objdump file.o|lib.a|program.bin...
+```
+
+Shows the header, symbols, relocations, a disassembly of the code and the
+data. The disassembly is the same text GNU objdump prints.
+
+```
+/src> objdump add3.o
+add3.o: T2DOS object, text 12 bytes, data 0 bytes, 1 symbols, 0 relocations
+SYMBOLS:
+00000000 T add3
+RELOCATIONS:
+DISASSEMBLY:
+       0:	9802      	ldr	r0, [sp, #8]
+       2:	9901      	ldr	r1, [sp, #4]
+       4:	9a00      	ldr	r2, [sp, #0]
+       6:	4408      	add	r0, r1
+       8:	4410      	add	r0, r2
+       a:	4770      	bx	lr
+DATA:
+```
+
+### Data references
+
+Programs reach their global variables through register `r9`, which holds the
+start of the program's data, plus the variable's offset. `cc` picks the
+shortest instruction form that reaches the offset: 4 bytes below 4 KB,
+8 bytes below 64 KB, 12 bytes above that.
+
+When `cc` builds the whole program in one step, it knows where every file's
+data will end up and always picks the shortest form. With `-S` or `-c` it
+cannot know what will come before the file in the link, so it uses the
+12-byte form, which always works. `-mshort-data` tells it to compile as if
+the file's data came first in the program, which gives the short forms and
+is right for the first object of a program. If that turns out wrong, `ld`
+stops with a clear message instead of making a broken program:
+
+```
+ld: data offset of counter (main.o) is 5000, too far for addw
+```
+
+References to `extern` variables always use the 12-byte form.
+
+---
+
+## 7. Assembly language
+
+`as` takes the GNU unified syntax for Thumb-2, the subset that compiled C and
+hand-written code need: the ARMv8-M mainline integer instructions with their
+narrow and wide forms (`.n`, `.w`), IT blocks, and the single precision FPU
+instructions (`vadd.f32`, `vldr`, `vmov`, `vcvt`, `vpush`, ...). The
+encodings equal GNU `as` with `-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16`,
+and `as` refuses what GNU refuses (for example `r13 not allowed here` where
+ARMv8-M makes `sp` unpredictable). `add rd, pc, #imm` is `adr`.
+
+### Directives
+
+`.syntax unified`, `.thumb`, `.thumb_func`, `.text`, `.data`,
+`.global`/`.globl`, `.extern`, `.equ`/`.set`, `.byte`, `.hword`/`.short`,
+`.word`, `.ascii`, `.asciz`/`.string`, `.space`/`.zero`, `.align` and
+`.balign` (up to 4 bytes), and `.t2init`. Comments: `@`, `//`, `/* */`, and
+`#` at the start of a line. Labels starting with `.L` stay inside the file.
+
+### The code model
+
+Code is position independent: there are no absolute addresses. `r9` holds
+the data base and `r8` the kernel's entry, and the value of a data symbol is
+its offset in the data, so data lives at `r9 + offset`:
+
+```asm
+        addw    r0, r9, #counter          @ r0 = &counter, offsets 0 to 4095
+        movw.16 r1, #counter              @ offsets up to 65535
+        add.w   r0, r9, r1
+        movw    r1, #:lower16:counter     @ any offset
+        movt    r1, #:upper16:counter
+        add.w   r0, r9, r1
+        ldr     r2, [r0]                  @ r2 = counter
+```
+
+A complete example, a counter that assembly owns and C can call and read:
+
+```asm
+@ ids.s
+        .syntax unified
+        .thumb
+        .global next_id, last_id
+        .text
+next_id:                                  @ int next_id(void)
+        movw    r1, #:lower16:last_id
+        movt    r1, #:upper16:last_id
+        add.w   r1, r9, r1
+        ldr     r0, [r1]
+        adds    r0, r0, #1
+        str     r0, [r1]
+        bx      lr
+        .data
+        .align  2
+last_id: .word  0
+```
+
+```c
+/* useids.c */
+int next_id();
+extern int last_id;
+int main() { next_id(); next_id(); printf("%d %d\n", next_id(), last_id); return 0; }
+```
+
+```
+/src> cc -o useids.bin useids.c ids.s
+/src> useids
+3 3
+```
+
+`b`, `b<cond>` and `bl` to functions in other files are filled in by `ld`.
+`.word label` in `.data` stores the label's offset, not an address, so a
+table of function pointers in `.data` does not work; take function addresses
+at run time with `fnaddr`.
+
+### T2DOS pseudo-instructions
+
+These exist only in T2DOS's `as`:
+
+- `fnaddr rd, sym`: `rd` = the address of the function `sym`, computed PC
+  relative (10 bytes: `movw`, `movt`, `add rd, pc`). Use it to pass a
+  function as a callback.
+- `movw.16 rd, #sym`: a `movw` of a data offset that must fit in 16 bits.
+- `.t2init sym`: `sym` is a routine that runs before `main`. `ld` calls each
+  one in link order; `cc` uses it for global initializers that need code.
+
+### Symbol operands and limits
+
+`#sym` and `#sym+n` (with `addw` and `movw.16`), `#:lower16:sym` and
+`#:upper16:sym` (with `movw` and `movt`), plain `sym` for branches and
+`fnaddr`.
+
+Not supported: literal pools (`ldr r0, =x`, `ldr r0, label`), writeback and
 post-indexed addressing (`[r0, #4]!`, `[r0], #4`), double precision, FPU
-instructions inside IT blocks, and assembler macros (`.macro`, `.rept`).
+instructions inside IT blocks, and macros (`.macro`, `.rept`).
 
-The object format (`T2OB`: header, text, data, symbols, relocations
-`R_BL R_BW R_BCOND R_FNADDR R_DATA_ADDW R_DATA_MOVW R_DATA_MOVT R_DATA_MOVW16
-R_WORD`, string table) and the archive format (`T2AR`: header, symbol index,
-member table, string table, the member objects) are defined in `lib/t2obj.h`. The `.bin` that ld writes is the kernel's program
-format: a 20-byte header (`T2CC`, code size, data size, 0, entry), then the
-code and the data.
+---
 
-## Language subset (compiler/cc.c)
-int char short void, unsigned and signed (`unsigned char`, `unsigned short`,
-`unsigned`), long (= int, 32 bits), float (and double, which is the same
-32-bit float: see below), pointers, structs (named or anonymous,
-array members),
-typedef, global/local arrays of any dimension, enum, `#include "file"` (also
-searched in /lib), macros (see below), all operators incl. ?: ++/--,
-compound assignment (+= -= *= /= %= &= |= ^= <<= >>=) and the comma operator
-(`for (i = 0, j = n; i < j; i++, j--)`; in arguments and initializers only
-inside parentheses, as in C), sizeof(type), casts,
-if/else while for switch/case/default break continue return, prototypes,
-`extern` declarations of globals defined in other files (see Toolchain).
-String and char escapes: `\n \t \r \b \a \f \v \e \\ \' \"`, octal `\033`, hex `\x1b`.
-Integer rules follow C: char and short promote to int; with an unsigned int
-operand, comparisons, `/`, `%` and `>>` are unsigned. Casts, stores and
-`return` truncate to the target type. Literals take `u`/`l` suffixes; hex
-constants above 0x7FFFFFFF are unsigned. `sizeof` gives an int.
-Function pointers: `int (*fp)(int)`, arrays `int (*tbl[4])(int)`, struct
-members, parameters, typedefs (`typedef int (*op)(int, int);`), casts and
-sizeof `(int (*)(int))`, `fp = f` / `fp = &f`, calls `fp(x)` / `(*fp)(x)` /
-`s->fn(x)` / `tbl[i](x)`, functions returning function pointers. Parameter
-types of a function pointer are not checked. Builtins (printf, ...) are
-syscalls and cannot be taken as function pointers.
-Initializers, global and local: `int x = 5, y = x * 2;`, `char *s = "hi";`,
-`char buf[] = "abc";`, `char b[8] = "hi";`, `int a[5] = {1, 2};` (rest zero),
-`int t[] = {1, 2, 3,};` (size from the list), structs and arrays of structs
-`{ {1, 2}, {3, 4} }`, function pointer tables `{ add, sub }`, `&var` and
-other expressions. Nested aggregates need their own braces; no designators.
-Constant global initializers go straight into the data image; the others run
-as code before `main`. Array sizes may be `#define`/enum names.
-Multi-dimensional arrays: `int m[3][4]`, `int cube[2][3][4]`, struct members
-`int m[2][3]`, `char names[][8] = {"a", "b"}`, `int t[][2] = {{1, 2}, {3, 4}}`,
-parameters `int m[][4]`, pointers to arrays `int (*p)[4] = m;`, `m[i]` as an
-`int *` to row i, `sizeof(int[3][4])`. Only the first dimension may be empty.
-Macros: `#define NAME text`, function-like `#define MAX(a, b) ((a) > (b) ? (a) : (b))`,
-multi-line bodies with `\` at the line ends, `#x` (string), `a ## b` (paste),
-variadic `#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)`, `#undef`. As in C,
-arguments are macro-expanded before substitution except next to `#` and `##`,
-results are rescanned, and a macro is not expanded inside its own expansion. Adjacent string literals join
-(`"T2DOS " VERSION`). Array sizes, case labels and enum values take constant
-expressions (`#define SIZE (4 * 2)`, `sizeof(type)`, `?:`).
-Conditional compilation: `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`
-(nested), `defined(X)` / `defined X`, `#error`. `#if` expressions are
-macro-expanded constant expressions; unknown names are 0. `__T2CC__` is
-predefined, and `cc -D NAME[=value]` defines a macro (value 1 by default).
-Float: single precision on the RP2350's FPU. Literals `1.5`, `.5`, `1e-3`,
-`2.5f` are decoded at compile time, correctly rounded. C's conversions apply on
-assignment, casts, `return`, initializers and arguments (also through function
-pointers); arithmetic mixing int and float is float; comparisons follow IEEE
-(NaN compares unequal), and `-0.0` is false. `double` is accepted but is the
-same 32-bit float, so unsuffixed literals are float too (in C they are double).
-Not yet: 64-bit integers or doubles, `long long`.
-See compiler/tests/ for the covered subset (test4.c: function pointers,
-test5.c: initializers, test6.c: multi-dimensional arrays, test7.c:
-unsigned/short, test8.c: the comma operator, test9.c: macros, test10.c:
-conditional compilation, test11.c: float).
+## 8. System reference
 
-## Verified
-On a CPico 2350 (no SD card, flash filesystem): boot into `/bin/sh.bin` from
-flash; files survive reset and reflash; `ls`, `free`, `echo`, `> file`,
-`>> file`, `cat`, `cp`, `hexdump`, `put`; `cc` compiles and runs test.c and an
-`#include "sys.h"` program; `cc` rebuilds `cc.bin` byte-identical to the PC
-build, and that `cc` rebuilds it again identically. PSRAM is fully returned
-after every program. `edit` works through `screen` (tested with its default
-flow control on) and builds on the board byte-identical to the PC build.
-Backspace erases at the shell and `write` prompts. test4.c (function
-pointers), test5.c (initializers), test6.c (multi-dimensional arrays),
-test7.c (unsigned/short), test8.c (comma operator), test9.c (macros),
-test10.c (conditional compilation, built with -D FROM_CMDLINE=7) and test11.c
-(float) print the same as a native gcc build, whether compiled on the PC or on
-the board. Float literals decode to the same bits as gcc's for 2841 test values
-(with an f suffix; without one gcc rounds through double).
-The toolchain (tools/check_toolchain.py --board): every tests/toolchain/ program
-(C calling assembly, assembly calling C, globals shared through `extern`,
-functions and globals named `sp`, `pc`, `r1`, `b`, `add`, `push`, a library
-linked with `-l` of which only the needed member is linked) is built with `cc`
-on the board, prints what it should, and its `.bin` equals the PC build. A
-compile error, an `as` error and an undefined function stop `cc` with the
-tool's message and exit code and leave no files in `/tmp`. On the board `cc`
-rebuilds `cc`, `as`, `ld`, `ar`, `nm` and `objdump` byte-identical to the PC
-builds (cc.c takes about 22 s), and that `cc` compiles test4.c to test12.c
-with the same output as gcc (`--selfhost`). The userland programs and the
-tools built through `cc`, `as` and `ld` are byte-identical to the output of the
-reference compiler from before the assembler existed (`make ref`,
-tools/check_ref.py), and work on the board after `make` rebuilt them.
-Under qemu with fileserver.py: rls/get/send against a real TCP server, get cc.c
-then compile it on the "board" and send the binary back, identical to the PC
-build; nc -l accepts a connection.
-Under qemu-arm with host_linux: the shell runs every tool, `cc` compiles and
-runs test.c, redirection works, and `cc` on the "board" rebuilds `cc.bin`
-byte-identical to the PC cross build.
+### Programs and memory
 
-## Not yet verified / known gaps
-- SD card on the CPico 2350: not tested yet (no card was mounted; the kernel
-  expects it on SPI0 with CS on GP17, `SD_CS SS`).
-- Network tools on real hardware: only tested under qemu so far.
-- `host_linux.c` does not yet free a program's `malloc`s on exit or zero them,
-  unlike the board kernel. Its new `%f %e %g` formatting is untested (no qemu here).
-- Uploading a whole `root/` tree to the flash filesystem is manual (`put` per file).
-- compiler/tests/ runs only on the board, through `tools/check_toolchain.py
-  --selfhost` (test4.c to test12.c against `gcc -m32 -msse2 -mfpmath=sse`, which
-  matches cc's 32-bit pointers and single precision floats); there is no PC runner.
-- No `static` (file-local) functions or variables: all globals of a program
-  share one namespace at link time.
-- Under qemu/host_linux the function pointer support has not been run yet
-  (qemu-arm is not installed on the development PC).
+- A program's code is loaded into SRAM; its data, a 256 KB stack and its
+  `malloc` memory are in PSRAM. When it exits, everything is freed and files
+  it left open are closed. `malloc` returns zeroed memory.
+- Programs can run other programs with `exec`, nested up to 4 deep (the shell
+  counts as one).
+- Registers: `r7` is the frame pointer, `r8` the kernel's entry and `r9` the
+  data base. Arguments go on the stack, first argument deepest; the result
+  is in `r0`.
+- The current directory lives in the kernel and is shared by all programs.
+- System calls run on a 16 KB kernel stack in SRAM, because PSRAM cannot be
+  reached while the flash is being written.
+
+### System calls
+
+The library functions in [The library](#the-library) are system calls. Each
+has a fixed number in `sys.h`, grouped: process 0+, console 16+, files 32+,
+memory and strings 64+, network 80+, board 96+, and 128+ free for user
+extensions. The kernel sees `sys(num, nargs, argv)`, where `argv[nargs-1]`
+is the first argument.
+
+### Network protocol
+
+`fileserver.py` handles one request per connection: `GET name`,
+`PUT name size` followed by the bytes, or `LS [dir]`. It answers
+`OK [size]` and the data, or `ERR text`. Socket fds start at 100.
+
+### File formats
+
+- **Program (`.bin`):** a 20-byte header (`T2CC`, code size, data size, 0,
+  entry offset, all 32-bit little endian), then the code, then the data.
+- **Object (`.o`, `T2OB`) and library (`.a`, `T2AR`):** defined in
+  `lib/t2obj.h`. An object holds code, data, symbols, relocations and a
+  string table; a library holds a symbol index and the member objects.
+
+---
+
+## 9. Building T2DOS from source
+
+### Repository layout
+
+```
+sys.h             the system call ABI, shared by the kernel, the compiler and programs
+kernel/kernel.ino the kernel (arduino-pico; SD card on SPI, LittleFS fallback)
+compiler/cc.c     the compiler and driver; compiler/tests/ has the language tests
+assembler/as.c    the assembler
+linker/ld.c       the linker
+binutils/         ar, nm, objdump
+lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
+userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
+                  write, edit, blink, wifi, get, send, rls, nc
+tests/            assembler, linker, object and toolchain tests
+tools/            board.py (board access), fileserver.py, the check scripts
+host_linux.c      the kernel's system calls on Linux, to run programs under qemu-arm
+root/             the filesystem image that make fills: /bin, /lib, /src
+```
+
+### Make targets
+
+```sh
+make            # the PC cross compiler (compiler/cc), host tools (build/host/) and root/bin/*.bin
+make check      # the PC test suite
+make ref        # the reference compiler for the byte-identity check
+make host       # host_linux (needs arm-linux-gnueabihf-gcc)
+make clean
+```
+
+The PC build of `cc` runs `build/host/as` and `build/host/ld` (or those in
+`$T2_TOOLS`), so the same commands work on the PC:
+
+```sh
+compiler/cc -I root/lib -o hello.bin hello.c
+```
+
+### Checks
+
+`make check` runs these; each can also run on its own:
+
+- `tools/check_asm.py`: `as` against GNU `as` (`--corpus` reassembles every
+  program, `--diff N` compares N random instructions, `--objdump-corpus`
+  compares `objdump` with GNU objdump).
+- `tools/check_link.py --pc`: the linker tests.
+- `tools/check_ref.py`: every single-file program built by today's toolchain
+  is byte-identical to the reference compiler's output.
+- `tools/check_toolchain.py --pc`: the multi-file, library and error cases.
+
+With the board connected (and no `screen` on the port):
+
+```sh
+python3 tools/check_link.py --board
+python3 tools/check_toolchain.py --board      # builds and runs the cases with cc on the board
+python3 tools/check_toolchain.py --selfhost   # the board rebuilds the toolchain identically
+```
+
+### Self-hosting
+
+`cc.c`, `as.c`, `ld.c` and the binutils are written in the C subset that
+`cc` compiles, so they build on the board:
+
+```
+/src> cc -I /lib -o cc2.bin cc.c
+```
+
+`cc2.bin` is byte-identical to the PC build; compiling `cc.c` takes about
+22 s on the board. Because of this, the toolchain's sources may only use
+features that the previous `cc` already supports.
+
+---
+
+## 10. Status
+
+### Verified on the board (CPico 2350, flash filesystem)
+
+- Boot into the shell from flash; files survive reset and reflashing.
+- The shell, redirection, scripts, line editing and history; the file and
+  system commands; PSRAM is fully returned after every program.
+- `edit` through `screen`, including cut, copy, paste and the mark.
+- The toolchain: every case in `tests/toolchain/` (C calling assembly,
+  assembly calling C, globals shared with `extern`, symbols named like
+  registers, a library of which only the needed member is linked, big data
+  before and after other files) builds with `cc` on the board, prints what
+  it should, and equals the PC build. Errors stop `cc` with the tool's
+  message and leave no files in `/tmp`.
+- Self-hosting: `cc` on the board rebuilds `cc`, `as`, `ld`, `ar`, `nm` and
+  `objdump` byte-identical to the PC builds, and that `cc` compiles test4.c
+  to test12.c with the same output as gcc.
+- The assembler matches GNU `as` byte for byte on about 120,000 instructions
+  from the real programs, and `objdump` matches GNU objdump's text.
+
+### Not yet verified, known gaps
+
+- SD card: not tested yet (the kernel expects it on SPI0 with CS on GP17).
+- Network tools: tested only under qemu, not on real hardware.
+- Uploading a whole `root/` tree to the flash filesystem is manual (`put` per
+  file).
+- No `static`: all globals of a program share one namespace.
+- `ld` links a library member whole, not single functions.
+- `ld -o X X` (the output also named as an input) deletes `X` when the link
+  fails.
+- `host_linux.c` does not yet free or zero a program's `malloc` memory, and
+  its float formatting is untested.
