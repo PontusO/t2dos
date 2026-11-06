@@ -7,12 +7,14 @@
 enum {
   // process
   SYS_exit = 0, SYS_exec = 1, SYS_millis = 2, SYS_sleep = 3, SYS_sysinfo = 4,
+  SYS_spawn = 5, SYS_yield = 6, SYS_jobs = 7, SYS_kill = 8,
   // console (fd 0 = console in, fd 1 = console out)
   SYS_putchar = 16, SYS_getchar = 17, SYS_kbhit = 18, SYS_conctl = 19, SYS_redirect = 20,
   // files
   SYS_open = 32, SYS_close = 33, SYS_read = 34, SYS_write = 35, SYS_seek = 36, SYS_stat = 37,
   SYS_unlink = 38, SYS_rename = 39, SYS_mkdir = 40, SYS_rmdir = 41,
   SYS_opendir = 42, SYS_readdir = 43, SYS_closedir = 44, SYS_chdir = 45, SYS_getcwd = 46,
+  SYS_mkpipe = 47,
   // memory and string helpers (done in the kernel: fast, saves code in every program)
   SYS_malloc = 64, SYS_free = 65, SYS_memset = 66, SYS_memcmp = 67, SYS_memcpy = 68,
   SYS_strlen = 69, SYS_strcmp = 70, SYS_strcpy = 71, SYS_printf = 72, SYS_sprintf = 73,
@@ -38,7 +40,21 @@ enum { PIN_INPUT = 0, PIN_OUTPUT = 1, PIN_INPUT_PULLUP = 2 };
 
 // net_status() results
 enum { NET_DOWN = 0, NET_CONNECTING = 1, NET_UP = 2 };
+// jobs() states
+enum { JOB_RUNNING = 1, JOB_DONE = 2 };
+// spawn() errors
+enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -4, SPAWN_UNSUPPORTED = -5 };
+#define MAX_JOBS 4
+#define PIPE_SIZE 512
+#define JOB_KILLED -9   // exit code of a killed job
+// spawn(path, argc, argv): starts path as a background job; returns its id (1..MAX_JOBS) or a SPAWN_ error
+// yield(): lets another runnable task run; returns 1 if one did, else 0
+// jobs(buf, max): fills buf with the job table and returns how many it wrote
+// kill(job): marks a running job to end (exit code JOB_KILLED); returns 0 once it has ended, -1 if no such running job
+// mkpipe(name): creates /pipe/name owned by the caller; name is at most 31 chars with no '/'; returns 0, or -1 if it exists, the table is full or the name is invalid
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
+// jobs(buf, max) fills this
+struct job_t { int id; int state; int exit_code; char name[32]; };
 // stat() fills this
 struct stat_t { int size; int isdir; int mtime; };
 // readdir() fills this
