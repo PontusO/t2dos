@@ -1,0 +1,2 @@
+PRINT "never"
+ERASE q

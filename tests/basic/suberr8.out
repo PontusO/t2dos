@@ -1,0 +1,2 @@
+suberr8.bas:2: SUB without END SUB
+exit 1

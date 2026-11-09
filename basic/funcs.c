@@ -135,6 +135,20 @@ int fn_strings() {
   return T_STR;
 }
 
+// LBOUND(array [, dimension]) / UBOUND: the array cell's address and the dimension (1 if
+// not given)
+int fn_bound() {
+  int k;
+  k = TK; next();
+  if (!need(TK_LPAR)) return T_INT;
+  if (arr_named() < 0) return T_INT;
+  if (accept(TK_COMMA)) expr_to(T_INT);
+  else { emit(OP_PUSHI); emit_arg(1); }
+  if (!fn_close()) return T_INT;
+  emit_fn(k, 0);
+  return T_INT;
+}
+
 // RANDOMIZE [seed]
 void st_randomize() {
   int n;
@@ -228,6 +242,19 @@ void h_timer() {
   f = millis();
   sp++; fs[sp] = f / 1000;
 }
+
+// arrays (the layout is in basic.h): dimension d's lower bound is a[1 + 2d], its length a[2 + 2d]
+void bound(int up) {
+  int d; int *a;
+  d = vs[sp]; sp--;
+  a = *(int **)vs[sp];
+  if (!a || d < 1 || d > a[1]) { vm_err("Subscript out of range"); return; }
+  vs[sp] = a[1 + 2 * d];
+  if (up) vs[sp] = vs[sp] + a[2 + 2 * d] - 1;
+}
+
+void h_lbound() { bound(0); }
+void h_ubound() { bound(1); }
 
 // strings
 void h_len() {
@@ -442,6 +469,8 @@ void funcs_init() {
   fn_tab[K_RND] = fn_rnd; fnop[K_RND] = h_rnd;
   fn_tab[K_INSTR] = fn_instr; fnop[K_INSTR] = h_instr;
   fn_tab[K_STRINGS] = fn_strings; fnop[K_STRINGS] = h_strings;
+  fn_tab[K_LBOUND] = fn_bound; fnop[K_LBOUND] = h_lbound;
+  fn_tab[K_UBOUND] = fn_bound; fnop[K_UBOUND] = h_ubound;
   fnop[K_RANDOMIZE] = h_randomize;
   stmt_tab[K_RANDOMIZE] = st_randomize;
   optab[OP_FN] = op_fn;

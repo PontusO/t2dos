@@ -124,6 +124,22 @@ enum {
   OP_READI, OP_READF, OP_READS,  // push the next DATA item as an int / float / str
   OP_RESTORE,                    // arg: index of the next DATA item
   OP_FN,                         // args: function token (K_ABS ..), count or type (funcs.c)
+  // locals, parameters, arrays and calls (see "SUB and FUNCTION" below)
+  OP_LLD, OP_LLDS,               // arg: frame offset; push the local (number / a copy of the str)
+  OP_LST, OP_LSTS,               // arg: frame offset; pop into the local (LSTS frees the old str)
+  OP_LREF,                       // arg: frame offset; push the local's address
+  OP_PLD, OP_PLDS, OP_PST, OP_PSTS, // arg: frame offset of a parameter (a cell address):
+                                 // load / store through it (a parameter's address is OP_LLD)
+  OP_LDA, OP_LDAS,               // pop a cell address, push its value (a copy for strings)
+  OP_STA, OP_STAS,               // pop a value and a cell address, store (STAS frees the old str)
+  OP_REFA,                       // arg: global array slot; push the address of its cell
+  OP_ELEM,                       // args: dimensions n, type (0: no implicit DIM); pops the
+                                 // array cell's address and n subscripts, pushes the element's
+  OP_DIM,                        // args: n, type, 1 for REDIM, mask of dimensions with a lower
+                                 // bound; pops the bounds and the array cell's address
+  OP_ERASE,                      // pops an array cell's address; frees the array
+  OP_BYVAL,                      // a value argument: [v] becomes [address of v's cell, v]
+  OP_CALL, OP_RET,               // arg: procedure index (procs[]); call it; return from it
   NOPS
 };
 
@@ -131,11 +147,13 @@ enum {
 // The slot store: global variables live in one array per type, indexed by the slot number
 // the compiler gives each variable (nslot[T] slots of type T). Cells are 4 bytes, so an
 // address (OP_REF*) works the same for every type. Zeroed at the start: 0, 0.0 and "".
-// Reserved for Task 5: SUB/FUNCTION locals get their own cells in a call frame.
+// Global arrays have a slot store of their own (avar, nslot[0] slots): each cell holds an
+// array (see arrays below) or 0. SUB/FUNCTION locals live in their call frame.
 extern int *ivar;
 extern float *fvar;
 extern char **svar;
-extern int nslot[4];             // indexed by T_INT, T_SNG, T_STR
+extern int **avar;
+extern int nslot[4];             // indexed by T_INT, T_SNG, T_STR; [0] global arrays
 
 // DATA items (compiler fills, READ reads): the text of each item as a str (the null pointer
 // for an empty one) and whether it was quoted (a quoted item is a string only).
@@ -143,14 +161,56 @@ extern char **d_item;
 extern int *d_quoted;
 extern int ndata;
 
-// Symbols (compiler only). kind S_VAR: a variable, slot in the slot store of its type;
-// S_CONST: val is the constant's int, float bits or str. scope: 0 is the main program
-// (Task 5 gives each SUB/FUNCTION its own). uname is the name in capitals; suf the type
-// suffix ('%' '&' '!' '#' '$', after DEFtype for names written without one).
-enum { S_VAR = 1, S_CONST };
-struct Sym { char *uname; int suf; int kind; int type; int slot; int val; int scope; int link; };
+// Symbols (compiler only). kind S_VAR: a variable; S_ARR: an array (`x` and `x()` are
+// different names); S_CONST: val is the constant's int, float bits or str. scope: 0 is the
+// main program, procedure p's is p + 1 (labels use the same ids). uname is the name in
+// capitals; suf the type suffix ('%' '&' '!' '#' '$', after DEFtype for names written
+// without one, or from AS). cls: where the cell is, slot its number there: C_GLOBAL the
+// slot store of its type (avar for arrays), C_LOCAL the frame offset of the cell,
+// C_PARAM the frame offset of the cell holding the argument's address. flags: F_SHARED
+// (DIM SHARED: seen in every procedure), F_AS (declared with AS: the name without a
+// suffix means it), F_DIMMED (an array a DIM or REDIM gave bounds), F_IMPL (an array used
+// before any DIM: created 0 to 10 when first used). dims: an array's dimension count (0:
+// not known yet, an array parameter).
+enum { S_VAR = 1, S_CONST, S_ARR };
+enum { C_GLOBAL = 0, C_LOCAL, C_PARAM };
+enum { F_SHARED = 1, F_AS = 2, F_DIMMED = 4, F_IMPL = 8 };
+struct Sym { char *uname; int suf; int kind; int type; int slot; int val; int scope; int link;
+             int cls; int flags; int dims; };
 extern struct Sym *syms;
 extern int nsym;
+
+// ---------------------------------------------------------------- arrays
+// An array is one malloc'd int block: a[0] its type, a[1] the dimension count n, a[2] the
+// element count, then per dimension its lower bound and its length, then the elements (one
+// cell each, zeroed; owned strs for a string array). A variable holds the block's address
+// (0: no array yet). Subscripts are checked against every dimension (Subscript out of
+// range); at most 8 dimensions.
+#define ARR_DIMS 8
+int *arr_new(int type, int nd, int *lo, int *len);   // 0 if there is no memory
+void arr_free(int *a);
+
+// ---------------------------------------------------------------- SUB and FUNCTION
+// procs[] (compiler fills, VM reads): every SUB and FUNCTION, found by a pass over the
+// tokens before compiling, so calls can come before the definition. np parameters; ncell the
+// frame cells after the arguments (the FUNCTION's result first, then the locals), tags their
+// vt[] tags at the call (1 string, 2 array, 0 number).
+// A call frame lives on the value stack: the caller pushes two cells per argument, the
+// address of the variable it passes (by reference) and a 0, or the address of the next cell
+// and the value (OP_BYVAL, by value), then OP_CALL pushes the ncell cells (zeroed, tagged)
+// and a CALL frame on the control stack. fbase is the frame's base (vs[fbase + 1] is the
+// first argument cell), so parameter i's address is in vs[fbase + 2 * i + 1]. OP_RET frees
+// the frame's strings and arrays (by their tags), drops the frame and the control frames
+// above the CALL frame (a GOTO out of a loop, EXIT SUB inside one) and pushes a FUNCTION's
+// result. Out of stack space: before every call there must be room for the frame and
+// vmargin cells (a bound on what one statement pushes, from the longest line), so no push
+// between calls needs a check; at most MAXCALL calls nested.
+struct Proc { char *uname; int suf; int isfn; int type; int np; int pfirst; int entry;
+              int ncell; char *tags; int tok; int line; };
+extern struct Proc *procs;
+extern int nproc;
+extern int vmargin;
+#define MAXCALL 4000
 
 // ---------------------------------------------------------------- compiler
 extern int *code;                // the bytecode
@@ -172,6 +232,8 @@ int need(int tk);                // advance over tk, or a load-time error
 int at_end();                    // end of a statement: ':', end of line, ELSE, end of file
 int cerr(char *msg);             // load-time error at the current token
 int bad_token();                 // the error for an unexpected token (Syntax error, ...)
+int arr_named();                 // an array's name (LBOUND): pushes its cell's address;
+                                 // returns its symbol, or -1 after an error
 void line_mark(int line);
 int line_of(int pos);
 int suf_type(int suf);
@@ -180,18 +242,19 @@ int suf_type(int suf);
 // Value stack: vs[sp] is the top (vs[0] is never used); fs is the same memory seen as floats.
 // Control stack cs[], csp (index of the top word): frames that outlive a statement, the kind
 // code on top. FOR: variable address, limit, step, body position, CK_FOR (5 words). GOSUB:
-// return position, CK_GOSUB (2 words). Task 5 adds CALL frames (return position, caller's
-// frame and stack base, locals). GOTO out of a loop leaves its frame behind: NEXT, EXIT FOR
-// and RETURN drop the frames above the one they find, and a FOR on a variable that already
+// return position, CK_GOSUB (2 words). CALL: return position, caller's fbase, procedure,
+// CK_CALL (4 words). GOTO out of a loop leaves its frame behind: NEXT, EXIT FOR, RETURN
+// and OP_RET drop the frames above the one they find, and a FOR on a variable that already
 // has a frame replaces it, so such programs do not grow the stack.
-enum { CK_FOR = 1, CK_GOSUB = 2 };
-#define VSTACK 4096
-#define CSTACK 4096
+enum { CK_FOR = 1, CK_GOSUB = 2, CK_CALL = 3 };
+#define VSTACK 32768
+#define CSTACK 32768
 extern int pc;
 extern int *vs;
 extern char *vt;                 // string tags of the value stack cells (see strings above)
 extern float *fs;
 extern int sp;
+extern int fbase;                // the running procedure's frame base (0 in the main program)
 extern int *cs;
 extern int csp;
 extern int running;              // the VM loop runs while this is 1

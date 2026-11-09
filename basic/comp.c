@@ -40,7 +40,20 @@ int *fx_line;
 int *fx_kind;                    // 0: patch code[pos] with the label's position, 1: its DATA index
 int nfx;
 int capfx;
-int cur_scope;
+int cur_scope;                   // 0 in the main program, p + 1 inside procedure p
+
+// procedures (procs[] and nproc live in vm.c): parameters of procedure p are pa_*[pfirst ..
+// pfirst + np): type and 1 for an array parameter
+int *pa_type;
+int *pa_arr;
+int npa;
+int cappa;
+int capproc;
+int cur_proc;                    // the procedure being compiled, -1 in the main program
+int cur_ncell;                   // its frame cells after the arguments so far
+int proc_skip;                   // the jump over its body
+int scanning;                    // the pass before compiling: errors are not reported
+int scan_fail;
 
 // DATA items
 char **d_item;
@@ -56,6 +69,10 @@ int nblk;
 
 int e_not();
 void statement();
+int elem_ref();
+void call_args(int p, int paren);
+int proc_type(int p, int suf);
+void end_proc(int isfn);
 
 int *grow(int *p, int n, int cap) {
   int *q;
@@ -67,7 +84,10 @@ int *grow(int *p, int n, int cap) {
 // ---------------------------------------------------------------- tokens and errors
 int next() { if (tp < ntok - 1) tp++; return TK; }
 int accept(int tk) { if (TK == tk) { next(); return 1; } return 0; }
-int cerr(char *msg) { return err_line(toks[tp].line, msg); }
+int cerr(char *msg) {
+  if (scanning) { scan_fail = 1; return 0; }
+  return err_line(toks[tp].line, msg);
+}
 
 int bad_token() {
   if (TK == TK_ERR) return cerr((char *)toks[tp].val);
@@ -131,10 +151,12 @@ int sym_hash(char *u) {
   return h & 255;
 }
 
-int sym_find(char *uname, int suf, int kind) {
+// a symbol of this name, suffix and kind in scope; suf -1: the one declared with AS
+int sym_in(char *uname, int suf, int kind, int scope) {
   int i;
   for (i = symhash[sym_hash(uname)]; i >= 0; i = syms[i].link)
-    if (syms[i].kind == kind && syms[i].suf == suf && !strcmp(syms[i].uname, uname)) return i;
+    if (syms[i].kind == kind && syms[i].scope == scope && !strcmp(syms[i].uname, uname) &&
+        ((suf < 0 && (syms[i].flags & F_AS)) || syms[i].suf == suf)) return i;
   return -1;
 }
 
@@ -148,50 +170,125 @@ int sym_add(char *uname, int suf, int kind, int type) {
   }
   n = &syms[nsym];
   n->uname = malloc(strlen(uname) + 1); strcpy(n->uname, uname);
-  n->suf = suf; n->kind = kind; n->type = type; n->slot = 0; n->val = 0; n->scope = 0;
+  n->suf = suf; n->kind = kind; n->type = type; n->slot = 0; n->val = 0; n->scope = cur_scope;
+  n->cls = C_GLOBAL; n->flags = 0; n->dims = 0;
   h = sym_hash(uname);
   n->link = symhash[h]; symhash[h] = nsym;
   nsym++;
   return nsym - 1;
 }
 
-// a variable of this name with any suffix?
-int var_named(char *u) {
-  return sym_find(u, '%', S_VAR) >= 0 || sym_find(u, '&', S_VAR) >= 0 || sym_find(u, '!', S_VAR) >= 0 ||
-         sym_find(u, '#', S_VAR) >= 0 || sym_find(u, '$', S_VAR) >= 0;
+// a variable of this name with any suffix in scope?
+int var_named(char *u, int scope) {
+  return sym_in(u, '%', S_VAR, scope) >= 0 || sym_in(u, '&', S_VAR, scope) >= 0 ||
+         sym_in(u, '!', S_VAR, scope) >= 0 || sym_in(u, '#', S_VAR, scope) >= 0 ||
+         sym_in(u, '$', S_VAR, scope) >= 0;
 }
 
-// The constant or variable the TK_ID at tp names (consumed); a variable is created on first
-// use, in the next free slot of its type. Constants answer to their name with any suffix.
-int name_ref() {
-  char u[48]; int suf; int s; int t;
-  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
-  next();
-  s = sym_find(u, 0, S_CONST);
+// constants: the procedure's own, then the main program's
+int const_find(char *u) {
+  int s;
+  s = sym_in(u, 0, S_CONST, cur_scope);
+  if (s < 0 && cur_scope) s = sym_in(u, 0, S_CONST, 0);
+  return s;
+}
+
+int proc_find(char *u) {
+  int i;
+  for (i = 0; i < nproc; i++) if (!strcmp(procs[i].uname, u)) return i;
+  return -1;
+}
+
+// The variable (kind S_VAR) or array (S_ARR) a name written with suffix suf (0: none) means
+// here, or -1: one declared with AS answers to the bare name; then the name with its suffix
+// (from DEFtype if none) in the current scope; inside a procedure then a SHARED one
+int lookup(char *u, int suf, int kind) {
+  int s;
+  if (!suf) {
+    s = sym_in(u, -1, kind, cur_scope);
+    if (s >= 0) return s;
+    if (cur_scope) {
+      s = sym_in(u, -1, kind, 0);
+      if (s >= 0 && (syms[s].flags & F_SHARED)) return s;
+    }
+    suf = defsuf[u[0] - 'A'];
+  }
+  s = sym_in(u, suf, kind, cur_scope);
   if (s >= 0) return s;
-  if (!suf) suf = defsuf[u[0] - 'A'];
-  s = sym_find(u, suf, S_VAR);
-  if (s < 0) {
-    t = suf_type(suf);
-    s = sym_add(u, suf, S_VAR, t);
-    syms[s].slot = nslot[t]; nslot[t]++;
+  if (cur_scope) {
+    s = sym_in(u, suf, kind, 0);
+    if (s >= 0 && (syms[s].flags & F_SHARED)) return s;
+  }
+  return -1;
+}
+
+// a new variable or array in the current scope: a slot of the main program, or a cell of
+// the procedure's frame
+int var_new(char *u, int suf, int kind, int type) {
+  int s; int k;
+  s = sym_add(u, suf, kind, type);
+  if (cur_scope) {
+    syms[s].cls = C_LOCAL;
+    syms[s].slot = 2 * procs[cur_proc].np + cur_ncell + 1;
+    cur_ncell++;
+  }
+  else {
+    k = type;
+    if (kind == S_ARR) k = 0;
+    syms[s].slot = nslot[k]; nslot[k]++;
   }
   return s;
 }
 
+// The constant or variable the TK_ID at tp names (consumed); a variable is created on first
+// use. Constants answer to their name with any suffix.
+int name_ref() {
+  char u[48]; int suf; int s;
+  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  next();
+  s = const_find(u);
+  if (s >= 0) return s;
+  s = lookup(u, suf, S_VAR);
+  if (s >= 0) return s;
+  if (!suf) suf = defsuf[u[0] - 'A'];
+  return var_new(u, suf, S_VAR, suf_type(suf));
+}
+
 void emit_load(int s) {
-  int t;
-  t = syms[s].type;
+  int t; int c;
+  t = syms[s].type; c = syms[s].cls;
   if (syms[s].kind == S_CONST) {
     if (t == T_INT) emit(OP_PUSHI); else if (t == T_SNG) emit(OP_PUSHF); else emit(OP_PUSHS);
     emit_arg(syms[s].val);
     return;
   }
-  emit(OP_LDI + t - T_INT); emit_arg(syms[s].slot);      // OP_LDI, OP_LDF, OP_LDS
+  if (c == C_GLOBAL) emit(OP_LDI + t - T_INT);           // OP_LDI, OP_LDF, OP_LDS
+  else if (c == C_LOCAL) { if (t == T_STR) emit(OP_LLDS); else emit(OP_LLD); }
+  else { if (t == T_STR) emit(OP_PLDS); else emit(OP_PLD); }
+  emit_arg(syms[s].slot);
 }
 
-void emit_store(int s) { emit(OP_STI + syms[s].type - T_INT); emit_arg(syms[s].slot); }
-void emit_ref(int s) { emit(OP_REFI + syms[s].type - T_INT); emit_arg(syms[s].slot); }
+void emit_store(int s) {
+  int t; int c;
+  t = syms[s].type; c = syms[s].cls;
+  if (c == C_GLOBAL) emit(OP_STI + t - T_INT);
+  else if (c == C_LOCAL) { if (t == T_STR) emit(OP_LSTS); else emit(OP_LST); }
+  else { if (t == T_STR) emit(OP_PSTS); else emit(OP_PST); }
+  emit_arg(syms[s].slot);
+}
+
+// push the address of a variable's cell (an array's: the cell holding the array)
+void emit_ref(int s) {
+  int c;
+  c = syms[s].cls;
+  if (c == C_GLOBAL) { if (syms[s].kind == S_ARR) emit(OP_REFA); else emit(OP_REFI + syms[s].type - T_INT); }
+  else if (c == C_LOCAL) emit(OP_LREF);
+  else emit(OP_LLD);
+  emit_arg(syms[s].slot);
+}
+
+// a hidden variable (SELECT CASE's value): no name, so no lookup finds it
+int hidden_var(int type) { return var_new("", 0, S_VAR, type); }
 
 // ---------------------------------------------------------------- expressions
 // Precedence, high to low: ^; unary -; * /; \; MOD; + -; comparisons; NOT; AND; OR; XOR;
@@ -257,11 +354,20 @@ int primary() {
     return T_INT;
   }
   if (t == TK_ID) {
-    // Task 5: a name followed by ( is an array element or a FUNCTION call
-    if (toks[tp + 1].tk == TK_LPAR) { bad_token(); return T_INT; }
-    if (const_mode) {
-      upname(u, (char *)toks[tp].val);
-      if (sym_find(u, 0, S_CONST) < 0) { cerr("Invalid constant"); return T_INT; }
+    upname(u, (char *)toks[tp].val);
+    if (const_mode && const_find(u) < 0) { cerr("Invalid constant"); return T_INT; }
+    s = proc_find(u);
+    if (s >= 0 && procs[s].isfn) {                        // a FUNCTION call
+      t = proc_type(s, toks[tp].suf);
+      next();
+      call_args(s, 1);
+      return t;
+    }
+    if (toks[tp + 1].tk == TK_LPAR) {                     // an array element
+      if (s >= 0) { cerr("Array not defined"); return T_INT; }
+      t = elem_ref();
+      if (t == T_STR) emit(OP_LDAS); else emit(OP_LDA);
+      return t;
     }
     s = name_ref();
     emit_load(s);
@@ -436,9 +542,29 @@ void st_print() {
 
 // name = expression (also after LET)
 void st_assign() {
-  int s;
+  int s; int t; char u[48];
   if (TK != TK_ID) { bad_token(); return; }
-  if (toks[tp + 1].tk == TK_LPAR) { next(); bad_token(); return; }   // Task 5: arrays
+  upname(u, (char *)toks[tp].val);
+  s = proc_find(u);
+  if (s >= 0 && procs[s].isfn) {                          // a FUNCTION's result, in its body
+    if (toks[tp + 1].tk == TK_LPAR) { cerr("Array not defined"); return; }
+    if (s != cur_proc) { cerr("Duplicate definition"); return; }
+    t = proc_type(s, toks[tp].suf);
+    next();
+    if (!need(TK_EQ)) return;
+    expr_to(t);
+    if (t == T_STR) emit(OP_LSTS); else emit(OP_LST);
+    emit_arg(2 * procs[s].np + 1);
+    return;
+  }
+  if (toks[tp + 1].tk == TK_LPAR) {                       // an array element
+    if (s >= 0) { cerr("Array not defined"); return; }
+    t = elem_ref();
+    if (!need(TK_EQ)) return;
+    expr_to(t);
+    if (t == T_STR) emit(OP_STAS); else emit(OP_STA);
+    return;
+  }
   s = name_ref();
   if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return; }
   if (!need(TK_EQ)) return;
@@ -451,7 +577,8 @@ void st_let() { next(); st_assign(); }
 // a variable's address for SWAP; returns its type
 int ref_var() {
   int s;
-  if (TK != TK_ID || toks[tp + 1].tk == TK_LPAR) { bad_token(); return T_NONE; }
+  if (TK != TK_ID) { bad_token(); return T_NONE; }
+  if (toks[tp + 1].tk == TK_LPAR) return elem_ref();
   s = name_ref();
   if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return T_NONE; }
   emit_ref(s);
@@ -476,7 +603,7 @@ void st_const() {
   while (1) {
     if (TK != TK_ID) { bad_token(); return; }
     upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
-    if (sym_find(u, 0, S_CONST) >= 0 || var_named(u)) { cerr("Duplicate definition"); return; }
+    if (sym_in(u, 0, S_CONST, cur_scope) >= 0 || var_named(u, cur_scope)) { cerr("Duplicate definition"); return; }
     next();
     if (!need(TK_EQ)) return;
     start = ncode;
@@ -625,6 +752,7 @@ void resolve_labels() {
   int i; int l;
   for (i = 0; i < nfx; i++) {
     l = find_label((char *)fx_name[i], fx_scope[i]);
+    if (l < 0 && fx_kind[i]) l = find_label((char *)fx_name[i], 0);   // RESTORE: main's DATA
     if (l < 0) { err_line(fx_line[i], "Label not defined"); return; }
     if (fx_kind[i]) code[fx_pos[i]] = lb_data[l]; else code[fx_pos[i]] = lb_pos[l];
   }
@@ -638,9 +766,15 @@ void st_stop() { next(); if (!at_end()) { bad_token(); return; } emit(OP_END); }
 // ---------------------------------------------------------------- IF
 // The statements after THEN on one line (up to ELSE or the end of the line), or a label.
 void if_part() {
-  int k;
+  int k; int p; char u[48];
   k = toks[tp + 1].tk;
-  if (TK == TK_ID && (k == TK_EOL || k == TK_EOF || k == K_ELSE)) { goto_label(OP_JMP); return; }
+  if (TK == TK_ID && (k == TK_EOL || k == TK_EOF || k == K_ELSE)) {
+    upname(u, (char *)toks[tp].val);
+    p = proc_find(u);
+    if (p >= 0 && !procs[p].isfn && procs[p].np == 0) { next(); call_args(p, 0); return; }
+    goto_label(OP_JMP);
+    return;
+  }
   while (1) {
     if (TK == TK_EOL || TK == TK_EOF || TK == K_ELSE) return;
     statement();
@@ -735,13 +869,15 @@ void st_for() {
 }
 
 void st_next() {
-  struct Blk *b; int s;
+  struct Blk *b; int s; char u[48];
   next();
   while (1) {
     if (!blk_expect(B_FOR, "NEXT without FOR")) return;
     b = &blk[nblk - 1];
-    if (TK == TK_ID) {
-      s = name_ref();
+    if (TK == TK_ID) {                                    // only looked up, never created
+      upname(u, (char *)toks[tp].val);
+      s = lookup(u, toks[tp].suf, S_VAR);
+      next();
       if (s != b->c) { err_line(toks[tp - 1].line, "NEXT without FOR"); return; }
     }
     emit_ref(b->c);
@@ -808,10 +944,20 @@ void st_loop() {
   nblk--;
 }
 
-// EXIT FOR | EXIT DO (Task 5: SUB, FUNCTION)
+// EXIT FOR | EXIT DO | EXIT SUB | EXIT FUNCTION
 void st_exit() {
   struct Blk *b; int k; int i;
   next();
+  if (TK == K_SUB || TK == K_FUNCTION) {
+    k = TK == K_FUNCTION;
+    if (cur_proc < 0 || procs[cur_proc].isfn != k) {
+      if (k) cerr("EXIT FUNCTION not within FUNCTION"); else cerr("EXIT SUB not within SUB");
+      return;
+    }
+    next();
+    emit(OP_RET); emit_arg(cur_proc);
+    return;
+  }
   if (TK == K_FOR) k = B_FOR;
   else if (TK == K_DO) k = B_DO;
   else { bad_token(); return; }
@@ -828,10 +974,10 @@ void st_exit() {
 }
 
 // ---------------------------------------------------------------- SELECT CASE
-// The value is kept in a hidden variable slot (Task 5: a local of the SUB/FUNCTION).
-// Block: a = the slot, b = jumps to END SELECT, c = the jump to the next CASE (-1: none),
+// The value is kept in a hidden variable (a local inside a SUB/FUNCTION, so a recursive
+// call made by a CASE test has its own). Block: a = its symbol, b = jumps to END SELECT, c = the jump to the next CASE (-1: none),
 // d = 0 before the first CASE, 1 after a CASE, 2 after CASE ELSE, e = the value's type.
-void select_load(struct Blk *b) { emit(OP_LDI + b->e - T_INT); emit_arg(b->a); }
+void select_load(struct Blk *b) { emit_load(b->a); }
 
 void st_select() {
   struct Blk *b; int t;
@@ -841,8 +987,8 @@ void st_select() {
   b = blk_push(B_SELECT);
   if (!b) return;
   b->e = t; b->c = -1;
-  b->a = nslot[t]; nslot[t]++;
-  emit(OP_STI + t - T_INT); emit_arg(b->a);
+  b->a = hidden_var(t);
+  emit_store(b->a);
 }
 
 void st_case() {
@@ -939,14 +1085,21 @@ void st_data() {
 
 // READ v [, v]: each value is pushed by the READ op and stored like an assignment
 void st_read() {
-  int s;
+  int s; int t;
   next();
   while (1) {
-    if (TK != TK_ID || toks[tp + 1].tk == TK_LPAR) { bad_token(); return; }   // Task 5: arrays
-    s = name_ref();
-    if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return; }
-    emit(OP_READI + syms[s].type - T_INT);
-    emit_store(s);
+    if (TK != TK_ID) { bad_token(); return; }
+    if (toks[tp + 1].tk == TK_LPAR) {                     // an array element
+      t = elem_ref();
+      emit(OP_READI + t - T_INT);
+      if (t == T_STR) emit(OP_STAS); else emit(OP_STA);
+    }
+    else {
+      s = name_ref();
+      if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return; }
+      emit(OP_READI + syms[s].type - T_INT);
+      emit_store(s);
+    }
     if (!accept(TK_COMMA)) return;
   }
 }
@@ -959,14 +1112,413 @@ void st_restore() {
   else emit_arg(0);
 }
 
-// END, END IF, END SELECT (Task 5: END SUB, END FUNCTION)
+// END, END IF, END SELECT, END SUB, END FUNCTION
 void st_end() {
   next();
   if (TK == K_IF) { next(); end_if(); return; }
   if (TK == K_SELECT) { next(); end_select(); return; }
+  if (TK == K_SUB) { end_proc(0); return; }
+  if (TK == K_FUNCTION) { end_proc(1); return; }
   if (!at_end()) { bad_token(); return; }
   emit(OP_END);
 }
+
+// ---------------------------------------------------------------- arrays
+// The array a name means here, or -1: like lookup, but in the current scope only (DIM) or
+// with the SHARED ones too (REDIM)
+int arr_find(char *u, int suf, int shared_too) {
+  int s;
+  if (shared_too) return lookup(u, suf, S_ARR);
+  if (!suf) {
+    s = sym_in(u, -1, S_ARR, cur_scope);
+    if (s >= 0) return s;
+    suf = defsuf[u[0] - 'A'];
+  }
+  return sym_in(u, suf, S_ARR, cur_scope);
+}
+
+// name(subscripts) at tp: pushes the element's address; returns the element type. An array
+// not known yet is created, used without DIM: 0 to 10 in every dimension, made when the
+// element is first reached.
+int elem_ref() {
+  char u[48]; int suf; int s; int nd; int it;
+  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  next();
+  s = lookup(u, suf, S_ARR);
+  if (s < 0) {
+    if (!suf) suf = defsuf[u[0] - 'A'];
+    s = var_new(u, suf, S_ARR, suf_type(suf));
+    syms[s].flags = syms[s].flags | F_IMPL;
+  }
+  emit_ref(s);
+  if (!need(TK_LPAR)) return syms[s].type;
+  nd = 0;
+  while (1) {
+    expr_to(T_INT);
+    nd++;
+    if (!accept(TK_COMMA)) break;
+  }
+  if (!need(TK_RPAR)) return syms[s].type;
+  if (!syms[s].dims) syms[s].dims = nd;
+  if (syms[s].dims != nd) { cerr("Wrong number of dimensions"); return syms[s].type; }
+  it = 0;
+  if (syms[s].cls != C_PARAM && !(syms[s].flags & F_DIMMED)) it = syms[s].type;
+  emit(OP_ELEM); emit_arg(nd); emit_arg(it);
+  return syms[s].type;
+}
+
+int arr_named() {
+  char u[48]; int s;
+  if (TK != TK_ID) { bad_token(); return -1; }
+  upname(u, (char *)toks[tp].val);
+  s = lookup(u, toks[tp].suf, S_ARR);
+  if (s < 0) { cerr("Array not defined"); return -1; }
+  next();
+  emit_ref(s);
+  return s;
+}
+
+// AS type: the type's suffix character, or 0 after an error
+int parse_as() {
+  int t; int c;
+  t = TK; c = 0;
+  if (t == K_INTEGER) c = '%'; else if (t == K_LONG) c = '&'; else if (t == K_SINGLE) c = '!';
+  else if (t == K_DOUBLE) c = '#'; else if (t == K_STRING) c = '$';
+  if (t == TK_ID) { cerr("Advanced feature unavailable"); return 0; }   // a TYPE
+  if (!c) { bad_token(); return 0; }
+  next();
+  if (c == '$' && TK == TK_MUL) { cerr("Advanced feature unavailable"); return 0; }   // STRING * n
+  return c;
+}
+
+int dim_array(char *u, int suf, int as, int nd, int mask, int redim, int shared) {
+  int s; int k;
+  k = suf;
+  if (as) k = as;
+  s = arr_find(u, k, redim);
+  if (s >= 0) {
+    if (!redim || (syms[s].flags & F_IMPL)) { cerr("Array already dimensioned"); return 0; }
+    if (syms[s].dims && syms[s].dims != nd) { cerr("Wrong number of dimensions"); return 0; }
+  }
+  else {
+    if (!k) k = defsuf[u[0] - 'A'];
+    s = var_new(u, k, S_ARR, suf_type(k));
+    if (as) syms[s].flags = syms[s].flags | F_AS;
+    if (shared) syms[s].flags = syms[s].flags | F_SHARED;
+  }
+  syms[s].dims = nd;
+  syms[s].flags = syms[s].flags | F_DIMMED;
+  emit_ref(s);
+  emit(OP_DIM); emit_arg(nd); emit_arg(syms[s].type); emit_arg(redim); emit_arg(mask);
+  return 1;
+}
+
+int dim_var(char *u, int suf, int as, int shared) {
+  int s; int k;
+  k = suf;
+  if (!k) k = defsuf[u[0] - 'A'];
+  if (as) k = as;
+  if (const_find(u) >= 0 || (as && var_named(u, cur_scope)) || sym_in(u, k, S_VAR, cur_scope) >= 0 ||
+      sym_in(u, -1, S_VAR, cur_scope) >= 0) {
+    cerr("Duplicate definition");
+    return 0;
+  }
+  s = var_new(u, k, S_VAR, suf_type(k));
+  if (as) syms[s].flags = syms[s].flags | F_AS;
+  if (shared) syms[s].flags = syms[s].flags | F_SHARED;
+  return 1;
+}
+
+// DIM [SHARED] name[(bounds)] [AS type] [, ...] and REDIM (arrays only). Bounds are `hi` (0
+// to hi) or `lo TO hi`; an array gets them when the statement runs, REDIM freeing the old
+// one. A variable is only declared (its type, SHARED).
+void st_dim() {
+  int redim; int shared; char u[48]; int suf; int as; int nd; int mask;
+  redim = TK == K_REDIM;
+  next();
+  if (TK == K_SHARED && cur_scope) { bad_token(); return; }
+  shared = accept(K_SHARED);
+  while (1) {
+    if (TK != TK_ID) { bad_token(); return; }
+    upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+    next();
+    nd = 0; mask = 0;
+    if (TK == TK_LPAR) {
+      next();
+      while (1) {
+        expr_to(T_INT);
+        if (accept(K_TO)) { if (nd < 31) mask = mask | (1 << nd); expr_to(T_INT); }
+        nd++;
+        if (!accept(TK_COMMA)) break;
+      }
+      if (!need(TK_RPAR)) return;
+      if (nd > ARR_DIMS) { cerr("Too many dimensions"); return; }
+    }
+    else if (redim) { bad_token(); return; }
+    as = 0;
+    if (accept(K_AS)) {
+      as = parse_as();
+      if (!as) return;
+      if (suf && suf_type(suf) != suf_type(as)) { cerr("Duplicate definition"); return; }
+    }
+    if (nd) { if (!dim_array(u, suf, as, nd, mask, redim, shared)) return; }
+    else if (!dim_var(u, suf, as, shared)) return;
+    if (!accept(TK_COMMA)) return;
+  }
+}
+
+// ERASE a [, b]: frees the arrays (a later use needs a REDIM, or is out of range)
+void st_erase() {
+  next();
+  while (1) {
+    if (arr_named() < 0) return;
+    emit(OP_ERASE);
+    if (!accept(TK_COMMA)) return;
+  }
+}
+
+// ---------------------------------------------------------------- SUB and FUNCTION
+int proc_add(char *u, int suf, int isfn) {
+  struct Proc *n; int k;
+  if (nproc >= capproc) {
+    capproc = capproc * 2 + 16;
+    n = malloc(capproc * sizeof(struct Proc));
+    if (procs) { memcpy(n, procs, nproc * sizeof(struct Proc)); free(procs); }
+    procs = n;
+  }
+  n = &procs[nproc];
+  n->uname = dupstr(u); n->suf = suf; n->isfn = isfn; n->type = T_NONE;
+  if (isfn) { k = suf; if (!k) k = defsuf[u[0] - 'A']; n->type = suf_type(k); }
+  n->np = 0; n->pfirst = npa; n->entry = 0; n->ncell = 0; n->tags = 0; n->tok = 0; n->line = 0;
+  nproc++;
+  return nproc - 1;
+}
+
+void param_add(int p, int type, int arr) {
+  if (npa >= cappa) {
+    cappa = cappa * 2 + 32;
+    pa_type = grow(pa_type, npa, cappa); pa_arr = grow(pa_arr, npa, cappa);
+  }
+  pa_type[npa] = type; pa_arr[npa] = arr; npa++;
+  procs[p].np++;
+}
+
+// a FUNCTION's name written with suffix suf: its type (another type's suffix is an error)
+int proc_type(int p, int suf) {
+  if (suf && suf_type(suf) != procs[p].type) cerr("Duplicate definition");
+  return procs[p].type;
+}
+
+char *proc_unclosed(int p) {
+  if (procs[p].isfn) return "FUNCTION without END FUNCTION";
+  return "SUB without END SUB";
+}
+
+// SUB name [(params)] | FUNCTION name[suffix] [(params)], the keyword at tp; a parameter is
+// name[suffix][()] [AS type]. Scanning: adds the procedure and its parameter types to
+// procs[] (p is not used) and returns its index; compiling: makes the parameters symbols of
+// procedure p. -1 after an error.
+int header(int p) {
+  int isfn; char u[48]; int suf; int n; int psuf; int arr; int as; int s; int kind;
+  isfn = TK == K_FUNCTION;
+  next();
+  if (TK != TK_ID) { bad_token(); return -1; }
+  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  if (suf && !isfn) { bad_token(); return -1; }
+  if (scanning) {
+    if (proc_find(u) >= 0) return -1;       // a second definition: reported when compiled
+    p = proc_add(u, suf, isfn);
+  }
+  next();
+  n = 0;
+  if (accept(TK_LPAR) && !accept(TK_RPAR)) {
+    while (1) {
+      if (TK != TK_ID) { bad_token(); return -1; }
+      upname(u, (char *)toks[tp].val); psuf = toks[tp].suf;
+      next();
+      arr = 0;
+      if (TK == TK_LPAR) { next(); if (!need(TK_RPAR)) return -1; arr = 1; }
+      as = 0;
+      if (accept(K_AS)) {
+        as = parse_as();
+        if (!as) return -1;
+        if (psuf && suf_type(psuf) != suf_type(as)) { cerr("Duplicate definition"); return -1; }
+        psuf = as;
+      }
+      if (!psuf) psuf = defsuf[u[0] - 'A'];
+      kind = S_VAR;
+      if (arr) kind = S_ARR;
+      if (scanning) param_add(p, suf_type(psuf), arr);
+      else {
+        if ((!arr && var_named(u, cur_scope)) || sym_in(u, psuf, kind, cur_scope) >= 0) {
+          cerr("Duplicate definition");
+          return -1;
+        }
+        s = sym_add(u, psuf, kind, suf_type(psuf));
+        syms[s].cls = C_PARAM; syms[s].slot = 2 * n + 1;
+        if (as) syms[s].flags = syms[s].flags | F_AS;
+      }
+      n++;
+      if (!accept(TK_COMMA)) break;
+    }
+    if (!need(TK_RPAR)) return -1;
+  }
+  if (!at_end()) { bad_token(); return -1; }
+  return p;
+}
+
+// The pass before compiling: every SUB and FUNCTION header (DEFtype lines are followed, so
+// parameters without a suffix get the type they will have), errors left for the compile
+void proc_scan() {
+  char save[26]; int i; int n0; int a0; int kw; int p;
+  for (i = 0; i < 26; i++) save[i] = defsuf[i];
+  scanning = 1;
+  tp = 0;
+  while (TK != TK_EOF) {
+    if (TK >= K_DEFINT && TK <= K_DEFSTR) { scan_fail = 0; st_deftype(); }
+    else if (TK == K_SUB || TK == K_FUNCTION) {
+      kw = tp; n0 = nproc; a0 = npa; scan_fail = 0;
+      p = header(-1);
+      if (p < 0 || scan_fail) {
+        while (nproc > n0) { nproc--; free(procs[nproc].uname); }
+        npa = a0;
+      }
+      else { procs[p].tok = kw; procs[p].line = toks[kw].line; }
+    }
+    while (TK != TK_EOL && TK != TK_EOF) next();
+    if (TK == TK_EOL) next();
+  }
+  for (i = 0; i < 26; i++) defsuf[i] = save[i];
+  scanning = 0;
+  tp = 0;
+}
+
+// SUB / FUNCTION: the body is compiled in the procedure's own scope (variables, labels) and
+// jumped over by the code around it
+void st_sub() {
+  char u[48]; int p; int kw;
+  kw = tp;
+  if (cur_proc >= 0) { err_line(procs[cur_proc].line, proc_unclosed(cur_proc)); return; }
+  if (nblk > 0) { err_line(blk[nblk - 1].line, unclosed(blk[nblk - 1].kind)); return; }
+  p = -1;
+  if (toks[tp + 1].tk == TK_ID) { upname(u, (char *)toks[tp + 1].val); p = proc_find(u); }
+  if (p < 0) { header(-1); if (!nerr) cerr("Syntax error"); return; }   // the scan failed
+  if (procs[p].tok != kw) { cerr("Duplicate definition"); return; }
+  proc_skip = jump(OP_JMP, -1);
+  procs[p].entry = ncode;
+  cur_proc = p; cur_scope = p + 1;
+  cur_ncell = procs[p].isfn;                              // a FUNCTION's result cell
+  header(p);
+}
+
+// END SUB / END FUNCTION (the keyword at tp): the return, and the frame's cell tags
+void end_proc(int isfn) {
+  struct Proc *pr; int i; int o;
+  if (cur_proc < 0 || procs[cur_proc].isfn != isfn) {
+    if (isfn) cerr("END FUNCTION without FUNCTION"); else cerr("END SUB without SUB");
+    return;
+  }
+  next();
+  if (nblk > 0) { err_line(blk[nblk - 1].line, unclosed(blk[nblk - 1].kind)); return; }
+  pr = &procs[cur_proc];
+  emit(OP_RET); emit_arg(cur_proc);
+  pr->ncell = cur_ncell;
+  pr->tags = malloc(cur_ncell + 1);
+  if (pr->isfn && pr->type == T_STR) pr->tags[0] = 1;
+  for (i = 0; i < nsym; i++)
+    if (syms[i].scope == cur_scope && syms[i].cls == C_LOCAL) {
+      o = syms[i].slot - 2 * pr->np - 1;
+      if (syms[i].kind == S_ARR) pr->tags[o] = 2;
+      else if (syms[i].type == T_STR) pr->tags[o] = 1;
+    }
+  patch_chain(proc_skip, ncode);
+  cur_proc = -1; cur_scope = 0;
+}
+
+// the argument at tp is a variable or an array element alone (passed by reference)?
+int ref_arg(int paren) {
+  char u[48]; int j; int d; int k;
+  if (TK != TK_ID) return 0;
+  upname(u, (char *)toks[tp].val);
+  if (const_find(u) >= 0 || proc_find(u) >= 0) return 0;
+  j = tp + 1;
+  if (toks[j].tk == TK_LPAR) {
+    d = 0;
+    while (1) {
+      k = toks[j].tk;
+      if (k == TK_LPAR) d++;
+      else if (k == TK_RPAR) { d--; if (d == 0) break; }
+      else if (k == TK_EOL || k == TK_EOF) return 0;
+      j++;
+    }
+    j++;
+  }
+  k = toks[j].tk;
+  if (k == TK_COMMA) return 1;
+  if (paren) return k == TK_RPAR;
+  return k == TK_EOL || k == TK_COLON || k == TK_EOF || k == K_ELSE;
+}
+
+// argument i of a call to p: two cells (see basic.h); 0 after an error
+int call_arg(int p, int i, int paren) {
+  int pt; int pa; int s; int t; char u[48];
+  pt = pa_type[procs[p].pfirst + i]; pa = pa_arr[procs[p].pfirst + i];
+  if (TK == TK_ID && toks[tp + 1].tk == TK_LPAR && toks[tp + 2].tk == TK_RPAR) {   // a whole array
+    upname(u, (char *)toks[tp].val);
+    s = lookup(u, toks[tp].suf, S_ARR);
+    if (s < 0) { cerr("Array not defined"); return 0; }
+    if (!pa || syms[s].type != pt) { cerr("Parameter type mismatch"); return 0; }
+    next(); next(); next();
+    emit_ref(s);
+    emit(OP_PUSHI); emit_arg(0);
+    return 1;
+  }
+  if (pa) { cerr("Parameter type mismatch"); return 0; }
+  if (ref_arg(paren)) {
+    t = ref_var();
+    if (t != pt) { cerr("Parameter type mismatch"); return 0; }
+    emit(OP_PUSHI); emit_arg(0);
+    return 1;
+  }
+  expr_to(pt);
+  emit(OP_BYVAL);
+  return 1;
+}
+
+// the arguments of a call to p, in parentheses (paren) or to the end of the statement, and
+// the call
+void call_args(int p, int paren) {
+  int n;
+  n = 0;
+  if (paren) { if (!accept(TK_LPAR) || accept(TK_RPAR)) paren = -1; }
+  else if (at_end()) paren = -1;
+  if (paren >= 0) {
+    while (1) {
+      if (n >= procs[p].np) { cerr("Argument-count mismatch"); return; }
+      if (!call_arg(p, n, paren)) return;
+      n++;
+      if (!accept(TK_COMMA)) break;
+    }
+    if (paren && !need(TK_RPAR)) return;
+  }
+  if (n != procs[p].np) { cerr("Argument-count mismatch"); return; }
+  emit(OP_CALL); emit_arg(p);
+}
+
+// CALL name [(args)]
+void st_call() {
+  char u[48]; int p;
+  next();
+  if (TK != TK_ID) { bad_token(); return; }
+  upname(u, (char *)toks[tp].val);
+  p = proc_find(u);
+  if (p < 0 || procs[p].isfn) { cerr("Subprogram not defined"); return; }
+  next();
+  call_args(p, 1);
+}
+
+// DECLARE lines are not needed (procedures are found before compiling): skipped
+void st_declare() { while (TK != TK_EOL && TK != TK_COLON && TK != TK_EOF) next(); }
 
 // QBasic statements outside this BASIC that start with one of its words
 void st_unsup() { cerr("Advanced feature unavailable"); }
@@ -978,10 +1530,10 @@ void st_line() {
 }
 
 void statement() {
-  int t;
+  int t; int p; char u[48];
   line_mark(toks[tp].line);
   t = TK;
-  // a label: a name and ':' first on a line; Task 5: `name args` calls a SUB
+  // a label: a name and ':' first on a line
   if (t == TK_ID && toks[tp + 1].tk == TK_COLON && (tp == 0 || toks[tp - 1].tk == TK_EOL)) {
     define_label();
     if (TK == TK_EOL || TK == TK_EOF || TK == TK_COLON) return;
@@ -993,12 +1545,28 @@ void statement() {
     cerr("Statements illegal between SELECT CASE and CASE");
     return;
   }
-  if (t == TK_ID) { st_assign(); return; }
+  if (t == TK_ID) {                                       // `name args` calls a SUB
+    upname(u, (char *)toks[tp].val);
+    p = proc_find(u);
+    if (p >= 0 && !procs[p].isfn) { next(); call_args(p, 0); return; }
+    st_assign();
+    return;
+  }
   if (stmt_tab[t]) { stmt_tab[t](); return; }
   bad_token();
 }
 
 int compile() {
+  int i; int n;
+  // the longest line bounds what one statement pushes on the value stack (see basic.h)
+  n = 0; vmargin = 0;
+  for (i = 0; i < ntok; i++) {
+    n++;
+    if (toks[i].tk == TK_EOL) { if (n > vmargin) vmargin = n; n = 0; }
+  }
+  if (n > vmargin) vmargin = n;
+  vmargin = 2 * vmargin + 64;
+  proc_scan();
   tp = 0; depth = 0; const_mode = 0;
   while (TK != TK_EOF) {
     if (TK == TK_EOL || TK == TK_COLON) { next(); continue; }
@@ -1008,6 +1576,7 @@ int compile() {
   }
   emit(OP_END);
   if (!nerr && nblk > 0) err_line(blk[nblk - 1].line, unclosed(blk[nblk - 1].kind));
+  if (!nerr && cur_proc >= 0) err_line(procs[cur_proc].line, proc_unclosed(cur_proc));
   if (!nerr) resolve_labels();
   return nerr == 0;
 }
@@ -1050,8 +1619,15 @@ int comp_init() {
   stmt_tab[K_DATA] = st_data;
   stmt_tab[K_READ] = st_read;
   stmt_tab[K_RESTORE] = st_restore;
+  stmt_tab[K_DIM] = st_dim;
+  stmt_tab[K_REDIM] = st_dim;
+  stmt_tab[K_ERASE] = st_erase;
+  stmt_tab[K_SUB] = st_sub;
+  stmt_tab[K_FUNCTION] = st_sub;
+  stmt_tab[K_CALL] = st_call;
+  stmt_tab[K_DECLARE] = st_declare;
   blk = malloc(256 * sizeof(struct Blk)); nblk = 0;
-  cur_scope = 0;
+  cur_scope = 0; cur_proc = -1; scanning = 0;
   return 0;
 }
 
@@ -1070,6 +1646,8 @@ void comp_free() {
   if (fx_name) { free(fx_name); free(fx_scope); free(fx_pos); free(fx_line); free(fx_kind); }
   if (d_item) { free(d_item); free(d_quoted); }
   if (blk) free(blk);
+  if (pa_type) { free(pa_type); free(pa_arr); }
+  pa_type = 0; pa_arr = 0; npa = 0; cappa = 0; capproc = 0;
   lb_name = 0; nlb = 0; caplb = 0; fx_name = 0; nfx = 0; capfx = 0;
   d_item = 0; d_quoted = 0; ndata = 0; capdata = 0; blk = 0; nblk = 0;
   if (lm_pos) { free(lm_pos); free(lm_line); }

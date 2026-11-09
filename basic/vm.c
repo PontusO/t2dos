@@ -15,8 +15,14 @@ void (*optab[NOPS])();
 int *ivar;
 float *fvar;
 char **svar;
+int **avar;
 int dptr;                        // the next DATA item
 int nalloc[4];                   // slots allocated per type (vm_alloc keeps them on growth)
+int fbase;
+int vmargin;
+int calls;                       // calls running (nested)
+struct Proc *procs;
+int nproc;
 
 // ---------------------------------------------------------------- strings
 char *str_new(int len) {
@@ -360,6 +366,165 @@ void op_return() {
   csp = i - 2;
 }
 
+// ---------------------------------------------------------------- arrays
+int *arr_new(int type, int nd, int *lo, int *len) {
+  int *a; int i; int n;
+  n = 1;
+  for (i = 0; i < nd; i++) {
+    if (len[i] <= 0) return 0;
+    if (n > 4000000 / len[i]) return 0;
+    n = n * len[i];
+  }
+  a = malloc((3 + 2 * nd + n) * 4);
+  if (!a) return 0;
+  a[0] = type; a[1] = nd; a[2] = n;
+  for (i = 0; i < nd; i++) { a[3 + 2 * i] = lo[i]; a[4 + 2 * i] = len[i]; }
+  return a;
+}
+
+void arr_free(int *a) {
+  int i; int *d;
+  if (!a) return;
+  if (a[0] == T_STR) {
+    d = a + 3 + 2 * a[1];
+    for (i = 0; i < a[2]; i++) str_free((char *)d[i]);
+  }
+  free(a);
+}
+
+// OP_ELEM: the array cell's address and nd subscripts become the element's address
+void op_elem() {
+  int nd; int it; int **cell; int *a; int i; int d; int x; int off; int lo[ARR_DIMS]; int len[ARR_DIMS];
+  nd = code[pc]; it = code[pc + 1]; pc = pc + 2;
+  cell = (int **)vs[sp - nd];
+  a = *cell;
+  if (!a && it) {                // an array used without DIM: 0 to 10 in every dimension
+    for (d = 0; d < nd; d++) { lo[d] = 0; len[d] = 11; }
+    a = arr_new(it, nd, lo, len);
+    if (!a) { vm_err("Out of memory"); return; }
+    *cell = a;
+  }
+  if (!a || a[1] != nd) { vm_err("Subscript out of range"); return; }
+  off = 0;
+  for (d = 0; d < nd; d++) {
+    i = 3 + 2 * d;
+    x = vs[sp - nd + 1 + d] - a[i];
+    if (x < 0 || x >= a[i + 1]) { vm_err("Subscript out of range"); return; }
+    off = off * a[i + 1] + x;
+  }
+  sp = sp - nd;
+  vs[sp] = (int)(a + 3 + 2 * nd + off);
+}
+
+// OP_DIM nd type redim mask: [cell address, bounds] (two for a dimension in mask, else the
+// upper bound only, the lower being 0)
+void op_dim() {
+  int nd; int type; int redim; int mask; int k; int d; int n; int **cell; int *a;
+  int lo[ARR_DIMS]; int len[ARR_DIMS];
+  nd = code[pc]; type = code[pc + 1]; redim = code[pc + 2]; mask = code[pc + 3]; pc = pc + 4;
+  n = 0;
+  for (d = 0; d < nd; d++) { n++; if (mask & (1 << d)) n++; }
+  cell = (int **)vs[sp];
+  k = sp - n;
+  for (d = 0; d < nd; d++) {
+    lo[d] = 0;
+    if (mask & (1 << d)) { lo[d] = vs[k]; k++; }
+    len[d] = vs[k] - lo[d] + 1; k++;
+    if (len[d] <= 0) { vm_err("Subscript out of range"); return; }
+  }
+  sp = sp - n - 1;
+  if (*cell && !redim) { vm_err("Array already dimensioned"); return; }
+  a = arr_new(type, nd, lo, len);
+  if (!a) { vm_err("Out of memory"); return; }
+  arr_free(*cell);
+  *cell = a;
+}
+
+void op_erase() { int **cell; cell = (int **)vs[sp]; sp--; arr_free(*cell); *cell = 0; }
+void op_refa() { sp++; vs[sp] = (int)&avar[code[pc]]; pc++; }
+
+// ---------------------------------------------------------------- locals, cell addresses
+void op_lld() { sp++; vs[sp] = vs[fbase + code[pc]]; pc++; }
+void op_llds() { sp++; vs[sp] = (int)str_dup((char *)vs[fbase + code[pc]]); vt[sp] = 1; pc++; }
+void op_lst() { vs[fbase + code[pc]] = vs[sp]; sp--; pc++; }
+
+void op_lsts() {
+  int c;
+  c = fbase + code[pc]; pc++;
+  str_free((char *)vs[c]); vs[c] = vs[sp]; vt[sp] = 0; sp--;
+}
+
+void op_lref() { sp++; vs[sp] = (int)&vs[fbase + code[pc]]; pc++; }
+void op_pld() { sp++; vs[sp] = *(int *)vs[fbase + code[pc]]; pc++; }
+void op_plds() { sp++; vs[sp] = (int)str_dup(*(char **)vs[fbase + code[pc]]); vt[sp] = 1; pc++; }
+void op_pst() { *(int *)vs[fbase + code[pc]] = vs[sp]; sp--; pc++; }
+
+void op_psts() {
+  char **p;
+  p = (char **)vs[fbase + code[pc]]; pc++;
+  str_free(*p); *p = (char *)vs[sp]; vt[sp] = 0; sp--;
+}
+
+void op_lda() { vs[sp] = *(int *)vs[sp]; }
+void op_ldas() { vs[sp] = (int)str_dup(*(char **)vs[sp]); vt[sp] = 1; }
+void op_sta() { *(int *)vs[sp - 1] = vs[sp]; sp = sp - 2; }
+
+void op_stas() {
+  char **p;
+  p = (char **)vs[sp - 1];
+  str_free(*p); *p = (char *)vs[sp]; vt[sp] = 0;
+  sp = sp - 2;
+}
+
+// ---------------------------------------------------------------- calls
+void op_byval() {
+  sp++;
+  vs[sp] = vs[sp - 1]; vt[sp] = vt[sp - 1];
+  vs[sp - 1] = (int)&vs[sp]; vt[sp - 1] = 0;
+}
+
+void op_call() {
+  struct Proc *p; int k; int i;
+  k = code[pc]; pc++;
+  p = &procs[k];
+  if (calls >= MAXCALL || sp + p->ncell + vmargin >= VSTACK || csp + 4 >= CSTACK) {
+    vm_err("Out of stack space");
+    return;
+  }
+  for (i = 1; i <= p->ncell; i++) { vs[sp + i] = 0; vt[sp + i] = p->tags[i - 1]; }
+  sp = sp + p->ncell;
+  cs[csp + 1] = pc; cs[csp + 2] = fbase; cs[csp + 3] = k; cs[csp + 4] = CK_CALL;
+  csp = csp + 4;
+  fbase = sp - p->ncell - 2 * p->np;
+  pc = p->entry;
+  calls++;
+}
+
+// free what the cells from..sp own (by their tags) and pop them
+void free_cells(int from) {
+  int i;
+  for (i = from; i <= sp; i++) {
+    if (vt[i] == 1) str_free((char *)vs[i]);
+    else if (vt[i] == 2) arr_free((int *)vs[i]);
+    vt[i] = 0;
+  }
+  sp = from - 1;
+}
+
+void op_ret() {
+  struct Proc *p; int i; int r; int rt; int c;
+  p = &procs[code[pc]]; pc++;
+  i = csp;
+  while (i > 0 && cs[i] != CK_CALL) { if (cs[i] == CK_FOR) i = i - 5; else i = i - 2; }
+  r = 0; rt = 0;
+  if (p->isfn) { c = fbase + 2 * p->np + 1; r = vs[c]; rt = vt[c]; vt[c] = 0; }
+  free_cells(fbase + 1);
+  if (p->isfn) { sp++; vs[sp] = r; vt[sp] = rt; }
+  pc = cs[i - 3]; fbase = cs[i - 2];
+  csp = i - 4;
+  calls--;
+}
+
 // ---------------------------------------------------------------- DATA
 // An item as a number: 1 when it is one (an empty item is 0), -1 for Overflow, else 0;
 // *type T_INT / T_SNG and *val the int or the float's bits.
@@ -444,7 +609,13 @@ int vm_init() {
   optab[OP_GOSUB] = op_gosub; optab[OP_RETURN] = op_return;
   optab[OP_READI] = op_readi; optab[OP_READF] = op_readf; optab[OP_READS] = op_reads;
   optab[OP_RESTORE] = op_restore;
-  dptr = 0;
+  optab[OP_LLD] = op_lld; optab[OP_LLDS] = op_llds; optab[OP_LST] = op_lst;
+  optab[OP_LSTS] = op_lsts; optab[OP_LREF] = op_lref;
+  optab[OP_PLD] = op_pld; optab[OP_PLDS] = op_plds; optab[OP_PST] = op_pst; optab[OP_PSTS] = op_psts;
+  optab[OP_LDA] = op_lda; optab[OP_LDAS] = op_ldas; optab[OP_STA] = op_sta; optab[OP_STAS] = op_stas;
+  optab[OP_REFA] = op_refa; optab[OP_ELEM] = op_elem; optab[OP_DIM] = op_dim; optab[OP_ERASE] = op_erase;
+  optab[OP_BYVAL] = op_byval; optab[OP_CALL] = op_call; optab[OP_RET] = op_ret;
+  dptr = 0; fbase = 0; calls = 0;
   return 0;
 }
 
@@ -462,6 +633,8 @@ int vm_alloc() {
   ivar = cells(ivar, nalloc[T_INT], nslot[T_INT]);
   fvar = (float *)cells((int *)fvar, nalloc[T_SNG], nslot[T_SNG]);
   svar = (char **)cells((int *)svar, nalloc[T_STR], nslot[T_STR]);
+  avar = (int **)cells((int *)avar, nalloc[0], nslot[0]);
+  if (nslot[0] > nalloc[0]) nalloc[0] = nslot[0];
   if (nslot[T_INT] > nalloc[T_INT]) nalloc[T_INT] = nslot[T_INT];
   if (nslot[T_SNG] > nalloc[T_SNG]) nalloc[T_SNG] = nslot[T_SNG];
   if (nslot[T_STR] > nalloc[T_STR]) nalloc[T_STR] = nslot[T_STR];
@@ -482,12 +655,16 @@ int vm_run(int start) {
 void vm_free() {
   int i;
   if (svar) for (i = 0; i < nalloc[T_STR]; i++) str_free(svar[i]);
-  for (i = 1; i <= sp; i++) if (vt[i]) str_free((char *)vs[i]);   // strings an error left behind
-  sp = 0;
+  if (avar) for (i = 0; i < nalloc[0]; i++) arr_free(avar[i]);
+  free_cells(1);                 // frames and strings an error left on the stack
   if (ivar) free(ivar);
   if (fvar) free(fvar);
   if (svar) free(svar);
-  ivar = 0; fvar = 0; svar = 0;
+  if (avar) free(avar);
+  ivar = 0; fvar = 0; svar = 0; avar = 0;
+  for (i = 0; i < nproc; i++) { free(procs[i].uname); if (procs[i].tags) free(procs[i].tags); }
+  if (procs) free(procs);
+  procs = 0; nproc = 0;
   for (i = 0; i < 4; i++) nalloc[i] = 0;
   free(vs); free(vt); free(cs);
 }

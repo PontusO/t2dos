@@ -1,0 +1,3 @@
+before
+arrerr.bas:3: Subscript out of range
+exit 1
