@@ -1,0 +1,3 @@
+PRINT "a"
+PRINT "b"
+NEXT

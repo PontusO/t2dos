@@ -1,0 +1,2 @@
+blockerr3.bas:2: WEND without WHILE
+exit 1

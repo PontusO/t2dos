@@ -29,7 +29,7 @@ root/bin/%.bin: binutils/%.c $(TOOLS) lib/t2obj.h lib/t2obj.c
 	$(call CCBIN,$<,-I lib)
 # BASIC: several files in basic/ (pcsys.c is the PC test build's shim, not part of it); cc takes
 # one -I, so basic sources find sys.h in the current directory (the repo root)
-BASIC_SRC = $(filter-out basic/pcsys.c,$(wildcard basic/*.c))
+BASIC_SRC = $(sort $(filter-out basic/pcsys.c,$(wildcard basic/*.c)))
 root/bin/basic.bin: $(BASIC_SRC) basic/basic.h $(TOOLS)
 	$(call CCBIN,$(BASIC_SRC),-I basic)
 # the assembler: same pattern, source in assembler/

@@ -1,0 +1,2 @@
+blockerr4.bas:2: WHILE without WEND
+exit 1

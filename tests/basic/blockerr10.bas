@@ -1,0 +1,2 @@
+PRINT "a"
+CASE 1

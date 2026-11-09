@@ -1,0 +1,3 @@
+a
+gosuberr.bas:2: RETURN without GOSUB
+exit 1

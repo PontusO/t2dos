@@ -1,0 +1,2 @@
+PRINT "x"
+PRINT FILEATTR(1, 1)

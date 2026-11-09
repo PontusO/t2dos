@@ -1,0 +1,9 @@
+start
+hello
+hello
+show 1 
+show 2 
+outer
+hello
+end
+exit 0

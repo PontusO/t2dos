@@ -1,0 +1,5 @@
+x = 1
+IF x THEN
+PRINT x
+ELSE
+PRINT 0

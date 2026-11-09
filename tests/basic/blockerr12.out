@@ -1,0 +1,2 @@
+blockerr12.bas:3: EXIT FOR not within FOR...NEXT
+exit 1

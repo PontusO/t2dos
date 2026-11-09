@@ -1,0 +1,3 @@
+PRINT "a"
+ELSE
+PRINT "b"

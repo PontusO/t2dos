@@ -109,6 +109,14 @@ enum {
   OP_AND, OP_OR, OP_XOR, OP_EQV, OP_IMP, OP_NOT,    // bitwise on ints
   OP_PRINTI, OP_PRINTF, OP_PRINTS, // PRINT one value (numbers with their spaces)
   OP_PRCOMMA, OP_PRNL,           // PRINT's ',' (next 14-column zone); end of line
+  OP_JMP, OP_JZ, OP_JNZ,         // arg: target; jump; pop and jump if 0; pop and jump if not 0
+  OP_FORI, OP_FORF,              // arg: position after the loop; pops step, limit, the variable's
+                                 // address; skips the loop or pushes a FOR frame
+  OP_NEXTI, OP_NEXTF,            // pops the variable's address; steps it, loops or pops the frame
+  OP_EXITFOR,                    // pops the variable's address; drops its FOR frame (EXIT FOR)
+  OP_GOSUB, OP_RETURN,           // arg: target; push a GOSUB frame; pop it and go back
+  OP_READI, OP_READF, OP_READS,  // push the next DATA item as an int / float / str
+  OP_RESTORE,                    // arg: index of the next DATA item
   NOPS
 };
 
@@ -121,6 +129,12 @@ extern int *ivar;
 extern float *fvar;
 extern char **svar;
 extern int nslot[4];             // indexed by T_INT, T_SNG, T_STR
+
+// DATA items (compiler fills, READ reads): the text of each item as a str (the null pointer
+// for an empty one) and whether it was quoted (a quoted item is a string only).
+extern char **d_item;
+extern int *d_quoted;
+extern int ndata;
 
 // Symbols (compiler only). kind S_VAR: a variable, slot in the slot store of its type;
 // S_CONST: val is the constant's int, float bits or str. scope: 0 is the main program
@@ -157,9 +171,13 @@ int suf_type(int suf);
 
 // ---------------------------------------------------------------- VM
 // Value stack: vs[sp] is the top (vs[0] is never used); fs is the same memory seen as floats.
-// Control stack cs[], csp: frames that outlive a statement, kind code on top. Reserved for
-// Task 3 (FOR: loop slot, type, limit, step, body position; GOSUB: return position) and
-// Task 5 (CALL: return position, caller's frame and stack base, locals).
+// Control stack cs[], csp (index of the top word): frames that outlive a statement, the kind
+// code on top. FOR: variable address, limit, step, body position, CK_FOR (5 words). GOSUB:
+// return position, CK_GOSUB (2 words). Task 5 adds CALL frames (return position, caller's
+// frame and stack base, locals). GOTO out of a loop leaves its frame behind: NEXT, EXIT FOR
+// and RETURN drop the frames above the one they find, and a FOR on a variable that already
+// has a frame replaces it, so such programs do not grow the stack.
+enum { CK_FOR = 1, CK_GOSUB = 2 };
 #define VSTACK 4096
 #define CSTACK 4096
 extern int pc;

@@ -1,0 +1,2 @@
+blockerr2.bas:2: FOR without NEXT
+exit 1

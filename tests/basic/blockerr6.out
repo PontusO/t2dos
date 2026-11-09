@@ -1,0 +1,2 @@
+blockerr6.bas:2: DO without LOOP
+exit 1

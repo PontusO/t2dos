@@ -1,0 +1,9 @@
+b = 5
+PRINT 1 + NOT 0
+a = NOT b
+PRINT a
+PRINT 2 * NOT 1
+IF NOT (b = 4) THEN PRINT "yes"
+PRINT NOT NOT 3
+x = 3 AND NOT 1
+PRINT x

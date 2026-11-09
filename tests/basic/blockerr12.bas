@@ -1,0 +1,4 @@
+PRINT "a"
+WHILE 0
+EXIT FOR
+WEND

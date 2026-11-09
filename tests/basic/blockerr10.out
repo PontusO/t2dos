@@ -1,0 +1,2 @@
+blockerr10.bas:2: CASE without SELECT
+exit 1

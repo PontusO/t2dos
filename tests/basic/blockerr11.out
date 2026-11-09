@@ -1,0 +1,2 @@
+blockerr11.bas:2: SELECT without END SELECT
+exit 1

@@ -1,0 +1,4 @@
+x = 1
+SELECT CASE x
+CASE 1
+PRINT "one"

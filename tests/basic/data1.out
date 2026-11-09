@@ -1,0 +1,9 @@
+ 1  2 -3 
+hello|world, with comma
+  padded  |trimmed
+ 2.5  7 
+ 40  50 
+ 1 
+ 40  50  100 
+data1.bas:18: Out of DATA
+exit 1

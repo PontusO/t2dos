@@ -1,7 +1,8 @@
 // lex.c - BASIC source text to tokens (struct Tok, basic.h), the whole file at load time.
 // Keywords are case-insensitive; names keep their spelling. Comments (REM, ') and `_` line
 // continuations disappear here; CR, a missing final newline and a DOS end-of-file mark
-// (Ctrl-Z) are all fine. Problems become TK_ERR tokens, reported when the compiler gets
+// (Ctrl-Z) are all fine. DATA is lexed here as raw text up to a ':' or an apostrophe outside
+// quotes (the compiler splits it into items). Problems become TK_ERR tokens, reported when the compiler gets
 // there, so the first error in the file is the one shown.
 #include "basic.h"
 
@@ -12,8 +13,19 @@ int ntok;
 char **kw_name;
 int *kw_tk;
 int nkw;
+int kwcap;
 
-void kw_add(char *name, int tk) { kw_name[nkw] = name; kw_tk[nkw] = tk; nkw++; }
+void kw_add(char *name, int tk) {
+  char **n; int *m;
+  if (nkw >= kwcap) {                            // grow: the table is sized by what is added
+    kwcap = kwcap * 2 + 64;
+    n = malloc(kwcap * sizeof(char *)); m = malloc(kwcap * 4);
+    if (nkw > 0) { memcpy(n, kw_name, nkw * sizeof(char *)); memcpy(m, kw_tk, nkw * 4); }
+    if (kw_name) { free(kw_name); free(kw_tk); }
+    kw_name = n; kw_tk = m;
+  }
+  kw_name[nkw] = name; kw_tk[nkw] = tk; nkw++;
+}
 
 // QBasic words outside this BASIC (spec non-goals and other QBasic statements and functions):
 // a program using one gets "Advanced feature unavailable", never something else
@@ -23,11 +35,11 @@ char *unsup_words =
   "USING GET PUT FIELD LSET RSET RANDOM BINARY ACCESS LOCK UNLOCK SEEK LOF LOC OUT INP WAIT "
   "KEY BLOAD BSAVE CVI CVL CVS CVD MKI$ MKL$ MKS$ MKD$ ENVIRON ENVIRON$ AUTO LIST RENUM "
   "OPTION LPRINT LPOS CSRLIN POS VARPTR VARPTR$ VARSEG SADD FRE CLEAR TRON TROFF IOCTL "
-  "IOCTL$ STRIG STICK PEN UEVENT SETMEM ABSOLUTE INTERRUPT CALLS";
+  "IOCTL$ STRIG STICK PEN UEVENT SETMEM ABSOLUTE INTERRUPT CALLS INPUT$ RESET FILEATTR";
 
 int lex_init() {
   char *p; char *w; int n;
-  kw_name = malloc(256 * sizeof(char *)); kw_tk = malloc(256 * 4); nkw = 0;
+  kw_name = 0; kw_tk = 0; nkw = 0; kwcap = 0;
   kw_add("MOD", K_MOD); kw_add("AND", K_AND); kw_add("OR", K_OR); kw_add("XOR", K_XOR);
   kw_add("EQV", K_EQV); kw_add("IMP", K_IMP); kw_add("NOT", K_NOT);
   kw_add("PRINT", K_PRINT); kw_add("LET", K_LET); kw_add("SWAP", K_SWAP); kw_add("CONST", K_CONST);
@@ -103,7 +115,7 @@ int rest_blank(char *src, int len, int i) {
 }
 
 int lex(char *src, int len) {
-  int i; int c; int line; int lline; int j; int k; int t; int v; int typ; char *s; char *u; int f; float g;
+  int i; int c; int line; int lline; int j; int k; int t; int v; int typ; char *s; char *u; int f; float g; int q; int e;
   toks = malloc((len + 4) * sizeof(struct Tok));   // each token takes at least one character
   ntok = 0;
   i = 0; line = 1; lline = 1;                      // physical line; where the logical line began
@@ -162,6 +174,19 @@ int lex(char *src, int len) {
       if (!t) t = kw_find(u);
       free(u);
       if (t == K_REM) { while (j < len && src[j] != '\n') j++; i = j; continue; }
+      if (t == K_DATA) {                           // the rest of the statement is raw text
+        k = add_tok(K_DATA, 0, lline);
+        i = j; e = j; q = 0;
+        while (e < len && src[e] != '\n' && src[e] != '\r') {
+          if (src[e] == '"') q = !q;
+          else if (!q && (src[e] == ':' || src[e] == '\'')) break;
+          e++;
+        }
+        if (e - i > STR_MAX) { toks[k].tk = TK_ERR; toks[k].val = (int)"String too long"; }
+        else toks[k].val = (int)str_from(src + i, e - i);
+        i = e;
+        continue;
+      }
       if (t) {
         k = add_tok(t, 0, lline);
         if (t == K_UNSUP) toks[k].val = (int)str_from(src + i, j - i);
@@ -207,7 +232,7 @@ int lex(char *src, int len) {
 void lex_free() {
   int i;
   for (i = 0; i < ntok; i++) {
-    if (toks[i].tk == TK_STR || toks[i].tk == K_UNSUP) str_free((char *)toks[i].val);
+    if (toks[i].tk == TK_STR || toks[i].tk == K_UNSUP || toks[i].tk == K_DATA) str_free((char *)toks[i].val);
     else if (toks[i].tk == TK_ID) free((char *)toks[i].val);
   }
   free(toks); toks = 0; ntok = 0;

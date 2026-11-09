@@ -1,0 +1,2 @@
+blockerr7.bas:2: END IF without block IF
+exit 1

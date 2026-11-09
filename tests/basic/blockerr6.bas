@@ -1,0 +1,3 @@
+PRINT "a"
+DO
+PRINT "b"

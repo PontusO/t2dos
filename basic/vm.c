@@ -14,6 +14,7 @@ void (*optab[NOPS])();
 int *ivar;
 float *fvar;
 char **svar;
+int dptr;                        // the next DATA item
 int nalloc[4];                   // slots allocated per type (vm_alloc keeps them on growth)
 
 // ---------------------------------------------------------------- strings
@@ -224,6 +225,181 @@ void op_prcomma() {
 
 void op_prnl() { out_char('\n'); }
 
+// ---------------------------------------------------------------- jumps and the control stack
+void op_jmp() { pc = code[pc]; }
+void op_jz() { int v; v = vs[sp]; sp--; if (v == 0) pc = code[pc]; else pc++; }
+void op_jnz() { int v; v = vs[sp]; sp--; if (v != 0) pc = code[pc]; else pc++; }
+
+// The frame of this kind nearest the top, as the index of its top word, or 0. kind CK_FOR
+// looks for the loop variable addr; CK_GOSUB for any GOSUB. Frames of other kinds end the
+// search (a SUB call hides the frames of its caller).
+int cs_find(int kind, int addr) {
+  int i; int k;
+  i = csp;
+  while (i > 0) {
+    k = cs[i];
+    if (k == CK_FOR) {
+      if (kind == CK_FOR && cs[i - 4] == addr) return i;
+      i = i - 5;
+    }
+    else if (k == CK_GOSUB) {
+      if (kind == CK_GOSUB) return i;
+      i = i - 2;
+    }
+    else return 0;
+  }
+  return 0;
+}
+
+// FOR: pops step, limit and the variable's address. A loop that does not run at all leaves no
+// frame; a frame of the same variable (left by a GOTO out of the loop) is replaced.
+void for_enter(int *ref, int limit, int step, int skip, int over) {
+  int i; int j;
+  i = cs_find(CK_FOR, (int)ref);
+  if (i) {
+    for (j = i + 1; j <= csp; j++) cs[j - 5] = cs[j];
+    csp = csp - 5;
+  }
+  if (over) { pc = skip; return; }
+  if (csp + 5 >= CSTACK) { vm_err("Out of stack space"); return; }
+  cs[csp + 1] = (int)ref; cs[csp + 2] = limit; cs[csp + 3] = step; cs[csp + 4] = pc;
+  cs[csp + 5] = CK_FOR;
+  csp = csp + 5;
+}
+
+void op_fori() {
+  int step; int limit; int *ref; int skip; int over;
+  skip = code[pc]; pc++;
+  step = vs[sp]; limit = vs[sp - 1]; ref = (int *)vs[sp - 2]; sp = sp - 3;
+  if (step >= 0) over = *ref > limit; else over = *ref < limit;
+  for_enter(ref, limit, step, skip, over);
+}
+
+void op_forf() {
+  float step; float limit; float *ref; int skip; int over;
+  skip = code[pc]; pc++;
+  step = fs[sp]; limit = fs[sp - 1]; ref = (float *)vs[sp - 2];
+  over = 0;
+  if (step >= 0) { if (*ref > limit) over = 1; } else { if (*ref < limit) over = 1; }
+  sp = sp - 3;
+  for_enter((int *)ref, fbits(limit), fbits(step), skip, over);
+}
+
+// NEXT: step the variable; loop back or pop the frame (and any frames a GOTO left above it)
+void op_nexti() {
+  int *ref; int i; int step; int limit; int v; int nv; int done; unsigned u;
+  ref = (int *)vs[sp]; sp--;
+  i = cs_find(CK_FOR, (int)ref);
+  if (!i) { vm_err("NEXT without FOR"); return; }
+  csp = i;
+  limit = cs[i - 3]; step = cs[i - 2];
+  v = *ref;
+  u = v; u = u + step; nv = u;
+  *ref = nv;
+  done = 0;
+  if (step >= 0) { if (nv > limit || nv < v) done = 1; }
+  else { if (nv < limit || nv > v) done = 1; }
+  if (done) csp = i - 5; else pc = cs[i - 1];
+}
+
+void op_nextf() {
+  float *ref; int i; float step; float limit; float nv; int done;
+  ref = (float *)vs[sp]; sp--;
+  i = cs_find(CK_FOR, (int)ref);
+  if (!i) { vm_err("NEXT without FOR"); return; }
+  csp = i;
+  limit = bitsf(cs[i - 3]); step = bitsf(cs[i - 2]);
+  nv = *ref + step;
+  *ref = nv;
+  done = 0;
+  if (step >= 0) { if (nv > limit) done = 1; }
+  else { if (nv < limit) done = 1; }
+  if (done) csp = i - 5; else pc = cs[i - 1];
+}
+
+void op_exitfor() {
+  int *ref; int i;
+  ref = (int *)vs[sp]; sp--;
+  i = cs_find(CK_FOR, (int)ref);
+  if (i) csp = i - 5;
+}
+
+// GOSUB: at most 1000 nested
+void op_gosub() {
+  int target; int n; int i; int k;
+  target = code[pc]; pc++;
+  n = 0; i = csp;
+  while (i > 0) {
+    k = cs[i];
+    if (k == CK_FOR) i = i - 5;
+    else if (k == CK_GOSUB) { n++; i = i - 2; }
+    else break;
+  }
+  if (n >= 1000 || csp + 2 >= CSTACK) { vm_err("Out of stack space"); return; }
+  cs[csp + 1] = pc; cs[csp + 2] = CK_GOSUB;
+  csp = csp + 2;
+  pc = target;
+}
+
+void op_return() {
+  int i;
+  i = cs_find(CK_GOSUB, 0);
+  if (!i) { vm_err("RETURN without GOSUB"); return; }
+  pc = cs[i - 1];
+  csp = i - 2;
+}
+
+// ---------------------------------------------------------------- DATA
+// An item as a number: 1 when it is one (an empty item is 0), -1 for Overflow, else 0;
+// *type T_INT / T_SNG and *val the int or the float's bits.
+int data_num(char *s, int n, int quoted, int *type, int *val) {
+  int i; int neg; int j;
+  *type = T_INT; *val = 0;
+  if (quoted) return 0;
+  if (n == 0) return 1;
+  i = 0; neg = 0;
+  if (s[0] == '-') { neg = 1; i = 1; } else if (s[0] == '+') i = 1;
+  j = num_scan(s + i, n - i, type, val);
+  if (j == 0 || i + j != n) return 0;
+  if (*type == T_NONE) return -1;
+  if (neg) { if (*type == T_INT) *val = 0 - *val; else *val = *val ^ 0x80000000; }
+  return 1;
+}
+
+// the next item as a number; 0 after an error
+int read_num(int *type, int *val) {
+  int r; char *s;
+  if (dptr >= ndata) { vm_err("Out of DATA"); return 0; }
+  s = d_item[dptr];
+  r = data_num(s, str_len(s), d_quoted[dptr], type, val);
+  dptr++;
+  if (r == 0) { vm_err("Syntax error"); return 0; }
+  if (r < 0) { vm_err("Overflow"); return 0; }
+  return 1;
+}
+
+void op_readi() {
+  int type; int val;
+  if (!read_num(&type, &val)) return;
+  if (type == T_SNG) val = f2i(bitsf(val));
+  sp++; vs[sp] = val;
+}
+
+void op_readf() {
+  int type; int val;
+  if (!read_num(&type, &val)) return;
+  sp++;
+  if (type == T_INT) fs[sp] = val; else vs[sp] = val;
+}
+
+void op_reads() {
+  if (dptr >= ndata) { vm_err("Out of DATA"); return; }
+  sp++; vs[sp] = (int)str_dup(d_item[dptr]);
+  dptr++;
+}
+
+void op_restore() { dptr = code[pc]; pc++; }
+
 // ---------------------------------------------------------------- the machine
 int vm_init() {
   vs = malloc(VSTACK * 4); fs = (float *)vs; sp = 0;
@@ -250,6 +426,13 @@ int vm_init() {
   optab[OP_EQV] = op_eqv; optab[OP_IMP] = op_imp; optab[OP_NOT] = op_not;
   optab[OP_PRINTI] = op_printi; optab[OP_PRINTF] = op_printf; optab[OP_PRINTS] = op_prints;
   optab[OP_PRCOMMA] = op_prcomma; optab[OP_PRNL] = op_prnl;
+  optab[OP_JMP] = op_jmp; optab[OP_JZ] = op_jz; optab[OP_JNZ] = op_jnz;
+  optab[OP_FORI] = op_fori; optab[OP_FORF] = op_forf;
+  optab[OP_NEXTI] = op_nexti; optab[OP_NEXTF] = op_nextf; optab[OP_EXITFOR] = op_exitfor;
+  optab[OP_GOSUB] = op_gosub; optab[OP_RETURN] = op_return;
+  optab[OP_READI] = op_readi; optab[OP_READF] = op_readf; optab[OP_READS] = op_reads;
+  optab[OP_RESTORE] = op_restore;
+  dptr = 0;
   return 0;
 }
 

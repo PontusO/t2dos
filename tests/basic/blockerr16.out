@@ -1,0 +1,2 @@
+blockerr16.bas:3: Block IF without END IF
+exit 1

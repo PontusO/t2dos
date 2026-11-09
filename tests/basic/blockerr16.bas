@@ -1,0 +1,5 @@
+PRINT "a"
+FOR i = 1 TO 2
+IF i THEN
+NEXT
+END IF

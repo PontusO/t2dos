@@ -1,0 +1,4 @@
+PRINT "a"
+FOR i = 1 TO 2
+EXIT DO
+NEXT
