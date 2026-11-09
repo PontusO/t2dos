@@ -1159,6 +1159,7 @@ int elem_ref() {
     if (!accept(TK_COMMA)) break;
   }
   if (!need(TK_RPAR)) return syms[s].type;
+  if (nd > ARR_DIMS) { cerr("Too many dimensions"); return syms[s].type; }
   if (!syms[s].dims) syms[s].dims = nd;
   if (syms[s].dims != nd) { cerr("Wrong number of dimensions"); return syms[s].type; }
   it = 0;

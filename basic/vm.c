@@ -392,10 +392,21 @@ void arr_free(int *a) {
   free(a);
 }
 
+// Is an element of a held by a cell on the value stack (an argument passed by reference, an
+// element address in the middle of a statement)? Then a REDIM or ERASE must not free it.
+int arr_in_use(int *a) {
+  int i; unsigned lo; unsigned hi; unsigned v;
+  if (!a) return 0;
+  lo = (unsigned)(a + 3 + 2 * a[1]); hi = lo + a[2] * 4;
+  for (i = 1; i <= sp; i++) { v = vs[i]; if (v >= lo && v < hi) return 1; }
+  return 0;
+}
+
 // OP_ELEM: the array cell's address and nd subscripts become the element's address
 void op_elem() {
   int nd; int it; int **cell; int *a; int i; int d; int x; int off; int lo[ARR_DIMS]; int len[ARR_DIMS];
   nd = code[pc]; it = code[pc + 1]; pc = pc + 2;
+  if (nd > ARR_DIMS) { vm_err("Too many dimensions"); return; }
   cell = (int **)vs[sp - nd];
   a = *cell;
   if (!a && it) {                // an array used without DIM: 0 to 10 in every dimension
@@ -434,13 +445,19 @@ void op_dim() {
   }
   sp = sp - n - 1;
   if (*cell && !redim) { vm_err("Array already dimensioned"); return; }
+  if (arr_in_use(*cell)) { vm_err("Array in use"); return; }
   a = arr_new(type, nd, lo, len);
   if (!a) { vm_err("Out of memory"); return; }
   arr_free(*cell);
   *cell = a;
 }
 
-void op_erase() { int **cell; cell = (int **)vs[sp]; sp--; arr_free(*cell); *cell = 0; }
+void op_erase() {
+  int **cell;
+  cell = (int **)vs[sp]; sp--;
+  if (arr_in_use(*cell)) { vm_err("Array in use"); return; }
+  arr_free(*cell); *cell = 0;
+}
 void op_refa() { sp++; vs[sp] = (int)&avar[code[pc]]; pc++; }
 
 // ---------------------------------------------------------------- locals, cell addresses
