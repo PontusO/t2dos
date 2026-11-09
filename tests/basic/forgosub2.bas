@@ -1,0 +1,7 @@
+FOR i = 1 TO 2
+GOSUB s
+PRINT "back"
+NEXT i
+END
+s: NEXT i
+RETURN

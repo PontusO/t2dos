@@ -1,0 +1,2 @@
+forgosub2.bas:6: NEXT without FOR
+exit 1

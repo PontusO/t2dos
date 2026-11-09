@@ -231,7 +231,7 @@ void op_jz() { int v; v = vs[sp]; sp--; if (v == 0) pc = code[pc]; else pc++; }
 void op_jnz() { int v; v = vs[sp]; sp--; if (v != 0) pc = code[pc]; else pc++; }
 
 // The frame of this kind nearest the top, as the index of its top word, or 0. kind CK_FOR
-// looks for the loop variable addr; CK_GOSUB for any GOSUB. Frames of other kinds end the
+// looks for the loop variable addr, but not below a GOSUB frame; CK_GOSUB for any GOSUB. Frames of other kinds end the
 // search (a SUB call hides the frames of its caller).
 int cs_find(int kind, int addr) {
   int i; int k;
@@ -244,6 +244,7 @@ int cs_find(int kind, int addr) {
     }
     else if (k == CK_GOSUB) {
       if (kind == CK_GOSUB) return i;
+      if (kind == CK_FOR) return 0;            // frames below a GOSUB belong to its caller
       i = i - 2;
     }
     else return 0;
