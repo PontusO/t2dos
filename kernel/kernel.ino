@@ -13,6 +13,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <setjmp.h>
+#include <math.h>
 #include "sys.h"
 
 #define SD_CS SS
@@ -401,6 +402,10 @@ static int k_spawn(const char *name, int argc, char **argv);
 static int k_kill(int j);
 static int k_jobs(job_t *jb, int max);
 
+// maths calls: a float argument or result is the float's bit pattern in an int word
+static float wf(int w) { union { int i; float v; } u; u.i = w; return u.v; }
+static int fw(float v) { union { int i; float v; } u; u.v = v; return u.i; }
+
 extern "C" int sys(int num, int n, int *argv) {
   #define A(i) (argv[n - 1 - (i)])
   switch (num) {
@@ -505,6 +510,26 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_i2c_read: { int got = Wire.requestFrom((int)A(0), (int)A(2)); uint8_t *b = (uint8_t *)A(1); int i = 0; while (i < got && Wire.available()) b[i++] = Wire.read(); return i; }
     case SYS_spi_transfer: SPI.transfer((void *)A(0), A(1)); return 0;
     case SYS_delay_us: delayMicroseconds(A(0)); return 0;
+    // ---- maths
+    case SYS_sin: return fw(sinf(wf(A(0))));
+    case SYS_cos: return fw(cosf(wf(A(0))));
+    case SYS_tan: return fw(tanf(wf(A(0))));
+    case SYS_asin: return fw(asinf(wf(A(0))));
+    case SYS_acos: return fw(acosf(wf(A(0))));
+    case SYS_atan: return fw(atanf(wf(A(0))));
+    case SYS_atan2: return fw(atan2f(wf(A(0)), wf(A(1))));
+    case SYS_sinh: return fw(sinhf(wf(A(0))));
+    case SYS_cosh: return fw(coshf(wf(A(0))));
+    case SYS_tanh: return fw(tanhf(wf(A(0))));
+    case SYS_exp: return fw(expf(wf(A(0))));
+    case SYS_log: return fw(logf(wf(A(0))));
+    case SYS_log10: return fw(log10f(wf(A(0))));
+    case SYS_pow: return fw(powf(wf(A(0)), wf(A(1))));
+    case SYS_sqrt: return fw(sqrtf(wf(A(0))));
+    case SYS_fabs: return fw(fabsf(wf(A(0))));
+    case SYS_floor: return fw(floorf(wf(A(0))));
+    case SYS_ceil: return fw(ceilf(wf(A(0))));
+    case SYS_fmod: return fw(fmodf(wf(A(0)), wf(A(1))));
   }
   con->putc('\n'); Serial.printf("kernel: bad syscall %d\r\n", num);
   PROC.exit_code = -1; longjmp(PROC.jb, 1);

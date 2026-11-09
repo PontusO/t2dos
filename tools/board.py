@@ -128,7 +128,7 @@ class Board:
         bdir = os.path.join(ROOT, 'build', 'expect')
         os.makedirs(bdir, exist_ok=True)
         native = os.path.join(bdir, name + '.native')
-        subprocess.run(['gcc', '-w'] + flags.split() + ['-o', native, test_c], check=True)
+        subprocess.run(['gcc', '-w'] + flags.split() + ['-o', native, test_c, '-lm'], check=True)
         want = [l.rstrip() for l in subprocess.run([native], capture_output=True, text=True).stdout.split('\n')]
         while want and not want[-1]:
             want.pop()

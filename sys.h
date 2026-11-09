@@ -24,7 +24,11 @@ enum {
   SYS_connect = 83, SYS_send = 84, SYS_recv = 85, SYS_listen = 86, SYS_accept = 87, SYS_sock_avail = 88,
   // board
   SYS_gpio_mode = 96, SYS_gpio_write = 97, SYS_gpio_read = 98, SYS_analog_read = 99, SYS_pwm_write = 100,
-  SYS_i2c_write = 101, SYS_i2c_read = 102, SYS_spi_transfer = 103, SYS_delay_us = 104
+  SYS_i2c_write = 101, SYS_i2c_read = 102, SYS_spi_transfer = 103, SYS_delay_us = 104,
+  // maths: float arguments and result travel as the float's bit pattern (float sin(float), ...)
+  SYS_sin = 112, SYS_cos = 113, SYS_tan = 114, SYS_asin = 115, SYS_acos = 116, SYS_atan = 117, SYS_atan2 = 118,
+  SYS_sinh = 119, SYS_cosh = 120, SYS_tanh = 121, SYS_exp = 122, SYS_log = 123, SYS_log10 = 124, SYS_pow = 125,
+  SYS_sqrt = 126, SYS_fabs = 127, SYS_floor = 128, SYS_ceil = 129, SYS_fmod = 130
 };
 
 // open() flags

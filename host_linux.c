@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <setjmp.h>
@@ -139,6 +140,10 @@ static int k_write(int fd, const char *buf, int n) {
   return write(fd, buf, n);
 }
 
+// maths calls: a float argument or result is the float's bit pattern in an int word
+static float wf(int w) { union { int i; float v; } u; u.i = w; return u.v; }
+static int fw(float v) { union { int i; float v; } u; u.v = v; return u.i; }
+
 int sys(int num, int n, int *argv) {
   char p1[300], p2[300];
   switch (num) {
@@ -241,6 +246,26 @@ int sys(int num, int n, int *argv) {
     case SYS_sock_avail: { struct pollfd p = { A(0), POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
     case SYS_gpio_mode: case SYS_gpio_write: case SYS_pwm_write: case SYS_delay_us: case SYS_spi_transfer: return 0;
     case SYS_gpio_read: case SYS_analog_read: case SYS_i2c_write: case SYS_i2c_read: return 0;
+    // ---- maths
+    case SYS_sin: return fw(sinf(wf(A(0))));
+    case SYS_cos: return fw(cosf(wf(A(0))));
+    case SYS_tan: return fw(tanf(wf(A(0))));
+    case SYS_asin: return fw(asinf(wf(A(0))));
+    case SYS_acos: return fw(acosf(wf(A(0))));
+    case SYS_atan: return fw(atanf(wf(A(0))));
+    case SYS_atan2: return fw(atan2f(wf(A(0)), wf(A(1))));
+    case SYS_sinh: return fw(sinhf(wf(A(0))));
+    case SYS_cosh: return fw(coshf(wf(A(0))));
+    case SYS_tanh: return fw(tanhf(wf(A(0))));
+    case SYS_exp: return fw(expf(wf(A(0))));
+    case SYS_log: return fw(logf(wf(A(0))));
+    case SYS_log10: return fw(log10f(wf(A(0))));
+    case SYS_pow: return fw(powf(wf(A(0)), wf(A(1))));
+    case SYS_sqrt: return fw(sqrtf(wf(A(0))));
+    case SYS_fabs: return fw(fabsf(wf(A(0))));
+    case SYS_floor: return fw(floorf(wf(A(0))));
+    case SYS_ceil: return fw(ceilf(wf(A(0))));
+    case SYS_fmod: return fw(fmodf(wf(A(0)), wf(A(1))));
   }
   fprintf(stderr, "bad syscall %d\n", num); exit(99);
 }

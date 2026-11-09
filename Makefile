@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
@@ -47,9 +47,11 @@ root/lib/net.c: lib/net.c
 	@mkdir -p root/lib && cp lib/net.c root/lib/
 root/lib/sys.h: sys.h
 	@mkdir -p root/lib && cp sys.h root/lib/
+root/lib/math.h: lib/math.h
+	@mkdir -p root/lib && cp lib/math.h root/lib/
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
 host: host_linux.c sys.h
-	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static
+	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static -lm
 # Reference compiler: gcc build of compiler/cc.c at the commit in build/ref/COMMIT (byte-identity reference)
 ref:
 	@mkdir -p build/ref

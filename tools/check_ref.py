@@ -12,9 +12,10 @@ now lives in a .t2init function, so its layout differs: it is excluded here and 
 behaviour on the board instead.
 
 A file the reference cc rejects with "undefined function: NAME(" for a builtin newer than
-the reference cc (NEWER_BUILTINS: spawn, yield, jobs, kill, mkpipe) cannot be compared
-either: it is excluded too and checked by behaviour on the board (check_jobs.py). Any other
-reference failure counts as different.
+the reference cc (NEWER_BUILTINS: spawn, yield, jobs, kill, mkpipe and the maths calls sin
+to fmod) cannot be compared either: it is excluded too and checked by behaviour on the board
+(check_jobs.py; test13.c with Board().expect_gcc). Any other reference failure counts as
+different.
 
 Prints "identical: N, excluded (init code): M, excluded (newer builtins): B, different: K",
 the excluded files on one line per class and the names of the different files; exit
@@ -31,7 +32,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'ref')
 REF_CC = os.path.join(ROOT, 'build', 'ref', 'cc')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe')   # unknown to the reference cc
+NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe',   # unknown to the reference cc
+                  'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
+                  'exp', 'log', 'log10', 'pow', 'sqrt', 'fabs', 'floor', 'ceil', 'fmod')
 UNDEF_RE = re.compile(r'undefined function: (\w+)\(')
 
 

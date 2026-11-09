@@ -720,7 +720,8 @@ code with `#include <stdio.h>` compiles as it is.
 
 The library functions are built into the compiler and run in the kernel, so
 they cost no code in the program. All arguments and results are ints or
-pointers.
+pointers, except for the maths functions, which take and return `float`
+(see [Maths](#maths)).
 
 | Group | Functions |
 |---|---|
@@ -732,6 +733,7 @@ pointers.
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
 | Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)` |
 | Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)` |
+| Maths | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `pow(x, y)`, `sqrt`, `fabs`, `floor`, `ceil`, `fmod(x, y)` |
 
 `printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
 a width and a precision (`%-8s`, `%04x`, `%.3f`). fd 0 and 1 are the console;
@@ -971,7 +973,51 @@ macros work), struct assignment (`a = b` with structs is an error; copy with
 The tests in `compiler/tests/` show each feature in use (test4.c function
 pointers, test5.c initializers, test6.c arrays, test7.c unsigned and short,
 test8.c the comma operator, test9.c macros, test10.c conditional compilation,
-test11.c float, test12.c addresses of struct members).
+test11.c float, test12.c addresses of struct members, test13.c the maths
+functions).
+
+### Maths
+
+The standard maths functions are built in and run in the kernel on the
+RP2350's FPU:
+
+`sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)`,
+`sinh(x)`, `cosh(x)`, `tanh(x)`, `exp(x)`, `log(x)` (natural), `log10(x)`,
+`pow(x, y)`, `sqrt(x)`, `fabs(x)`, `floor(x)`, `ceil(x)`, `fmod(x, y)`.
+
+They are single precision only: every argument and result is a 32-bit
+`float` (T2DOS's `double` is the same type). An int argument is converted
+as in an assignment, so `sqrt(2)` is `sqrt(2.0)`. Angles are in radians.
+`#include <math.h>` is accepted and ignored; `#include "math.h"` (found in
+`/lib`) defines the constants `M_PI`, `M_E`, `M_SQRT2`, `M_LN2` and
+`M_LN10`. A function of your own with one of these names replaces the
+built-in.
+
+```c
+#include "sys.h"
+#include "math.h"
+
+int main() {
+  printf("sqrt(2)  %f\n", sqrt(2));
+  printf("sin 30   %.4f\n", sin(30 * M_PI / 180));
+  printf("hypot    %.3f\n", sqrt(pow(3, 2) + pow(4, 2)));
+  printf("angle    %.2f degrees\n", atan2(1, 1) * 180 / M_PI);
+  printf("e^1      %.6f\n", exp(1));
+  printf("round    %.1f %.1f\n", floor(-2.5), ceil(-2.5));
+  return 0;
+}
+```
+
+prints
+
+```
+sqrt(2)  1.414214
+sin 30   0.5000
+hypot    5.000
+angle    45.00 degrees
+e^1      2.718282
+round    -3.0 -2.0
+```
 
 ---
 
@@ -1374,9 +1420,24 @@ instructions inside IT blocks, and macros (`.macro`, `.rept`).
 
 The library functions in [The library](#the-library) are system calls. Each
 has a fixed number in `sys.h`, grouped: process 0+, console 16+, files 32+,
-memory and strings 64+, network 80+, board 96+, and 128+ free for user
-extensions. The kernel sees `sys(num, nargs, argv)`, where `argv[nargs-1]`
+memory and strings 64+, network 80+, board 96+, maths 112 to 130, and
+131+ free for user extensions. The kernel sees `sys(num, nargs, argv)`, where `argv[nargs-1]`
 is the first argument.
+
+#### Maths
+
+| Call | Number | Call | Number | Call | Number |
+|---|---|---|---|---|---|
+| `sin(x)` | 112 | `sinh(x)` | 119 | `sqrt(x)` | 126 |
+| `cos(x)` | 113 | `cosh(x)` | 120 | `fabs(x)` | 127 |
+| `tan(x)` | 114 | `tanh(x)` | 121 | `floor(x)` | 128 |
+| `asin(x)` | 115 | `exp(x)` | 122 | `ceil(x)` | 129 |
+| `acos(x)` | 116 | `log(x)` | 123 | `fmod(x, y)` | 130 |
+| `atan(x)` | 117 | `log10(x)` | 124 | | |
+| `atan2(y, x)` | 118 | `pow(x, y)` | 125 | | |
+
+Each argument word and the result in `r0` is a `float`'s 32-bit pattern;
+the kernel computes with `sinf`, `cosf`, ..., `fmodf`.
 
 #### Jobs and pipes
 
