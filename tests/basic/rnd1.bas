@@ -1,0 +1,15 @@
+RANDOMIZE 1
+a = RND: b = RND: c = RND
+PRINT a; b; c
+PRINT RND(0) = c
+RANDOMIZE 1
+PRINT RND = a
+x = RND(-5): y = RND(-5)
+PRINT x = y
+PRINT RND(1) <> RND(1)
+FOR i = 1 TO 1000
+  r = RND
+  IF r < 0 OR r >= 1 THEN PRINT "range": END
+NEXT
+RANDOMIZE TIMER
+PRINT "ok"

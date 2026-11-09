@@ -71,9 +71,11 @@ void lex_free();
 // A str is a char * to len bytes of data (any byte, CHR$(0) too) followed by a 0, with the
 // length in the int just before the data. The null pointer is the empty string "", so
 // zeroed memory holds empty strings. Length 0 to 32767.
-// Ownership (Task 4 completes the rules): every str on the value stack or in a slot owns its
-// block; storing into a slot frees the slot's old block; popping a str frees it; literals
-// belong to the program (token list, constants) and OP_PUSHS pushes a copy.
+// Ownership rule: every str on the value stack or in a slot owns its heap block. Storing
+// into a slot frees the slot's old block; popping a temporary (PRINT, a comparison, a
+// function argument) frees it; an op that builds a new str frees the operands it consumed;
+// string literals belong to the program (token list, constants) and OP_PUSHS pushes a copy,
+// so nothing on the stack is ever shared and a str is freed exactly once.
 #define STR_MAX 32767
 char *str_new(int len);          // len bytes (zeroed), or 0 for len 0
 void str_free(char *s);
@@ -117,6 +119,7 @@ enum {
   OP_GOSUB, OP_RETURN,           // arg: target; push a GOSUB frame; pop it and go back
   OP_READI, OP_READF, OP_READS,  // push the next DATA item as an int / float / str
   OP_RESTORE,                    // arg: index of the next DATA item
+  OP_FN,                         // args: function token (K_ABS ..), count or type (funcs.c)
   NOPS
 };
 
@@ -194,6 +197,7 @@ int vm_run(int start);           // run from code[start] to OP_END / OP_HALT / a
 void vm_free();
 int vm_err(char *msg);           // run-time error at the current op
 int f2i(float f);                // QBasic float to integer: round half to even
+int fok(float f);                // 1 if f is a number; else the run-time error Overflow, 0
 
 // ---------------------------------------------------------------- numbers (fmt.c)
 int fmt_int(char *buf, int v);   // "-12", "7"; returns the length
@@ -202,6 +206,12 @@ int num_scan(char *s, int n, int *type, int *val);  // a number at s (no sign): 
                                  // (0: none), *type T_INT / T_SNG (T_NONE: Overflow), *val
 int fbits(float f);              // a float's bit pattern and back
 float bitsf(int b);
+
+// ---------------------------------------------------------------- funcs.c
+// Built-in functions (and RANDOMIZE): funcs_init() fills fn_tab[] / stmt_tab[] with their
+// compilers and optab[OP_FN] with the handler, which runs the function by its token. A
+// function is a row in the table at the top of funcs.c (argument types, count, result).
+void funcs_init();
 
 // ---------------------------------------------------------------- main.c
 extern char *srcname;            // the program's file name as given, for messages

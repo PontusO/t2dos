@@ -1,0 +1,13 @@
+ 12 
+Hello|World|
+World|Wor||
+ 5  9  0  1 
+HELLO, WORLDhello, world
+[ab  ][  ab]
+[ 5][-5][ 1.5]
+ 12  255  150  0 -3 
+Aa 65  97 
+xxxAA|   |
+FF|FFFFFFFF|0|10|37777777777
+|Hello, World
+exit 0

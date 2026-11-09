@@ -615,6 +615,7 @@ void label_ref(int pos, int kind) {
 
 // op label (GOTO, GOSUB, a jump from IF)
 void goto_label(int op) {
+  if (TK == TK_INT) { cerr("Advanced feature unavailable"); return; }   // a line number
   if (TK != TK_ID || toks[tp].suf) { bad_token(); return; }
   emit(op);
   label_ref(emit_arg(-1), 0);
@@ -953,6 +954,7 @@ void st_read() {
 void st_restore() {
   next();
   emit(OP_RESTORE);
+  if (TK == TK_INT) { cerr("Advanced feature unavailable"); return; }
   if (TK == TK_ID && !toks[tp].suf) label_ref(emit_arg(-1), 1);
   else emit_arg(0);
 }

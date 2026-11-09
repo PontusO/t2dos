@@ -114,6 +114,46 @@ int rest_blank(char *src, int len, int i) {
   return 1;
 }
 
+// DATA is raw text up to a ':' or an apostrophe outside quotes, or the end of
+// the line; a `_` ending a line joins
+// the next one (as everywhere). data_end(): where the statement ends, *lines = the physical
+// lines joined on the way; data_text(): its length, or (with out) the text without the joins.
+int data_end(char *src, int len, int i, int *lines) {
+  int q; int c;
+  q = 0; *lines = 0;
+  while (i < len && src[i] != '\n') {
+    c = src[i];
+    if (c == '_' && rest_blank(src, len, i + 1)) {
+      while (i < len && src[i] != '\n') i++;
+      if (i < len) { i++; *lines = *lines + 1; }
+      continue;
+    }
+    if (c == '\r') {
+      if (rest_blank(src, len, i)) break;
+    }
+    else if (c == '"') q = !q;
+    else if (!q && (c == ':' || c == '\'')) break;
+    i++;
+  }
+  return i;
+}
+
+int data_text(char *src, int len, int i, int e, char *out) {
+  int n; int c;
+  n = 0;
+  while (i < e) {
+    c = src[i];
+    if (c == '_' && rest_blank(src, len, i + 1)) {
+      while (i < e && src[i] != '\n') i++;
+      if (i < e) i++;
+      continue;
+    }
+    if (c != '\r') { if (out) out[n] = c; n++; }
+    i++;
+  }
+  return n;
+}
+
 int lex(char *src, int len) {
   int i; int c; int line; int lline; int j; int k; int t; int v; int typ; char *s; char *u; int f; float g; int q; int e;
   toks = malloc((len + 4) * sizeof(struct Tok));   // each token takes at least one character
@@ -176,15 +216,16 @@ int lex(char *src, int len) {
       if (t == K_REM) { while (j < len && src[j] != '\n') j++; i = j; continue; }
       if (t == K_DATA) {                           // the rest of the statement is raw text
         k = add_tok(K_DATA, 0, lline);
-        i = j; e = j; q = 0;
-        while (e < len && src[e] != '\n' && src[e] != '\r') {
-          if (src[e] == '"') q = !q;
-          else if (!q && (src[e] == ':' || src[e] == '\'')) break;
-          e++;
+        i = j;
+        e = data_end(src, len, i, &q);             // q: physical lines joined by `_`
+        if (data_text(src, len, i, e, 0) > STR_MAX) { toks[k].tk = TK_ERR; toks[k].val = (int)"String too long"; }
+        else {
+          v = data_text(src, len, i, e, 0);
+          s = str_new(v);
+          data_text(src, len, i, e, s);
+          toks[k].val = (int)s;
         }
-        if (e - i > STR_MAX) { toks[k].tk = TK_ERR; toks[k].val = (int)"String too long"; }
-        else toks[k].val = (int)str_from(src + i, e - i);
-        i = e;
+        i = e; line = line + q;
         continue;
       }
       if (t) {

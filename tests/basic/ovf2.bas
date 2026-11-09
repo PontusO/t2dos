@@ -1,0 +1,2 @@
+PRINT "a"
+PRINT 2 ^ 200

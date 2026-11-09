@@ -1,0 +1,2 @@
+PRINT "a"
+PRINT SQR(-1)

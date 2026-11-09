@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
   prog_argc = argc - 2; prog_argv = argv + 2;
   src = load_file(srcname, &len);
   if (!src) { out_cstr(srcname); out_cstr(": File not found\n"); out_flush(); return 1; }
-  lex_init(); vm_init(); comp_init();
+  lex_init(); vm_init(); comp_init(); funcs_init();
   lex(src, len);
   free(src);
   if (compile()) {

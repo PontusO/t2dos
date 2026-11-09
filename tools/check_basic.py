@@ -8,14 +8,20 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
                            library onto libc) and run every case with `basic-pc NAME.bas`
                            in tests/basic/; stdout must match NAME.out byte for byte
   check_basic.py --board   upload root/bin/basic.bin to /bin/basic.bin and the cases to
-                           /src/basic/t/, run `basic NAME.bas` there through the shell;
-                           the lines must match NAME.out (trailing spaces are not compared,
-                           the shell's serial output loses them) and the exit code must too
+                           /src/basic/t/, run `basic NAME.bas > NAME.txt` there through the
+                           shell and fetch NAME.txt: the output must match NAME.out byte for
+                           byte and the exit code too. A case with a NAME.in is run without
+                           the redirection (INPUT's echo is part of its output on the
+                           console) and compared line by line, trailing spaces not compared
+                           (the shell's serial output loses them). Around every case the
+                           `free` command's PSRAM free value is read: it must be the same
+                           before and after the run.
   --only NAME              run only that case (may be given more than once)
 Both may be given; the PC run comes first. Exit status 0 when every case passes.
 """
 import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -123,6 +129,45 @@ class Remote:
         return out, code
 
 
+FREE_RE = re.compile(r'^psram\s+\d+\s+bytes,\s+(\d+)\s+free')
+
+
+def psram_free(r):
+    """free PSRAM in bytes, from the `free` command"""
+    out, _ = r.run('free', 10.0)
+    for l in out:
+        m = FREE_RE.match(l.strip())
+        if m:
+            return int(m.group(1))
+    raise r.board.BoardError('free: no psram line in %r' % out)
+
+
+def fetch_text(r, path):
+    """a file from the board as text ('' when it is empty: hexdump has nothing to show)"""
+    try:
+        return r.b.fetch(path).decode('latin-1')
+    except r.board.BoardError as e:
+        if 'no data' in str(e):
+            return ''
+        raise
+
+
+def run_board_case(r, c):
+    """(ok, wanted, got) for one case, comparing as the docstring says"""
+    if c.stdin is not None:
+        out, code = r.run('basic %s.bas' % c.name, 60.0, c.stdin)
+        got = [l.rstrip() for l in out] + ['exit %d' % code]
+        want = [l.rstrip() for l in c.out.split('\n')[:-1]] + ['exit %d' % c.code]
+        return got == want, want, got
+    out_file = '%s.txt' % c.name
+    out, code = r.run('basic %s.bas > %s' % (c.name, out_file), 60.0)
+    text = fetch_text(r, out_file)
+    r.run('rm ' + out_file, 10.0)
+    got = text + 'exit %d\n' % code
+    want = c.out + 'exit %d\n' % c.code
+    return got == want, want, got
+
+
 def run_board(cases):
     try:
         r = Remote()
@@ -139,11 +184,15 @@ def run_board(cases):
     ok = True
     try:
         for c in cases:
-            out, code = r.run('basic %s.bas' % c.name, 60.0, c.stdin)
-            got = [l.rstrip() for l in out] + ['exit %d' % code]
-            want = [l.rstrip() for l in c.out.split('\n')[:-1]] + ['exit %d' % c.code]
-            report('board', c, got == want, want, got)
-            ok = ok and got == want
+            before = psram_free(r)
+            good, want, got = run_board_case(r, c)
+            after = psram_free(r)
+            if good and before != after:
+                good = False
+                want = 'free PSRAM %d after the run' % before
+                got = 'free PSRAM %d after the run' % after
+            report('board', c, good, want, got)
+            ok = ok and good
     finally:
         r.run('cd /', 10.0)
     return ok

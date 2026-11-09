@@ -1,0 +1,5 @@
+ 1  2  3  4 
+same
+ 5  6 
+datacont.bas:9: Division by zero
+exit 1

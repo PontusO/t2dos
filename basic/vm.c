@@ -63,6 +63,12 @@ int f2i(float f) {
   return i;
 }
 
+// A float result must be a number: infinity and NaN are the run-time error Overflow.
+int fok(float f) {
+  if ((fbits(f) & 0x7F800000) == 0x7F800000) { vm_err("Overflow"); return 0; }
+  return 1;
+}
+
 // ---------------------------------------------------------------- handlers
 void op_end() { running = 0; }
 void op_pushi() { sp++; vs[sp] = code[pc]; pc++; }
@@ -109,14 +115,15 @@ void op_modi() {
 
 void op_negi() { unsigned u; u = 0; u = u - vs[sp]; vs[sp] = u; }
 
-void op_addf() { sp--; fs[sp] = fs[sp] + fs[sp + 1]; }
-void op_subf() { sp--; fs[sp] = fs[sp] - fs[sp + 1]; }
-void op_mulf() { sp--; fs[sp] = fs[sp] * fs[sp + 1]; }
+void op_addf() { sp--; fs[sp] = fs[sp] + fs[sp + 1]; fok(fs[sp]); }
+void op_subf() { sp--; fs[sp] = fs[sp] - fs[sp + 1]; fok(fs[sp]); }
+void op_mulf() { sp--; fs[sp] = fs[sp] * fs[sp + 1]; fok(fs[sp]); }
 
 void op_divf() {
   sp--;
   if (fs[sp + 1] == 0) { vm_err("Division by zero"); return; }
   fs[sp] = fs[sp] / fs[sp + 1];
+  fok(fs[sp]);
 }
 
 void op_negf() { fs[sp] = -fs[sp]; }
@@ -127,6 +134,7 @@ void op_powf() {
   if (b < 0 && floor(e) != e) { vm_err("Illegal function call"); return; }
   if (b == 0 && e < 0) { vm_err("Division by zero"); return; }
   fs[sp] = pow(b, e);
+  fok(fs[sp]);
 }
 
 // float ^ int by repeated squaring: exact while the products are (2 ^ 24 is 16777216)
@@ -146,6 +154,7 @@ void op_powi() {
     r = 1 / r;
   }
   fs[sp] = r;
+  fok(r);
 }
 
 void op_cat() {
