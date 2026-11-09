@@ -7,6 +7,7 @@ int pc;
 int *vs;
 float *fs;
 int sp;
+char *vt;
 int *cs;
 int csp;
 int running;
@@ -72,13 +73,13 @@ int fok(float f) {
 // ---------------------------------------------------------------- handlers
 void op_end() { running = 0; }
 void op_pushi() { sp++; vs[sp] = code[pc]; pc++; }
-void op_pushs() { sp++; vs[sp] = (int)str_dup((char *)code[pc]); pc++; }
+void op_pushs() { sp++; vs[sp] = (int)str_dup((char *)code[pc]); vt[sp] = 1; pc++; }
 void op_ldi() { sp++; vs[sp] = ivar[code[pc]]; pc++; }
 void op_ldf() { sp++; fs[sp] = fvar[code[pc]]; pc++; }
-void op_lds() { sp++; vs[sp] = (int)str_dup(svar[code[pc]]); pc++; }
+void op_lds() { sp++; vs[sp] = (int)str_dup(svar[code[pc]]); vt[sp] = 1; pc++; }
 void op_sti() { ivar[code[pc]] = vs[sp]; sp--; pc++; }
 void op_stf() { fvar[code[pc]] = fs[sp]; sp--; pc++; }
-void op_sts() { int n; n = code[pc]; pc++; str_free(svar[n]); svar[n] = (char *)vs[sp]; sp--; }
+void op_sts() { int n; n = code[pc]; pc++; str_free(svar[n]); svar[n] = (char *)vs[sp]; vt[sp] = 0; sp--; }
 void op_refi() { sp++; vs[sp] = (int)&ivar[code[pc]]; pc++; }
 void op_reff() { sp++; vs[sp] = (int)&fvar[code[pc]]; pc++; }
 void op_refs() { sp++; vs[sp] = (int)&svar[code[pc]]; pc++; }
@@ -159,7 +160,7 @@ void op_powi() {
 
 void op_cat() {
   char *a; char *b; char *s; int la; int lb;
-  a = (char *)vs[sp - 1]; b = (char *)vs[sp]; sp--;
+  a = (char *)vs[sp - 1]; b = (char *)vs[sp]; vt[sp] = 0; sp--;
   la = str_len(a); lb = str_len(b);
   if (la + lb > STR_MAX) { str_free(b); vm_err("Out of string space"); return; }
   if (lb == 0) return;
@@ -186,7 +187,7 @@ void op_gef() { sp--; vs[sp] = 0 - (fs[sp] >= fs[sp + 1]); }
 void op_cmps() {
   int c; int r; char *a; char *b;
   c = code[pc]; pc++;
-  a = (char *)vs[sp - 1]; b = (char *)vs[sp]; sp--;
+  a = (char *)vs[sp - 1]; b = (char *)vs[sp]; vt[sp] = 0; sp--; vt[sp] = 0;
   r = str_cmp(a, b);
   str_free(a); str_free(b);
   if (c == TK_EQ) r = r == 0;
@@ -220,7 +221,7 @@ void op_printf() { char b[32]; int n; n = fmt_sng(b, fs[sp]); sp--; print_num(b,
 
 void op_prints() {
   char *s;
-  s = (char *)vs[sp]; sp--;
+  s = (char *)vs[sp]; vt[sp] = 0; sp--;
   out_str(s, str_len(s));
   str_free(s);
 }
@@ -404,7 +405,7 @@ void op_readf() {
 
 void op_reads() {
   if (dptr >= ndata) { vm_err("Out of DATA"); return; }
-  sp++; vs[sp] = (int)str_dup(d_item[dptr]);
+  sp++; vs[sp] = (int)str_dup(d_item[dptr]); vt[sp] = 1;
   dptr++;
 }
 
@@ -413,6 +414,7 @@ void op_restore() { dptr = code[pc]; pc++; }
 // ---------------------------------------------------------------- the machine
 int vm_init() {
   vs = malloc(VSTACK * 4); fs = (float *)vs; sp = 0;
+  vt = malloc(VSTACK);
   cs = malloc(CSTACK * 4); csp = 0;
   optab[OP_END] = op_end; optab[OP_HALT] = op_end;
   optab[OP_PUSHI] = op_pushi; optab[OP_PUSHF] = op_pushi; optab[OP_PUSHS] = op_pushs;
@@ -480,11 +482,12 @@ int vm_run(int start) {
 void vm_free() {
   int i;
   if (svar) for (i = 0; i < nalloc[T_STR]; i++) str_free(svar[i]);
-  sp = 0;                        // Task 4: strings an error left on the stack are not freed yet
+  for (i = 1; i <= sp; i++) if (vt[i]) str_free((char *)vs[i]);   // strings an error left behind
+  sp = 0;
   if (ivar) free(ivar);
   if (fvar) free(fvar);
   if (svar) free(svar);
   ivar = 0; fvar = 0; svar = 0;
   for (i = 0; i < 4; i++) nalloc[i] = 0;
-  free(vs); free(cs);
+  free(vs); free(vt); free(cs);
 }

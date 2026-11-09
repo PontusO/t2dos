@@ -76,6 +76,10 @@ void lex_free();
 // function argument) frees it; an op that builds a new str frees the operands it consumed;
 // string literals belong to the program (token list, constants) and OP_PUSHS pushes a copy,
 // so nothing on the stack is ever shared and a str is freed exactly once.
+// Tags: vt[i] is 1 while vs[i] holds an owned str (set by the ops that push or build one,
+// cleared by the ops that consume it, even when they turn it into a number), so that
+// vm_free() can free the strings an error left on the stack. Any op that pops a str or
+// turns a str cell into another type must clear vt for it.
 #define STR_MAX 32767
 char *str_new(int len);          // len bytes (zeroed), or 0 for len 0
 void str_free(char *s);
@@ -185,6 +189,7 @@ enum { CK_FOR = 1, CK_GOSUB = 2 };
 #define CSTACK 4096
 extern int pc;
 extern int *vs;
+extern char *vt;                 // string tags of the value stack cells (see strings above)
 extern float *fs;
 extern int sp;
 extern int *cs;

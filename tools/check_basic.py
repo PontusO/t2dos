@@ -6,7 +6,11 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
 
   check_basic.py --pc      build build/basic-pc (gcc -m32, basic/pcsys.h maps the T2DOS
                            library onto libc) and run every case with `basic-pc NAME.bas`
-                           in tests/basic/; stdout must match NAME.out byte for byte
+                           in tests/basic/; stdout must match NAME.out byte for byte.
+                           Then build build/basic-asan (the same with -fsanitize=address)
+                           and run every case again: any AddressSanitizer or
+                           LeakSanitizer report (a leak, a double free, a bad access)
+                           fails the case; this is the interpreter's leak check
   check_basic.py --board   upload root/bin/basic.bin to /bin/basic.bin and the cases to
                            /src/basic/t/, run `basic NAME.bas > NAME.txt` there through the
                            shell and fetch NAME.txt: the output must match NAME.out byte for
@@ -15,7 +19,10 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
                            console) and compared line by line, trailing spaces not compared
                            (the shell's serial output loses them). Around every case the
                            `free` command's PSRAM free value is read: it must be the same
-                           before and after the run.
+                           before and after the run. This checks the kernel's cleanup when
+                           a program ends (it frees every block the program allocated), so
+                           an interpreter leak does not show here: --pc's AddressSanitizer
+                           run is the leak check.
   --only NAME              run only that case (may be given more than once)
 Both may be given; the PC run comes first. Exit status 0 when every case passes.
 """
@@ -29,6 +36,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CASES = os.path.join(ROOT, 'tests', 'basic')
 PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
+ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
@@ -71,10 +79,10 @@ def report(where, case, ok, want, got):
 
 
 # ------------------------------------------------------------------ PC
-def build_pc():
-    os.makedirs(os.path.dirname(PC_BIN), exist_ok=True)
+def build_pc(out=PC_BIN, extra=()):
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     srcs = sorted(glob.glob(os.path.join(ROOT, 'basic', '*.c')))
-    r = subprocess.run(['gcc'] + PC_CFLAGS + ['-o', PC_BIN] + srcs + ['-lm'])
+    r = subprocess.run(['gcc'] + PC_CFLAGS + list(extra) + ['-o', out] + srcs + ['-lm'])
     return r.returncode == 0
 
 
@@ -94,6 +102,31 @@ def run_pc(cases):
         want = c.out + 'exit %d\n' % c.code
         report('pc', c, got == want, want, got)
         ok = ok and got == want
+    return run_asan(cases) and ok
+
+
+def run_asan(cases):
+    """every case again under AddressSanitizer (leaks included): its report is the failure"""
+    if not build_pc(ASAN_BIN, ['-g', '-fsanitize=address', '-fno-omit-frame-pointer']):
+        print('FAIL: the AddressSanitizer build failed')
+        return False
+    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1')
+    ok = True
+    for c in cases:
+        try:
+            r = subprocess.run([ASAN_BIN, c.name + '.bas'], cwd=CASES, input=c.stdin or b'',
+                               capture_output=True, timeout=120, env=env)
+            err = r.stderr.decode('latin-1')
+            good = 'Sanitizer' not in err
+            got = '' if good else err[:1500]
+        except subprocess.TimeoutExpired:
+            good, got = False, 'TIMEOUT'
+        if not good:
+            print('FAIL %s (asan)' % c.name)
+            print('  ' + got.replace('\n', '\n  '))
+        ok = ok and good
+    if ok:
+        print('PASS asan: %d cases, no leaks or memory errors' % len(cases))
     return ok
 
 

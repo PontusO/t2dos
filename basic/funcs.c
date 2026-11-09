@@ -233,6 +233,7 @@ void h_timer() {
 void h_len() {
   char *s;
   s = (char *)vs[sp];
+  vt[sp] = 0;
   vs[sp] = str_len(s);
   str_free(s);
 }
@@ -274,7 +275,7 @@ void h_mid() {
 // INSTR([start,] a, b): where b first occurs in a at or after start (from 1), else 0
 void h_instr() {
   char *a; char *b; int st; int la; int lb; int i; int r;
-  b = (char *)vs[sp]; a = (char *)vs[sp - 1]; sp = sp - 2;
+  b = (char *)vs[sp]; a = (char *)vs[sp - 1]; vt[sp] = 0; vt[sp - 1] = 0; sp = sp - 2;
   st = 1;
   if (fn_n == 3) { st = vs[sp]; sp--; }
   la = str_len(a); lb = str_len(b);
@@ -332,7 +333,7 @@ void h_strs() {
   if (fn_n == T_INT) n = fmt_int(b, vs[sp]); else n = fmt_sng(b, fs[sp]);
   if (b[0] == '-') t = str_from(b, n);
   else { t = str_new(n + 1); t[0] = ' '; memcpy(t + 1, b, n); }
-  vs[sp] = (int)t;
+  vs[sp] = (int)t; vt[sp] = 1;
 }
 
 // VAL(s): the number at the start of s (blanks, a sign, then a literal as in the source,
@@ -340,6 +341,7 @@ void h_strs() {
 void h_val() {
   char *s; int n; int i; int neg; int j; int type; int val; float f;
   s = (char *)vs[sp]; n = str_len(s);
+  vt[sp] = 0;
   i = 0;
   while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
   neg = 0;
@@ -360,12 +362,13 @@ void h_chr() {
   c = vs[sp];
   if (c < 0 || c > 255) { bad_call(); return; }
   s = str_new(1); s[0] = c;
-  vs[sp] = (int)s;
+  vs[sp] = (int)s; vt[sp] = 1;
 }
 
 void h_asc() {
   char *s; int c;
   s = (char *)vs[sp];
+  vt[sp] = 0;
   if (str_len(s) == 0) { vs[sp] = 0; bad_call(); return; }
   c = s[0] & 255;
   str_free(s);
@@ -378,7 +381,7 @@ void repeat(int n, int c) {
   if (n < 0 || n > STR_MAX || c < 0 || c > 255) { bad_call(); return; }
   s = str_new(n);
   if (n > 0) memset(s, c, n);
-  vs[sp] = (int)s;
+  vs[sp] = (int)s; vt[sp] = 1;
 }
 
 void h_strings() { int c; c = vs[sp]; sp--; repeat(vs[sp], c); }
@@ -394,7 +397,7 @@ void digits(int base) {
     if (d < 10) b[k] = '0' + d; else b[k] = 'A' + d - 10;
     if (!u) break;
   }
-  vs[sp] = (int)str_from(b + k, 16 - k);
+  vs[sp] = (int)str_from(b + k, 16 - k); vt[sp] = 1;
 }
 
 void h_hex() { digits(16); }

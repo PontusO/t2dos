@@ -488,7 +488,7 @@ void st_const() {
     code_rewind(start);
     if (nerr) return;
     s = sym_add(u, 0, S_CONST, t);
-    syms[s].val = vs[sp]; sp--;
+    syms[s].val = vs[sp]; vt[sp] = 0; sp--;
     if (!accept(TK_COMMA)) return;
   }
 }
