@@ -1,0 +1,2 @@
+# crlf.bas tests CRLF line ends: keep its bytes as they are
+crlf.bas -text

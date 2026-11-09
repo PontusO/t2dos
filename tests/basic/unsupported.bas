@@ -1,0 +1,4 @@
+PRINT "x"
+x = 1
+SCREEN 12
+PRINT "y"

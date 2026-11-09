@@ -1,0 +1,2 @@
+PRINT "x"
+PRINT USING "##"; 5

@@ -1,0 +1,5 @@
+one
+two 2 
+ 6 
+crlf.bas:6: Division by zero
+exit 1

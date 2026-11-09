@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
@@ -27,6 +27,11 @@ build/host/%: binutils/%.c lib/t2obj.h lib/t2obj.c
 	gcc -O2 -w -I lib -I . -o $@ $<
 root/bin/%.bin: binutils/%.c $(TOOLS) lib/t2obj.h lib/t2obj.c
 	$(call CCBIN,$<,-I lib)
+# BASIC: several files in basic/ (pcsys.c is the PC test build's shim, not part of it); cc takes
+# one -I, so basic sources find sys.h in the current directory (the repo root)
+BASIC_SRC = $(filter-out basic/pcsys.c,$(wildcard basic/*.c))
+root/bin/basic.bin: $(BASIC_SRC) basic/basic.h $(TOOLS)
+	$(call CCBIN,$(BASIC_SRC),-I basic)
 # the assembler: same pattern, source in assembler/
 build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
 	@mkdir -p build/host

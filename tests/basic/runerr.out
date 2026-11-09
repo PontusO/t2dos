@@ -1,0 +1,3 @@
+before
+runerr.bas:2: Division by zero
+exit 1
