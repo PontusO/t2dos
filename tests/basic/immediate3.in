@@ -1,0 +1,6 @@
+SUB a: p = 1: q = 2: r = 3: s$ = "zz": END SUB
+SUB b(z): s$ = "xx" + "y": r = 5: PRINT z; r; s$: END SUB: CALL b(7)
+x = 1: FUNCTION f: END FUNCTION
+DECLARE SUB c
+PRINT "ok"
+SYSTEM

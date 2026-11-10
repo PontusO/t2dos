@@ -1,0 +1,11 @@
+T2DOS BASIC
+Ok
+INPUT "n"; a: PRINT "after"; a
+n? 
+Break
+Ok
+PRINT "next"
+next
+Ok
+SYSTEM
+exit 0

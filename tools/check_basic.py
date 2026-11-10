@@ -400,8 +400,7 @@ def case_editrun(r):
     b = r.b
     b.s.reset_input_buffer()
     b._write(b'edit /src/basic/t/hello.bas\r')
-    time.sleep(2.0)
-    b.s.reset_input_buffer()
+    help_ok = b'^R run' in b._read(3.0, 1.0)        # the help line shows ^R
     b._write(b'\x12')
     raw = b''
     end = time.time() + 15
@@ -412,7 +411,7 @@ def case_editrun(r):
     time.sleep(1.0)
     b._write(b'\x18')
     tail = b._read(10.0, 0.5, True)
-    good = shown and tail.endswith(b'> ')      # the editor's redraw has no line breaks
+    good = shown and help_ok and tail.endswith(b'> ')      # the editor's redraw has no line breaks
     out, _ = r.run('echo hi', 10.0)
     after = psram_free(r)
     return key_result('editrun', good and out == ['hi'] and before == after,

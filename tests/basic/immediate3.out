@@ -1,0 +1,19 @@
+T2DOS BASIC
+Ok
+SUB a: p = 1: q = 2: r = 3: s$ = "zz": END SUB
+LINE 1: Illegal in direct mode
+Ok
+SUB b(z): s$ = "xx" + "y": r = 5: PRINT z; r; s$: END SUB: CALL b(7)
+LINE 1: Illegal in direct mode
+Ok
+x = 1: FUNCTION f: END FUNCTION
+LINE 1: Illegal in direct mode
+Ok
+DECLARE SUB c
+LINE 1: Illegal in direct mode
+Ok
+PRINT "ok"
+ok
+Ok
+SYSTEM
+exit 0

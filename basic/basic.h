@@ -328,8 +328,11 @@ void out_push(int idx);          // output to target idx (0 console, else a file
 void out_pop();                  // back to the target before the matching out_push
 
 // ---------------------------------------------------------------- main.c
+extern int cmd_read;             // 1 only while immediate mode reads its command line: there
+                                 // read_line() returns 0 at the end of the input and a ^C ends
+                                 // the line; INPUT in a running line breaks / errors as usual
 extern int imm_mode;             // 1 in immediate mode: messages say LINE n, not FILE:n; read_line()
-                                 // returns 0 at the end of the input, and a ^C ends the line
+                                 // 
 extern char *srcname;            // the program's file name as given, for messages
 extern int nerr;                 // errors so far (only the first is reported)
 extern int prog_argc;            // the arguments after the file name (COMMAND$, Task 7)

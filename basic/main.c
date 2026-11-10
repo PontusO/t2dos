@@ -5,6 +5,7 @@
 char *srcname;
 int nerr;
 int imm_mode;
+int cmd_read;
 int prog_argc;
 char **prog_argv;
 
@@ -135,7 +136,7 @@ void run_file(char *path) {
   int *keep; int nkeep;
   keep = malloc(64 * 4);
   memcpy(keep, kq, 64 * 4); nkeep = kqn;
-  session_end();
+  session_end();                  // (a RUN of a missing file also drops the variables)
   session_start();
   imm_mode = 0; srcname = path;
   run_program();
@@ -147,18 +148,25 @@ void run_file(char *path) {
 }
 
 int immediate() {
-  char *path; int quit;
+  char *path; int quit; int k;
   imm_mode = 1; srcname = 0;
   out_cstr("T2DOS BASIC\n");
   quit = 0;
   while (!quit) {
     out_cstr("Ok\n");
-    if (!read_line()) break;
+    cmd_read = 1;
+    k = read_line();
+    cmd_read = 0;
+    if (!k) break;
     if (linen == 0) continue;
     lex(linebuf, linen);
     nerr = 0;
     path = 0;
-    if (toks[0].tk == K_SYSTEM && toks[1].tk == TK_EOL) quit = 1;
+    for (k = 0; k < ntok; k++)    // procedures cannot live in a line that is dropped; RUN a file
+      if ((toks[k].tk == K_SUB || toks[k].tk == K_FUNCTION || toks[k].tk == K_DECLARE) &&
+          (k == 0 || toks[k - 1].tk == TK_COLON)) break;
+    if (k < ntok) err_line(1, "Illegal in direct mode");
+    else if (toks[0].tk == K_SYSTEM && toks[1].tk == TK_EOL) quit = 1;   // only as a whole line
     else if (toks[0].tk == K_RUN) {
       if (toks[1].tk == TK_STR && toks[2].tk == TK_EOL) {
         path = malloc(str_len((char *)toks[1].val) + 1);

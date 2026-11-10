@@ -169,12 +169,12 @@ int read_line() {
   while (1) {
     c = key_wait();
     if (c == -2) {
-      if (imm_mode) { linen = 0; out_cstr("^C"); break; }
+      if (cmd_read) { linen = 0; out_cstr("^C"); break; }
       brk_at(pc - 1); return 0;
     }
     if (c == -1) {
       if (linen > 0) break;
-      if (imm_mode) return 0;
+      if (cmd_read) return 0;
       vm_err("Input past end");
       return 0;
     }

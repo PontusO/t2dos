@@ -1,0 +1,3 @@
+INPUT "n"; a: PRINT "after"; a
+PRINT "next"
+SYSTEM

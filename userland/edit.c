@@ -108,7 +108,7 @@ int status() {
   sprintf(line, " %s%s  line %d col %d   ", fname, dirty ? " [modified]" : "", lineno(), col_of(cur) + 1);
   n = strlen(line);
   if (msg[0]) { i = 0; while (msg[i] && n < 250) { line[n] = msg[i]; n++; i++; } }
-  else { strcpy(line + n, mark >= 0 ? "^K cut  ^C copy  ^B clear mark" : "^O save ^X quit ^F find ^B mark ^K cut ^C copy ^U paste ^R run"); n = strlen(line); }
+  else { strcpy(line + n, mark >= 0 ? "^K cut  ^C copy  ^B clear mark" : "^O save ^X quit ^R run ^F find ^B mark ^K cut ^C copy ^U paste"); n = strlen(line); }
   i = 0;
   while (i < cols - 1) { outc(i < n ? line[i] : ' '); i++; }
   csi("0m");
