@@ -23,7 +23,13 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
                            a program ends (it frees every block the program allocated), so
                            an interpreter leak does not show here: --pc's AddressSanitizer
                            run is the leak check.
-  --only NAME              run only that case (may be given more than once)
+                           Cases that need the PC (screen1: the board's conctl output does
+                           not go through the `>` redirection; inkey1, ctrlc1: they feed
+                           stdin at once) are not run on the board. The board key cases
+                           (ctrlc, keyqueue, bgyield, pins) drive the console directly and
+                           run only on the board, after the ordinary cases.
+  --only NAME              run only that case (may be given more than once); the board key
+                           cases are named like that too
 Both may be given; the PC run comes first. Exit status 0 when every case passes.
 """
 import glob
@@ -38,6 +44,8 @@ CASES = os.path.join(ROOT, 'tests', 'basic')
 PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
+PC_ONLY = ('screen1', 'inkey1', 'ctrlc1')
+KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins')
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
 PC_CFLAGS = ['-m32', '-w', '-msse2', '-mfpmath=sse', '-fsingle-precision-constant',
@@ -62,7 +70,7 @@ class Case:
 def load_cases(only):
     names = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(CASES, '*.bas')))
     if only:
-        missing = [n for n in only if n not in names]
+        missing = [n for n in only if n not in names and n not in KEY_CASES]
         if missing:
             raise SystemExit('no such case: %s' % ', '.join(missing))
         names = [n for n in names if n in only]
@@ -201,7 +209,102 @@ def run_board_case(r, c):
     return got == want, want, got
 
 
-def run_board(cases):
+# ------------------------------------------------------------------ board key cases
+def lines_of(raw):
+    return [l.rstrip() for l in raw.decode('latin-1').replace('\r\n', '\n').replace('\r', '\n').split('\n')]
+
+
+def at_prompt(raw):
+    ls = lines_of(raw)
+    return bool(ls) and bool(PROMPT_MATCH(ls[-1]))
+
+
+def PROMPT_MATCH(line):
+    import board
+    return board.PROMPT_RE.match(line)
+
+
+def key_result(name, good, detail=''):
+    if good:
+        print('PASS %s' % name)
+    else:
+        print('FAIL %s (board)' % name)
+        print('  ' + detail)
+    return good
+
+
+def put_text(r, text, name):
+    r.b.put(text.encode(), '%s/%s' % (BOARD_DIR, name))
+
+
+def case_ctrlc(r):
+    """a DO: LOOP program, byte 3 typed: `Break at` and the prompt come back"""
+    put_text(r, 'DO: LOOP\n', 'spin.bas')
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(b'basic spin.bas\r')
+    time.sleep(1.0)
+    b._write(b'\x03')
+    raw = b._read(10.0, 0.5, True)
+    good = b'Break at spin.bas:1' in raw and at_prompt(raw)
+    out, _ = r.run('echo hi', 10.0)
+    return key_result('ctrlc', good and out == ['hi'], repr(raw[-200:]))
+
+
+def case_keyqueue(r):
+    """keys typed while a program prints reach a later LINE INPUT in order"""
+    put_text(r, 't = TIMER\nDO WHILE TIMER - t < 1.5\n  PRINT "x"\nLOOP\nPRINT "ready"\n'
+             'LINE INPUT s$\nPRINT "got:["; s$; "]"\n', 'kq.bas')
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(b'basic kq.bas\r')
+    time.sleep(0.5)
+    b._write(b'a')
+    time.sleep(0.2)
+    b._write(b'b')
+    raw = b''
+    end = time.time() + 15
+    while b'ready' not in raw and time.time() < end:
+        raw += b._read(1.0, 0.3)
+    b._write(b'\r')
+    raw += b._read(10.0, 0.5, True)
+    good = b'got:[ab]' in raw and at_prompt(raw)
+    return key_result('keyqueue', good, repr(raw[-200:]))
+
+
+def case_bgyield(r):
+    """an endless BASIC loop as a background job: the shell still answers"""
+    put_text(r, 'x = 0\nDO: x = x + 1: LOOP\n', 'spin2.bas')
+    out, _ = r.run('basic spin2.bas &', 10.0)
+    m = re.search(r'\[(\d+)\] basic', ' '.join(out))
+    if not m:
+        return key_result('bgyield', False, 'no job line in %r' % out)
+    job = m.group(1)
+    try:
+        time.sleep(0.5)
+        echo, _ = r.run('echo hi', 10.0)
+        jobs, _ = r.run('jobs', 10.0)
+    finally:
+        r.run('kill ' + job, 10.0)
+    jobs2, _ = r.run('jobs', 10.0)
+    good = echo == ['hi'] and any(l.startswith('[%s] running' % job) for l in jobs) and not any(l.startswith('[%s] running' % job) for l in jobs2)
+    return key_result('bgyield', good, 'echo %r jobs %r after kill %r' % (echo, jobs, jobs2))
+
+
+def case_pins(r):
+    """PINMODE/PINWRITE/PAUSE/PWM on the board LED pin, no error"""
+    put_text(r, 'PINMODE 25, 1\nPINWRITE 25, 1\nPAUSE 20\nPINWRITE 25, 0\nPWM 25, 0\n'
+             'v = ANALOGREAD(26) + PINREAD(25)\nPRINT "pins ok"\n', 'pins.bas')
+    out, code = r.run('basic pins.bas', 20.0)
+    return key_result('pins', out == ['pins ok'] and code == 0, '%r exit %d' % (out, code))
+
+
+def run_key_case(r, name):
+    return {'ctrlc': case_ctrlc, 'keyqueue': case_keyqueue, 'bgyield': case_bgyield,
+            'pins': case_pins}[name](r)
+
+
+def run_board(cases, only=()):
     try:
         r = Remote()
     except Exception as e:
@@ -211,6 +314,7 @@ def run_board(cases):
     r.b.put(binp, '/bin/basic.bin')
     for d in ('/src', '/src/basic', BOARD_DIR):
         r.run('mkdir ' + d, 10.0)                    # fails harmlessly when it exists
+    cases = [c for c in cases if c.name not in PC_ONLY]
     for c in cases:
         r.b.put(c.bas, '%s/%s.bas' % (BOARD_DIR, c.name))
     r.run('cd ' + BOARD_DIR, 10.0)
@@ -226,6 +330,9 @@ def run_board(cases):
                 got = 'free PSRAM %d after the run' % after
             report('board', c, good, want, got)
             ok = ok and good
+        for name in KEY_CASES:
+            if not only or name in only:
+                ok = run_key_case(r, name) and ok
     finally:
         r.run('cd /', 10.0)
     return ok
@@ -256,7 +363,7 @@ def main(argv):
     if pc:
         ok = run_pc(cases) and ok
     if board:
-        ok = run_board(cases) and ok
+        ok = run_board(cases, only) and ok
     print('%s: %d cases' % ('ok' if ok else 'FAILED', len(cases)))
     return 0 if ok else 1
 

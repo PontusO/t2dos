@@ -55,6 +55,19 @@ int err_line(int line, char *msg) {
 
 int err_at(int pos, char *msg) { return err_line(line_of(pos), msg); }
 
+int brk_at(int pos) {
+  char num[16];
+  if (nerr == 0) {
+    if (out_col > 0) out_char('\n');
+    out_cstr("Break at "); out_cstr(srcname); out_char(':');
+    fmt_int(num, line_of(pos)); out_cstr(num); out_char('\n');
+    out_flush();
+  }
+  nerr++;
+  running = 0;
+  return 0;
+}
+
 // ---------------------------------------------------------------- loading
 char *load_file(char *path, int *len) {
   struct stat_t st; int fd; char *buf; int got; int n;
@@ -80,7 +93,7 @@ int main(int argc, char **argv) {
   prog_argc = argc - 2; prog_argv = argv + 2;
   src = load_file(srcname, &len);
   if (!src) { out_cstr(srcname); out_cstr(": File not found\n"); out_flush(); return 1; }
-  lex_init(); vm_init(); comp_init(); funcs_init();
+  lex_init(); vm_init(); comp_init(); funcs_init(); io_init();
   lex(src, len);
   free(src);
   if (compile()) {
@@ -89,6 +102,7 @@ int main(int argc, char **argv) {
   }
   if (out_col > 0) out_char('\n');   // the shell's prompt starts on a line of its own
   out_flush();
+  io_free();
   vm_free(); comp_free(); lex_free();
   if (nerr) return 1;
   return 0;

@@ -533,6 +533,15 @@ void st_print() {
   while (!at_end()) {
     if (TK == TK_SEMI) { next(); sep = 1; continue; }
     if (TK == TK_COMMA) { next(); emit(OP_PRCOMMA); sep = 1; continue; }
+    if (TK == K_TAB || TK == K_SPC) {                    // TAB(n), SPC(n): only inside PRINT
+      t = TK; next();
+      if (!need(TK_LPAR)) return;
+      expr_to(T_INT);
+      if (!need(TK_RPAR)) return;
+      emit_fn(t, 0);
+      sep = 0;
+      continue;
+    }
     t = expr();
     emit(OP_PRINTI + t - T_INT);                         // OP_PRINTI, OP_PRINTF, OP_PRINTS
     sep = 0;
@@ -1524,10 +1533,84 @@ void st_declare() { while (TK != TK_EOL && TK != TK_COLON && TK != TK_EOF) next(
 // QBasic statements outside this BASIC that start with one of its words
 void st_unsup() { cerr("Advanced feature unavailable"); }
 
-// LINE (x1, y1)-(x2, y2) is graphics; LINE INPUT comes with Task 6
+// INPUT ["prompt"{;|,}] v1 [, v2 ...]: the INPUT op (io.c) prompts, reads and checks a whole
+// line against the variables' types (the types follow the op, patched in as the variables
+// are compiled); then each variable gets its value from OP_INGET, stored like a READ.
+// flags: 1 a prompt str is on the stack, 2 add "? " after it.
+void st_input() {
+  int fl; int nv; int i; int d; int s; int t; int tpos; int k;
+  next();
+  fl = 2;
+  if (TK == TK_STR) {
+    if (toks[tp + 1].tk != TK_SEMI && toks[tp + 1].tk != TK_COMMA) { bad_token(); return; }
+    if (toks[tp].val) { emit(OP_PUSHS); emit_arg(toks[tp].val); }
+    else { emit(OP_PUSHI); emit_arg(0); }
+    fl = 1;
+    if (toks[tp + 1].tk == TK_SEMI) fl = 3;
+    next(); next();
+  }
+  nv = 1; d = 0; i = tp;
+  while (toks[i].tk != TK_EOL && toks[i].tk != TK_EOF && toks[i].tk != TK_COLON && toks[i].tk != K_ELSE) {
+    if (toks[i].tk == TK_LPAR) d++;
+    else if (toks[i].tk == TK_RPAR) d--;
+    else if (toks[i].tk == TK_COMMA && d == 0) nv++;
+    i++;
+  }
+  if (nv > INPUT_MAX) { cerr("Syntax error"); return; }
+  emit_fn(K_INPUT, nv); emit_arg(fl);
+  tpos = ncode;
+  for (k = 0; k < nv; k++) emit_arg(0);
+  k = 0;
+  while (1) {
+    if (TK != TK_ID) { bad_token(); return; }
+    if (toks[tp + 1].tk == TK_LPAR) {                     // an array element
+      t = elem_ref();
+      emit(OP_INGET); emit_arg(k); emit_arg(t);
+      if (t == T_STR) emit(OP_STAS); else emit(OP_STA);
+    }
+    else {
+      s = name_ref();
+      if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return; }
+      t = syms[s].type;
+      emit(OP_INGET); emit_arg(k); emit_arg(t);
+      emit_store(s);
+    }
+    code[tpos + k] = t;
+    k++;
+    if (!accept(TK_COMMA)) break;
+  }
+  if (!at_end()) bad_token();
+}
+
+// LINE INPUT ["prompt";] v$: the whole line, no "? "; LINE (x1, y1)-(x2, y2) is graphics
 void st_line() {
+  int fl; int s; int t;
   if (toks[tp + 1].tk != K_INPUT) { st_unsup(); return; }
-  bad_token();
+  next(); next();
+  fl = 0;
+  if (TK == TK_STR) {
+    if (toks[tp + 1].tk != TK_SEMI && toks[tp + 1].tk != TK_COMMA) { bad_token(); return; }
+    if (toks[tp].val) { emit(OP_PUSHS); emit_arg(toks[tp].val); }
+    else { emit(OP_PUSHI); emit_arg(0); }
+    fl = 1;
+    next(); next();
+  }
+  if (TK != TK_ID) { bad_token(); return; }
+  emit_fn(K_LINE, 0); emit_arg(fl);                       // before any address is pushed
+  if (toks[tp + 1].tk == TK_LPAR) {
+    t = elem_ref();
+    if (t != T_STR) { mismatch(); return; }
+    emit(OP_INGET); emit_arg(0); emit_arg(T_STR);
+    emit(OP_STAS);
+  }
+  else {
+    s = name_ref();
+    if (syms[s].kind == S_CONST) { cerr("Duplicate definition"); return; }
+    if (syms[s].type != T_STR) { mismatch(); return; }
+    emit(OP_INGET); emit_arg(0); emit_arg(T_STR);
+    emit_store(s);
+  }
+  if (!at_end()) bad_token();
 }
 
 void statement() {
@@ -1598,6 +1681,7 @@ int comp_init() {
   stmt_tab[K_DEFSTR] = st_deftype;
   stmt_tab[K_END] = st_end;
   stmt_tab[K_LINE] = st_line;
+  stmt_tab[K_INPUT] = st_input;
   stmt_tab[K_MIDS] = st_unsup;          // the MID$ statement form
   stmt_tab[K_TIMER] = st_unsup;         // TIMER ON / TIMER OFF (TIMER the function is an expression)
   stmt_tab[K_IF] = st_if;

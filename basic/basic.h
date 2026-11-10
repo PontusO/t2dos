@@ -2,7 +2,7 @@
 //
 // Files: main.c (command line, loading, error messages, console output), lex.c (source to
 // tokens), comp.c (tokens to bytecode; every load-time check), vm.c (runs the bytecode),
-// fmt.c (numbers to and from text the QBasic way), pcsys.h/pcsys.c (PC build only: the T2DOS
+// io.c (keys, INPUT, screen and board statements), fmt.c (numbers to and from text), pcsys.h/pcsys.c (PC build only: the T2DOS
 // library on top of libc). Written in the T2DOS C subset (no static, const, do/while, goto,
 // struct assignment, own variadics, doubles, 64-bit ints): cc builds it for the board.
 //
@@ -140,6 +140,7 @@ enum {
   OP_ERASE,                      // pops an array cell's address; frees the array
   OP_BYVAL,                      // a value argument: [v] becomes [address of v's cell, v]
   OP_CALL, OP_RET,               // arg: procedure index (procs[]); call it; return from it
+  OP_INGET,                      // args: index, type; push the value INPUT read (io.c)
   NOPS
 };
 
@@ -280,6 +281,24 @@ float bitsf(int b);
 // compilers and optab[OP_FN] with the handler, which runs the function by its token. A
 // function is a row in the table at the top of funcs.c (argument types, count, result).
 void funcs_init();
+extern void (*fnop[NTOK])();     // OP_FN handlers by token (statements too: RANDOMIZE, CLS ...)
+extern int fn_n;                 // the running OP_FN's count or type
+void emit_fn(int k, int v);      // OP_FN, token, count: the handler may read more code words
+
+// ---------------------------------------------------------------- io.c
+// The console and the board. Key queue: key_poll() moves every waiting console byte into a
+// 64-byte queue (the rest are dropped) and returns -1 if a 3 (Ctrl-C) was among them. The VM
+// calls it with yield() every 1024 ops and INKEY$ before it takes a key; INPUT, LINE INPUT
+// and SLEEP take their keys from the queue first. INKEY$ decodes ESC [ A/B/C/D/H/F, ESC [
+// 1..8 ~ and ESC O A..D/H/F into QBasic's CHR$(0) + letter.
+// Statements here (all through OP_FN, handlers registered in io_init()): CLS LOCATE COLOR
+// BEEP SLEEP WIDTH WRITE PINMODE PINWRITE PWM PAUSE, TAB() and SPC() in PRINT, and the
+// functions INKEY$ PINREAD ANALOGREAD. INPUT and LINE INPUT compile in comp.c (st_input,
+// st_line) and run in io.c (OP_FN K_INPUT / K_LINE, then OP_INGET per variable).
+#define INPUT_MAX 32             // variables in one INPUT
+int key_poll();
+void io_init();
+void io_free();                  // at the end: strings an aborted INPUT left, colours back
 
 // ---------------------------------------------------------------- main.c
 extern char *srcname;            // the program's file name as given, for messages
@@ -288,6 +307,7 @@ extern int prog_argc;            // the arguments after the file name (COMMAND$,
 extern char **prog_argv;
 int err_line(int line, char *msg);  // print FILE:LINE: MSG once, stop compiling and running
 int err_at(int pos, char *msg);     // the same for a bytecode position
+int brk_at(int pos);                // Ctrl-C: `Break at FILE:LINE`, stops the program (exit 1)
 extern int out_col;              // console column of the next character (0 = line start)
 void out_char(int c);
 void out_str(char *s, int n);

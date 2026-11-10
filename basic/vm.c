@@ -21,6 +21,7 @@ int nalloc[4];                   // slots allocated per type (vm_alloc keeps the
 int fbase;
 int vmargin;
 int calls;                       // calls running (nested)
+int ticks;                       // ops since the last yield and key poll
 struct Proc *procs;
 int nproc;
 
@@ -662,9 +663,16 @@ int vm_run(int start) {
   int op;
   pc = start;
   running = 1;
+  ticks = 0;
   while (running) {
     op = code[pc]; pc++;
     optab[op]();
+    ticks++;
+    if (ticks >= 1024) {         // let other tasks run; look for Ctrl-C and keys
+      ticks = 0;
+      yield();
+      if (key_poll() < 0) brk_at(pc - 1);
+    }
   }
   return 0;
 }
