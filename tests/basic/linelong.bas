@@ -1,0 +1,6 @@
+LINE INPUT a$
+PRINT LEN(a$)
+INPUT b$
+PRINT LEN(b$)
+LINE INPUT c$
+PRINT "not reached"

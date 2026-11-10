@@ -1,0 +1,14 @@
+PRINT 1/0: DIM a(5)
+DIM a(5)
+a(1) = 3: PRINT a(1); UBOUND(a)
+PRINT 1/0: b(2) = 1
+DIM b(3)
+PRINT UBOUND(b)
+DIM c(4): PRINT (
+c(9) = 2: PRINT c(9)
+DIM d(2): x = "s"
+DIM d(2)
+PRINT UBOUND(d)
+IF 0 THEN DIM e(7)
+DIM e(7): PRINT UBOUND(e)
+SYSTEM

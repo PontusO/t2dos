@@ -1,0 +1,4 @@
+PRINT "x"
+SUB s
+  SHARED v
+END SUB

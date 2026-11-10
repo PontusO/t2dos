@@ -1,0 +1,3 @@
+ 32767 
+filelong2.bas:9: Line buffer overflow
+exit 1

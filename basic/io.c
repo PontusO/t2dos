@@ -12,7 +12,7 @@ int kq[64];                      // waiting keys, oldest first
 int kqn;
 int cur_fg;                      // colours set by COLOR (reset when the program ends)
 int cur_bg;
-char linebuf[256];               // the line INPUT / LINE INPUT is reading
+char linebuf[LINE_MAX + 1];      // the line INPUT / LINE INPUT is reading
 int linen;
 struct stat_t fst;             // scratch for stat() and readdir()
 struct dirent_t fde;
@@ -161,10 +161,12 @@ int skip_esc() {
 }
 
 // Reads a line into linebuf/linen, echoing it (and handling Backspace) as a terminal
-// program must here. Returns 0 if the program ended (Ctrl-C, or no more input).
+// program must here. Returns 0 if the program ended (Ctrl-C, or no more input). A line
+// longer than LINE_MAX is read to its end (the rest not echoed) and is the run-time error
+// Line buffer overflow; at the immediate-mode prompt only the message, the line is dropped.
 int read_line() {
-  int c;
-  linen = 0;
+  int c; int over;
+  linen = 0; over = 0;
   out_flush();
   while (1) {
     c = key_wait();
@@ -173,7 +175,7 @@ int read_line() {
       brk_at(pc - 1); return 0;
     }
     if (c == -1) {
-      if (linen > 0) break;
+      if (linen > 0 || over) break;
       if (cmd_read) return 0;
       vm_err("Input past end");
       return 0;
@@ -181,12 +183,21 @@ int read_line() {
     if (c == 13 || c == 10) break;
     if (c == 27) { if (!skip_esc()) return 0; continue; }
     if (c == 8 || c == 127) {
-      if (linen > 0) { linen--; out_char(8); out_char(' '); out_char(8); out_flush(); }
+      if (linen > 0 && !over) { linen--; out_char(8); out_char(' '); out_char(8); out_flush(); }
       continue;
     }
-    if (c >= 32 && linen < 255) { linebuf[linen] = c; linen++; out_char(c); out_flush(); }
+    if (c >= 32) {
+      if (linen < LINE_MAX) { linebuf[linen] = c; linen++; out_char(c); out_flush(); }
+      else over = 1;
+    }
   }
   out_char('\n');
+  if (over) {
+    linen = 0;
+    if (cmd_read) { out_cstr("Line buffer overflow\n"); return 1; }
+    vm_err("Line buffer overflow");
+    return 0;
+  }
   return 1;
 }
 
@@ -262,8 +273,8 @@ int f_pos[16];
 int f_len[16];
 int f_eof[16];
 char *f_path[16];
-int f_col[16];
-int f_ser[16];                   // counts the opens of each number (a stale output target is told apart)
+int f_ser[16];                   // counts the opens of each number (a stale output target is
+                                 // told apart)
 int ocol[16];                    // the column of each output target (0 is the console)
 int out_idx;                     // the current output target: 0 the console, else a file number
 int *ostack;                     // the targets to go back to (index and f_ser of each)
@@ -323,7 +334,10 @@ void out_reset() {
 // else the run-time error.
 int file_ok(int n, int want) {
   if (n < 1 || n > 15 || !f_mode[n]) { vm_err("Bad file number"); return 0; }
-  if ((want == 1 && f_mode[n] != 1) || (want == 2 && f_mode[n] == 1)) { vm_err("Bad file mode"); return 0; }
+  if ((want == 1 && f_mode[n] != 1) || (want == 2 && f_mode[n] == 1)) {
+    vm_err("Bad file mode");
+    return 0;
+  }
   return 1;
 }
 
@@ -377,9 +391,9 @@ void h_open() {
   fd = open(path1, mode == 1 ? OPEN_READ : mode == 2 ? OPEN_WRITE : OPEN_APPEND);
   if (fd < 0) { vm_err(mode == 1 ? "File not found" : "Path not found"); return; }
   f_fd[n] = fd; f_mode[n] = mode; f_pos[n] = 0; f_len[n] = 0; f_eof[n] = 0; ocol[n] = 0; f_ser[n]++;
-  if (mode == 1) f_buf[n] = malloc(512);
+  if (mode == 1) f_buf[n] = mem_alloc(512);
   if (strncmp(path1, "/pipe/", 6) == 0) {
-    f_path[n] = malloc(strlen(path1) + 1);
+    f_path[n] = mem_alloc(strlen(path1) + 1);
     strcpy(f_path[n], path1);
   }
 }
@@ -434,12 +448,13 @@ int fl_getc(int n) {
   return c;
 }
 
-// The next line as a malloc'd block of *len bytes (at most 32767; the line end and a CR before
-// it are dropped); 0 at the end of the file. On a pipe the end of a message with nothing read
+// The next line as a malloc'd block of *len bytes (the line end and a CR before it are
+// dropped); 0 at the end of the file, or after the run-time error Line buffer overflow for a
+// line longer than max (read to its end). On a pipe the end of a message with nothing read
 // is not the end: the next message is waited for.
-char *fl_readline(int n, int *len) {
-  char *b; char *t; int cap; int l; int c; int got;
-  cap = 128; b = malloc(cap); l = 0; got = 0;
+char *fl_readline(int n, int *len, int max) {
+  char *b; char *t; int cap; int l; int c; int over;
+  cap = 128; b = mem_alloc(cap); l = 0; over = 0;
   while (1) {
     c = fl_getc(n);
     if (c < 0) {
@@ -449,12 +464,14 @@ char *fl_readline(int n, int *len) {
       return 0;
     }
     if (c == 10) break;
-    if (l < STR_MAX) {
-      if (l + 1 >= cap) { t = malloc(cap * 2); memcpy(t, b, l); free(b); b = t; cap = cap * 2; }
+    if (l <= max) {              // one more than max: a CR that ends the line
+      if (l + 1 >= cap) { t = mem_alloc(cap * 2); memcpy(t, b, l); free(b); b = t; cap = cap * 2; }
       b[l] = c; l++;
     }
+    else over = 1;
   }
   if (l > 0 && b[l - 1] == 13) l--;
+  if (over || l > max) { free(b); vm_err("Line buffer overflow"); return 0; }
   *len = l;
   return b;
 }
@@ -467,9 +484,8 @@ void file_input(int n, int *types, int nv) {
   i = 0; more = 0;
   for (k = 0; k < nv; k++) {
     if (k == 0 || !more) {
-      b = fl_readline(n, &len);
+      b = fl_readline(n, &len, LINE_MAX);
       if (!b) { if (running) vm_err("Input past end of file"); in_free(32); return; }
-      if (len > 255) len = 255;
       memcpy(linebuf, b, len); linen = len; i = 0;
       free(b);
     }
@@ -637,10 +653,11 @@ void h_files() {
   if (!ok) return;
   d = opendir(path1);
   if (d < 0) { vm_err("Path not found"); return; }
-  names = malloc(256 * 68);
+  names = mem_alloc(256 * 68);
   cnt = 0;
   while (cnt < 256 && readdir(d, &fde)) {
-    if (fde.name[0] == '.' && (fde.name[1] == 0 || (fde.name[1] == '.' && fde.name[2] == 0))) continue;
+    if (fde.name[0] == '.' && (fde.name[1] == 0 || (fde.name[1] == '.' && fde.name[2] == 0)))
+      continue;
     strcpy(names + cnt * 68, fde.name);
     if (fde.isdir) strcpy(names + cnt * 68 + strlen(fde.name), "/");
     cnt++;
@@ -727,7 +744,7 @@ void h_lineinput() {
   if (fl & 4) {                                            // LINE INPUT #n
     fn = vs[sp]; sp--;
     if (!file_ok(fn, 1)) return;
-    b = fl_readline(fn, &len);
+    b = fl_readline(fn, &len, STR_MAX);
     if (!b) { if (running) vm_err("Input past end of file"); return; }
     in_free(1);
     in_val[0] = (int)str_from(b, len); in_str[0] = 1;
@@ -753,17 +770,23 @@ void op_inget() {
 }
 
 // ---------------------------------------------------------------- screen
-void h_cls() { out_flush(); conctl(CON_CLEAR, 0, 0); out_col = 0; }
+void h_cls() { out_flush(); conctl(CON_CLEAR, 0, 0); out_col = 0; out_row = 0; }
 
+// LOCATE [row] [, [col] [, cursor [, start, stop]]]: fn_n is the count of arguments after the
+// column (the cursor's, popped and ignored: the console cannot hide or shape it). A row or
+// column left out (-1) stays where the cursor is.
 void h_locate() {
   int row; int col;
+  sp = sp - fn_n;
   col = vs[sp]; row = vs[sp - 1]; sp = sp - 2;
-  if (row == -1) row = 1;                                  // left out
-  if (col == -1) col = 1;
+  if (row == -1) row = out_row + 1;
+  if (col == -1) col = out_col + 1;
   if (row < 1 || col < 1 || row > 255 || col > 255) { vm_err("Illegal function call"); return; }
   out_flush();
   conctl(CON_GOTO, col - 1, row - 1);
   out_col = col - 1;
+  out_row = row - 1;
+  if (out_row > 24) out_row = 24;
 }
 
 // QBasic's colour numbers (0 black, 1 blue, 2 green, 3 cyan, 4 red, 5 magenta, 6 brown,
@@ -850,10 +873,13 @@ void opt_int() {
 void st_cls() { next(); emit_fn(K_CLS, 0); }
 
 void st_locate() {
+  int n;
   next();
   opt_int();
   if (accept(TK_COMMA)) opt_int(); else { emit(OP_PUSHI); emit_arg(-1); }
-  emit_fn(K_LOCATE, 0);
+  n = 0;
+  while (n < 3 && accept(TK_COMMA)) { opt_int(); n++; }
+  emit_fn(K_LOCATE, n);
   if (!at_end()) bad_token();
 }
 
@@ -935,7 +961,7 @@ int fn_inkeys() { next(); emit_fn(K_INKEYS, 0); return T_STR; }
 
 // ---------------------------------------------------------------- registration
 void io_init() {
-  ostack = malloc(OSTACK * 4); onsp = 0;
+  ostack = mem_alloc(OSTACK * 4); onsp = 0;
   cur_fg = 7; cur_bg = 0;
   kqn = 0;
   stmt_tab[K_CLS] = st_cls; fnop[K_CLS] = h_cls;
@@ -987,5 +1013,9 @@ void io_free() {
   files_close_all();
   if (ostack) free(ostack);
   ostack = 0;
+  con_restore();
+}
+
+void con_restore() {
   if (cur_fg != 7 || cur_bg != 0) { conctl(CON_COLOR, 7, 0); cur_fg = 7; cur_bg = 0; }
 }

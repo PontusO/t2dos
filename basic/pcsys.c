@@ -23,6 +23,7 @@
 #undef chdir
 #undef getcwd
 #undef malloc
+#undef free
 #undef sleep
 #undef kill
 
@@ -68,9 +69,24 @@ int t2_millis(void) {
 
 int t2_sleep(int ms) { if (ms > 0) usleep(ms * 1000); return 0; }
 
+// Memory as on the board: PSRAM of BASIC_PSRAM bytes (8 MB if not set in the environment), of
+// which what the interpreter holds is not free; malloc fails beyond BASIC_MALLOC_CAP bytes
+// held (no limit if not set: set below the PSRAM size it tests malloc returning 0).
+int t2_live;                     // bytes the interpreter holds (t2_malloc less t2_free)
+int t2_psram = -1;
+int t2_cap = -1;
+
+void t2_mem_env(void) {
+  char *e;
+  if (t2_psram >= 0) return;
+  e = getenv("BASIC_PSRAM"); t2_psram = e ? atoi(e) : 8 * 1024 * 1024;
+  e = getenv("BASIC_MALLOC_CAP"); t2_cap = e ? atoi(e) : 0x7fffffff;
+}
+
 int t2_sysinfo(int kind) {
-  if (kind == INFO_PSRAM_TOTAL) return 8 * 1024 * 1024;
-  if (kind == INFO_PSRAM_FREE) return 8 * 1024 * 1024;
+  t2_mem_env();
+  if (kind == INFO_PSRAM_TOTAL) return t2_psram;
+  if (kind == INFO_PSRAM_FREE) return t2_psram > t2_live ? t2_psram - t2_live : 0;
   if (kind == INFO_SRAM_FREE) return 370 * 1024;
   if (kind == INFO_CONSOLE) return 1;
   return 0;
@@ -182,7 +198,24 @@ int t2_closedir(int d) {
 
 int t2_mkpipe(char *name) { return -1; }
 
-void *t2_malloc(int n) { return calloc(1, n > 0 ? n : 1); }   // T2DOS malloc zeroes
+// T2DOS malloc zeroes. 8 bytes in front of each block hold its size, for t2_free.
+void *t2_malloc(int n) {
+  char *p;
+  t2_mem_env();
+  if (n < 0 || n > t2_cap - t2_live) return 0;
+  p = calloc(1, n + 8);
+  if (!p) return 0;
+  *(int *)p = n; t2_live += n;
+  return p + 8;
+}
+
+void t2_free(void *b) {
+  char *p;
+  if (!b) return;
+  p = (char *)b - 8;
+  t2_live -= *(int *)p;
+  free(p);
+}
 
 int t2_printf(char *fmt, ...) {
   char buf[4096]; va_list ap; int n;

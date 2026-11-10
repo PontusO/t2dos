@@ -48,6 +48,7 @@ struct job_t;
 #define getcwd t2_getcwd
 #define mkpipe t2_mkpipe
 #define malloc t2_malloc
+#define free t2_free
 #define printf t2_printf
 #define gpio_mode t2_gpio_mode
 #define gpio_write t2_gpio_write
@@ -87,6 +88,7 @@ int t2_chdir(char *path);
 char *t2_getcwd(char *buf, int n);
 int t2_mkpipe(char *name);
 void *t2_malloc(int n);
+void t2_free(void *b);
 int t2_printf(char *fmt, ...);
 int t2_gpio_mode(int pin, int mode);
 int t2_gpio_write(int pin, int v);

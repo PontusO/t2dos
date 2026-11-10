@@ -1,0 +1,3 @@
+ 1023 
+filelong.bas:8: Line buffer overflow
+exit 1

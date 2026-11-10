@@ -76,7 +76,7 @@ void end_proc(int isfn);
 
 int *grow(int *p, int n, int cap) {
   int *q;
-  q = malloc(cap * 4);
+  q = mem_alloc(cap * 4);
   if (p) { memcpy(q, p, n * 4); free(p); }
   return q;
 }
@@ -164,12 +164,12 @@ int sym_add(char *uname, int suf, int kind, int type) {
   struct Sym *n; int h;
   if (nsym >= capsym) {
     capsym = capsym * 2 + 64;
-    n = malloc(capsym * sizeof(struct Sym));
+    n = mem_alloc(capsym * sizeof(struct Sym));
     if (syms) { memcpy(n, syms, nsym * sizeof(struct Sym)); free(syms); }
     syms = n;
   }
   n = &syms[nsym];
-  n->uname = malloc(strlen(uname) + 1); strcpy(n->uname, uname);
+  n->uname = mem_alloc(strlen(uname) + 1); strcpy(n->uname, uname);
   n->suf = suf; n->kind = kind; n->type = type; n->slot = 0; n->val = 0; n->scope = cur_scope;
   n->cls = C_GLOBAL; n->flags = 0; n->dims = 0;
   h = sym_hash(uname);
@@ -281,7 +281,9 @@ void emit_store(int s) {
 void emit_ref(int s) {
   int c;
   c = syms[s].cls;
-  if (c == C_GLOBAL) { if (syms[s].kind == S_ARR) emit(OP_REFA); else emit(OP_REFI + syms[s].type - T_INT); }
+  if (c == C_GLOBAL) {
+    if (syms[s].kind == S_ARR) emit(OP_REFA); else emit(OP_REFI + syms[s].type - T_INT);
+  }
   else if (c == C_LOCAL) emit(OP_LREF);
   else emit(OP_LLD);
   emit_arg(syms[s].slot);
@@ -327,8 +329,14 @@ int arith(int l, int r, int opi, int opf) {
 // negate what was compiled from start on: a literal in place, else an op
 int negate(int start, int t) {
   if (t == T_STR) return mismatch();
-  if (ncode == start + 2 && code[start] == OP_PUSHI) { code[start + 1] = 0 - code[start + 1]; return t; }
-  if (ncode == start + 2 && code[start] == OP_PUSHF) { code[start + 1] = code[start + 1] ^ 0x80000000; return t; }
+  if (ncode == start + 2 && code[start] == OP_PUSHI) {
+    code[start + 1] = 0 - code[start + 1];
+    return t;
+  }
+  if (ncode == start + 2 && code[start] == OP_PUSHF) {
+    code[start + 1] = code[start + 1] ^ 0x80000000;
+    return t;
+  }
   if (t == T_INT) emit(OP_NEGI); else emit(OP_NEGF);
   return t;
 }
@@ -620,7 +628,10 @@ void st_const() {
   while (1) {
     if (TK != TK_ID) { bad_token(); return; }
     upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
-    if (sym_in(u, 0, S_CONST, cur_scope) >= 0 || var_named(u, cur_scope)) { cerr("Duplicate definition"); return; }
+    if (sym_in(u, 0, S_CONST, cur_scope) >= 0 || var_named(u, cur_scope)) {
+      cerr("Duplicate definition");
+      return;
+    }
     next();
     if (!need(TK_EQ)) return;
     start = ncode;
@@ -715,7 +726,7 @@ int blk_expect(int kind, char *msg) {
 
 char *dupstr(char *s) {
   char *d;
-  d = malloc(strlen(s) + 1); strcpy(d, s);
+  d = mem_alloc(strlen(s) + 1); strcpy(d, s);
   return d;
 }
 
@@ -736,7 +747,8 @@ void define_label() {
     lb_name = grow(lb_name, nlb, caplb); lb_scope = grow(lb_scope, nlb, caplb);
     lb_pos = grow(lb_pos, nlb, caplb); lb_data = grow(lb_data, nlb, caplb);
   }
-  lb_name[nlb] = (int)dupstr(u); lb_scope[nlb] = cur_scope; lb_pos[nlb] = ncode; lb_data[nlb] = ndata;
+  lb_name[nlb] = (int)dupstr(u); lb_scope[nlb] = cur_scope;
+  lb_pos[nlb] = ncode; lb_data[nlb] = ndata;
   nlb++;
   next(); next();
 }
@@ -981,7 +993,8 @@ void st_exit() {
   i = nblk - 1;
   while (i >= 0 && blk[i].kind != k) i--;
   if (i < 0) {
-    if (k == B_FOR) cerr("EXIT FOR not within FOR...NEXT"); else cerr("EXIT DO not within DO...LOOP");
+    if (k == B_FOR) cerr("EXIT FOR not within FOR...NEXT");
+    else cerr("EXIT DO not within DO...LOOP");
     return;
   }
   next();
@@ -992,8 +1005,9 @@ void st_exit() {
 
 // ---------------------------------------------------------------- SELECT CASE
 // The value is kept in a hidden variable (a local inside a SUB/FUNCTION, so a recursive
-// call made by a CASE test has its own). Block: a = its symbol, b = jumps to END SELECT, c = the jump to the next CASE (-1: none),
-// d = 0 before the first CASE, 1 after a CASE, 2 after CASE ELSE, e = the value's type.
+// call made by a CASE test has its own). Block: a = its symbol, b = jumps to END SELECT,
+// c = the jump to the next CASE (-1: none), d = 0 before the first CASE, 1 after a CASE,
+// 2 after CASE ELSE, e = the value's type.
 void select_load(struct Blk *b) { emit_load(b->a); }
 
 void st_select() {
@@ -1209,12 +1223,23 @@ int parse_as() {
   return c;
 }
 
+// immediate mode: the symbols as they were before the line (see comp_line_mark)
+int mk_nsym;
+int mk_nslot[4];
+char mk_defsuf[26];
+int *mk_flags;
+int *mk_dims;
+int mk_cap;
+
 int dim_array(char *u, int suf, int as, int nd, int mask, int redim, int shared) {
-  int s; int k;
+  int s; int k; int fresh;
   k = suf;
   if (as) k = as;
   s = arr_find(u, k, redim);
-  if (s >= 0) {
+  // immediate mode: an array of an earlier line that has no block (its DIM never ran, the
+  // line stopped first) may be dimensioned; OP_DIM checks the cell when it runs
+  fresh = s >= 0 && imm_mode && s < mk_nsym && syms[s].cls == C_GLOBAL && !avar[syms[s].slot];
+  if (s >= 0 && !fresh) {
     if (!redim || (syms[s].flags & F_IMPL)) { cerr("Array already dimensioned"); return 0; }
     if (syms[s].dims && syms[s].dims != nd) { cerr("Wrong number of dimensions"); return 0; }
   }
@@ -1236,8 +1261,8 @@ int dim_var(char *u, int suf, int as, int shared) {
   k = suf;
   if (!k) k = defsuf[u[0] - 'A'];
   if (as) k = as;
-  if (const_find(u) >= 0 || (as && var_named(u, cur_scope)) || sym_in(u, k, S_VAR, cur_scope) >= 0 ||
-      sym_in(u, -1, S_VAR, cur_scope) >= 0) {
+  if (const_find(u) >= 0 || (as && var_named(u, cur_scope)) ||
+      sym_in(u, k, S_VAR, cur_scope) >= 0 || sym_in(u, -1, S_VAR, cur_scope) >= 0) {
     cerr("Duplicate definition");
     return 0;
   }
@@ -1300,7 +1325,7 @@ int proc_add(char *u, int suf, int isfn) {
   struct Proc *n; int k;
   if (nproc >= capproc) {
     capproc = capproc * 2 + 16;
-    n = malloc(capproc * sizeof(struct Proc));
+    n = mem_alloc(capproc * sizeof(struct Proc));
     if (procs) { memcpy(n, procs, nproc * sizeof(struct Proc)); free(procs); }
     procs = n;
   }
@@ -1441,7 +1466,7 @@ void end_proc(int isfn) {
   pr = &procs[cur_proc];
   emit(OP_RET); emit_arg(cur_proc);
   pr->ncell = cur_ncell;
-  pr->tags = malloc(cur_ncell + 1);
+  pr->tags = mem_alloc(cur_ncell + 1);
   if (pr->isfn && pr->type == T_STR) pr->tags[0] = 1;
   for (i = 0; i < nsym; i++)
     if (syms[i].scope == cur_scope && syms[i].cls == C_LOCAL) {
@@ -1563,7 +1588,8 @@ void st_input() {
     next(); next();
   }
   nv = 1; d = 0; i = tp;
-  while (toks[i].tk != TK_EOL && toks[i].tk != TK_EOF && toks[i].tk != TK_COLON && toks[i].tk != K_ELSE) {
+  while (toks[i].tk != TK_EOL && toks[i].tk != TK_EOF && toks[i].tk != TK_COLON &&
+         toks[i].tk != K_ELSE) {
     if (toks[i].tk == TK_LPAR) d++;
     else if (toks[i].tk == TK_RPAR) d--;
     else if (toks[i].tk == TK_COMMA && d == 0) nv++;
@@ -1668,6 +1694,7 @@ int compile() {
   }
   if (n > vmargin) vmargin = n;
   vmargin = 2 * vmargin + 64;
+  compiling = 1;
   proc_scan();
   tp = 0; depth = 0; const_mode = 0;
   while (TK != TK_EOF) {
@@ -1680,6 +1707,7 @@ int compile() {
   if (!nerr && nblk > 0) err_line(blk[nblk - 1].line, unclosed(blk[nblk - 1].kind));
   if (!nerr && cur_proc >= 0) err_line(procs[cur_proc].line, proc_unclosed(cur_proc));
   if (!nerr) resolve_labels();
+  compiling = 0;
   return nerr == 0;
 }
 
@@ -1701,7 +1729,8 @@ int comp_init() {
   stmt_tab[K_LINE] = st_line;
   stmt_tab[K_INPUT] = st_input;
   stmt_tab[K_MIDS] = st_unsup;          // the MID$ statement form
-  stmt_tab[K_TIMER] = st_unsup;         // TIMER ON / TIMER OFF (TIMER the function is an expression)
+  stmt_tab[K_TIMER] = st_unsup;         // TIMER ON / TIMER OFF (TIMER, the function, is an
+                                        // expression)
   stmt_tab[K_IF] = st_if;
   stmt_tab[K_ELSEIF] = st_elseif;
   stmt_tab[K_ELSE] = st_else;
@@ -1729,9 +1758,53 @@ int comp_init() {
   stmt_tab[K_FUNCTION] = st_sub;
   stmt_tab[K_CALL] = st_call;
   stmt_tab[K_DECLARE] = st_declare;
-  blk = malloc(256 * sizeof(struct Blk)); nblk = 0;
+  stmt_tab[K_SHARED] = st_unsup;        // SHARED x inside a SUB (DIM SHARED is supported)
+  stmt_tab[K_RUN] = st_unsup;           // RUN in a program (immediate mode's RUN "file" is
+                                        // main.c's)
+  blk = mem_alloc(256 * sizeof(struct Blk)); nblk = 0;
   cur_scope = 0; cur_proc = -1; scanning = 0;
   return 0;
+}
+
+// Immediate mode keeps the symbols from line to line, so a line must not leave symbol state
+// that the run did not make true. comp_line_mark() notes the state before the line;
+// comp_line_undo() puts it back after a line that did not compile (its new symbols and slots,
+// DEFtype letters and array flags dropped); comp_line_settle() after a line that ran: a global
+// array with no block (its DIM was not reached, the line stopped first) gets its flags and
+// dimension count back, so it can be dimensioned or used without DIM again.
+void comp_line_mark() {
+  int i;
+  if (nsym > mk_cap) {
+    if (mk_flags) { free(mk_flags); free(mk_dims); }
+    mk_cap = nsym + 64;
+    mk_flags = mem_alloc(mk_cap * 4); mk_dims = mem_alloc(mk_cap * 4);
+  }
+  for (i = 0; i < nsym; i++) { mk_flags[i] = syms[i].flags; mk_dims[i] = syms[i].dims; }
+  mk_nsym = nsym;
+  for (i = 0; i < 4; i++) mk_nslot[i] = nslot[i];
+  for (i = 0; i < 26; i++) mk_defsuf[i] = defsuf[i];
+}
+
+void comp_line_undo() {
+  int i;
+  for (i = nsym - 1; i >= mk_nsym; i--) {        // newest first: each is its chain's head
+    symhash[sym_hash(syms[i].uname)] = syms[i].link;
+    if (syms[i].kind == S_CONST && syms[i].type == T_STR) str_free((char *)syms[i].val);
+    free(syms[i].uname);
+  }
+  nsym = mk_nsym;
+  for (i = 0; i < nsym; i++) { syms[i].flags = mk_flags[i]; syms[i].dims = mk_dims[i]; }
+  for (i = 0; i < 4; i++) nslot[i] = mk_nslot[i];
+  for (i = 0; i < 26; i++) defsuf[i] = mk_defsuf[i];
+}
+
+void comp_line_settle() {
+  int i;
+  for (i = 0; i < nsym; i++) {
+    if (syms[i].kind != S_ARR || syms[i].cls != C_GLOBAL || avar[syms[i].slot]) continue;
+    if (i < mk_nsym) { syms[i].flags = mk_flags[i]; syms[i].dims = mk_dims[i]; }
+    else { syms[i].flags = syms[i].flags & ~(F_DIMMED | F_IMPL); syms[i].dims = 0; }
+  }
 }
 
 void comp_line_reset() {
@@ -1767,5 +1840,7 @@ void comp_free() {
   d_item = 0; d_quoted = 0; ndata = 0; capdata = 0; blk = 0; nblk = 0;
   if (lm_pos) { free(lm_pos); free(lm_line); }
   syms = 0; nsym = 0; capsym = 0; code = 0; ncode = 0; capcode = 0;
+  if (mk_flags) { free(mk_flags); free(mk_dims); }
+  mk_flags = 0; mk_dims = 0; mk_cap = 0; mk_nsym = 0;
   lm_pos = 0; lm_line = 0; nlm = 0; caplm = 0;
 }

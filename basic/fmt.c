@@ -74,7 +74,10 @@ int fmt_sng(char *buf, float f) {
   }
   else if (e >= 0) {
     for (i = 0; i <= e; i++) { if (i < nd) buf[n] = '0' + d[i]; else buf[n] = '0'; n++; }
-    if (nd > e + 1) { buf[n] = '.'; n++; for (i = e + 1; i < nd; i++) { buf[n] = '0' + d[i]; n++; } }
+    if (nd > e + 1) {
+      buf[n] = '.'; n++;
+      for (i = e + 1; i < nd; i++) { buf[n] = '0' + d[i]; n++; }
+    }
   }
   else {
     buf[n] = '.'; n++;
@@ -88,11 +91,13 @@ int fmt_sng(char *buf, float f) {
 // Compare the decimal number d[0..nd) * 10^(e - nd + 1) (d[0] != 0) with the point halfway
 // between the float with bit pattern b and its neighbour above (dir 1) or below (dir -1).
 int cmp_mid(char *d, int nd, int e, int b, int dir) {
-  char md[200]; int ex; int mant; int m; int e2; int mm; int ee; int mn; int p; int me; int i; int x; int y;
+  char md[200]; int ex; int mant; int m; int e2; int mm; int ee; int mn; int p; int me;
+  int i; int x; int y;
   ex = (b >> 23) & 255; mant = b & 0x7FFFFF;
   if (ex == 0) { m = mant; e2 = -149; } else { m = mant | 0x800000; e2 = ex - 150; }
   if (dir > 0) { mm = 2 * m + 1; ee = e2 - 1; }
-  else if (ex > 1 && mant == 0) { mm = 4 * m - 1; ee = e2 - 2; }   // the gap below a power of 2 is half as wide
+  else if (ex > 1 && mant == 0) { mm = 4 * m - 1; ee = e2 - 2; }   // the gap below a power
+                                                                     // of 2 is half as wide
   else { mm = 2 * m - 1; ee = e2 - 1; }
   mn = dec_exact(mm, ee, md, &p);
   me = mn - 1 + p;

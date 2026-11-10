@@ -1,0 +1,39 @@
+T2DOS BASIC
+Ok
+PRINT 1/0: DIM a(5)
+LINE 1: Division by zero
+Ok
+DIM a(5)
+Ok
+a(1) = 3: PRINT a(1); UBOUND(a)
+ 3  5 
+Ok
+PRINT 1/0: b(2) = 1
+LINE 1: Division by zero
+Ok
+DIM b(3)
+Ok
+PRINT UBOUND(b)
+ 3 
+Ok
+DIM c(4): PRINT (
+LINE 1: Syntax error
+Ok
+c(9) = 2: PRINT c(9)
+ 2 
+Ok
+DIM d(2): x = "s"
+LINE 1: Type mismatch
+Ok
+DIM d(2)
+Ok
+PRINT UBOUND(d)
+ 2 
+Ok
+IF 0 THEN DIM e(7)
+Ok
+DIM e(7): PRINT UBOUND(e)
+ 7 
+Ok
+SYSTEM
+exit 0

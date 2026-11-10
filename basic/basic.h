@@ -2,9 +2,10 @@
 //
 // Files: main.c (command line, loading, error messages, console output), lex.c (source to
 // tokens), comp.c (tokens to bytecode; every load-time check), vm.c (runs the bytecode),
-// io.c (keys, INPUT, screen and board statements), fmt.c (numbers to and from text), pcsys.h/pcsys.c (PC build only: the T2DOS
-// library on top of libc). Written in the T2DOS C subset (no static, const, do/while, goto,
-// struct assignment, own variadics, doubles, 64-bit ints): cc builds it for the board.
+// io.c (keys, INPUT, screen and board statements), fmt.c (numbers to and from text),
+// pcsys.h/pcsys.c (PC build only: the T2DOS library on top of libc). Written in the T2DOS C
+// subset (no static, const, do/while, goto, struct assignment, own variadics, doubles, 64-bit
+// ints): cc builds it for the board.
 //
 // How a program runs: lex() turns the whole file into tokens, compile() turns the tokens into
 // bytecode (types, variables and constants resolved; any error stops the load before
@@ -189,7 +190,7 @@ extern int nsym;
 // (0: no array yet). Subscripts are checked against every dimension (Subscript out of
 // range); at most 8 dimensions.
 #define ARR_DIMS 8
-int *arr_new(int type, int nd, int *lo, int *len);   // 0 if there is no memory
+int *arr_new(int type, int nd, int *lo, int *len);   // 0 if over 4,000,000 elements
 void arr_free(int *a);
 
 // ---------------------------------------------------------------- SUB and FUNCTION
@@ -226,6 +227,9 @@ int compile();                   // the whole token list, then OP_END; returns n
 void comp_free();
 void comp_line_reset();          // immediate mode: forget the last line's code, labels, DATA and
                                  // procedures; the symbols and their slots stay
+void comp_line_mark();           // immediate mode: note the symbols before a line,
+void comp_line_undo();           // drop what a line that failed to compile added,
+void comp_line_settle();         // and after a line ran, unmark arrays whose DIM did not run
 int emit(int op);                // append; returns the position written
 int emit_arg(int v);
 int expr();                      // compile an expression; returns its type
@@ -308,20 +312,24 @@ void io_line_reset();            // immediate mode: after a line, an aborted INP
 extern int kq[64];               // the key queue (main.c keeps it across RUN)
 extern int kqn;
 int read_line();                 // a line from the console into linebuf / linen, echoed
-extern char linebuf[256];
+#define LINE_MAX 1023            // the longest line INPUT and INPUT # take (else the error
+                                 // Line buffer overflow)
+extern char linebuf[LINE_MAX + 1];
 extern int linen;
 void io_free();                  // at the end: strings an aborted INPUT left, colours back,
                                  // every file closed
+void con_restore();              // colours back to normal (COLOR 7, 0) if a program changed them
 // Files (io.c): file numbers 1 to 15. PRINT #n and WRITE #n send their items to the file by
 // switching the output target for the statement: an OP_FN K_PRINT op before the items
 // (out_push: the target is saved on a stack, out_fd is the file's descriptor, out_col that
 // target's column), another after them (out_pop). Every SUB / FUNCTION call pushes the console
 // and its return pops, so what a called function prints never goes to the caller's file. A
 // CLOSE of a file that a pending pop returns to makes that pop the error Bad file number.
-// out_reset() clears the stack when an error or Ctrl-C ends the program in between. INPUT #n and LINE INPUT
-// #n read through a 512-byte buffer per file. On a pipe /pipe/NAME a read waits for data
-// by polling stat() (so Ctrl-C works); a message end is a 0 read that sets EOF(n) (EOF on a pipe with nothing buffered waits for the next read), and the
-// next input statement then waits for the next message.
+// out_reset() clears the stack when an error or Ctrl-C ends the program in between. INPUT #n
+// and LINE INPUT #n read through a 512-byte buffer per file. On a pipe /pipe/NAME a read
+// waits for data by polling stat() (so Ctrl-C works); a message end is a 0 read that sets
+// EOF(n) (EOF on a pipe with nothing buffered waits for the next read), and the next input
+// statement then waits for the next message.
 extern int out_fd;               // the descriptor out_flush() writes to; 0 is the console
 void out_reset();                // output back to the console, stack cleared
 void out_push(int idx);          // output to target idx (0 console, else a file number)
@@ -331,8 +339,7 @@ void out_pop();                  // back to the target before the matching out_p
 extern int cmd_read;             // 1 only while immediate mode reads its command line: there
                                  // read_line() returns 0 at the end of the input and a ^C ends
                                  // the line; INPUT in a running line breaks / errors as usual
-extern int imm_mode;             // 1 in immediate mode: messages say LINE n, not FILE:n; read_line()
-                                 // 
+extern int imm_mode;             // 1 in immediate mode: messages say LINE n, not FILE:n
 extern char *srcname;            // the program's file name as given, for messages
 extern int nerr;                 // errors so far (only the first is reported)
 extern int prog_argc;            // the arguments after the file name (COMMAND$, Task 7)
@@ -340,7 +347,10 @@ extern char **prog_argv;
 int err_line(int line, char *msg);  // print FILE:LINE: MSG once, stop compiling and running
 int err_at(int pos, char *msg);     // the same for a bytecode position
 int brk_at(int pos);                // Ctrl-C: `Break at FILE:LINE`, stops the program (exit 1)
-extern int out_col;              // console column of the next character (0 = line start)
+extern int out_col;              // column of the next character (0 = line start)
+extern int out_row;              // the console's cursor row (0 = top), see main.c
+extern int compiling;            // 1 while compile() runs (an out of memory has its line)
+void *mem_alloc(int n);          // every allocation: never 0, out of memory ends BASIC (main.c)
 void out_char(int c);
 void out_str(char *s, int n);
 void out_cstr(char *s);

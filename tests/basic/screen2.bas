@@ -1,0 +1,5 @@
+CLS: PRINT "a": PRINT "b";: LOCATE , 10: PRINT "c"
+PRINT "xy";: LOCATE 6: PRINT "d"
+LOCATE 5, 1, 0, 6, 7: PRINT "e"
+LOCATE , , 1
+LOCATE 2, 3, 1, 4

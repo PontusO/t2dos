@@ -237,10 +237,14 @@ void h_randomize() {
   else rnd_seed(millis());
 }
 
+// TIMER: seconds since the start, from millis() as unsigned (it passes 2^31 after 24.8
+// days); whole seconds and milliseconds are split in integers so the float is s + ms / 1000
 void h_timer() {
-  float f;
-  f = millis();
-  sp++; fs[sp] = f / 1000;
+  unsigned u; int sec; int ms; float f; float g;
+  u = millis();
+  sec = u / 1000; ms = u % 1000;
+  f = ms; f = f / 1000; g = sec; f = f + g;
+  sp++; fs[sp] = f;
 }
 
 // arrays (the layout is in basic.h): dimension d's lower bound is a[1 + 2d], its length a[2 + 2d]

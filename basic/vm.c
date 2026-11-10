@@ -29,7 +29,7 @@ int nproc;
 char *str_new(int len) {
   int *b;
   if (len <= 0) return 0;
-  b = malloc(len + 5);           // length, data, a 0 (malloc zeroes)
+  b = mem_alloc(len + 5);           // length, data, a 0 (malloc zeroes)
   b[0] = len;
   return (char *)(b + 1);
 }
@@ -86,7 +86,11 @@ void op_ldf() { sp++; fs[sp] = fvar[code[pc]]; pc++; }
 void op_lds() { sp++; vs[sp] = (int)str_dup(svar[code[pc]]); vt[sp] = 1; pc++; }
 void op_sti() { ivar[code[pc]] = vs[sp]; sp--; pc++; }
 void op_stf() { fvar[code[pc]] = fs[sp]; sp--; pc++; }
-void op_sts() { int n; n = code[pc]; pc++; str_free(svar[n]); svar[n] = (char *)vs[sp]; vt[sp] = 0; sp--; }
+void op_sts() {
+  int n;
+  n = code[pc]; pc++;
+  str_free(svar[n]); svar[n] = (char *)vs[sp]; vt[sp] = 0; sp--;
+}
 void op_refi() { sp++; vs[sp] = (int)&ivar[code[pc]]; pc++; }
 void op_reff() { sp++; vs[sp] = (int)&fvar[code[pc]]; pc++; }
 void op_refs() { sp++; vs[sp] = (int)&svar[code[pc]]; pc++; }
@@ -248,8 +252,8 @@ void op_jz() { int v; v = vs[sp]; sp--; if (v == 0) pc = code[pc]; else pc++; }
 void op_jnz() { int v; v = vs[sp]; sp--; if (v != 0) pc = code[pc]; else pc++; }
 
 // The frame of this kind nearest the top, as the index of its top word, or 0. kind CK_FOR
-// looks for the loop variable addr, but not below a GOSUB frame; CK_GOSUB for any GOSUB. Frames of other kinds end the
-// search (a SUB call hides the frames of its caller).
+// looks for the loop variable addr, but not below a GOSUB frame; CK_GOSUB for any GOSUB.
+// Frames of other kinds end the search (a SUB call hides the frames of its caller).
 int cs_find(int kind, int addr) {
   int i; int k;
   i = csp;
@@ -376,8 +380,7 @@ int *arr_new(int type, int nd, int *lo, int *len) {
     if (n > 4000000 / len[i]) return 0;
     n = n * len[i];
   }
-  a = malloc((3 + 2 * nd + n) * 4);
-  if (!a) return 0;
+  a = mem_alloc((3 + 2 * nd + n) * 4);
   a[0] = type; a[1] = nd; a[2] = n;
   for (i = 0; i < nd; i++) { a[3 + 2 * i] = lo[i]; a[4 + 2 * i] = len[i]; }
   return a;
@@ -405,7 +408,8 @@ int arr_in_use(int *a) {
 
 // OP_ELEM: the array cell's address and nd subscripts become the element's address
 void op_elem() {
-  int nd; int it; int **cell; int *a; int i; int d; int x; int off; int lo[ARR_DIMS]; int len[ARR_DIMS];
+  int nd; int it; int **cell; int *a; int i; int d; int x; int off;
+  int lo[ARR_DIMS]; int len[ARR_DIMS];
   nd = code[pc]; it = code[pc + 1]; pc = pc + 2;
   if (nd > ARR_DIMS) { vm_err("Too many dimensions"); return; }
   cell = (int **)vs[sp - nd];
@@ -598,9 +602,9 @@ void op_restore() { dptr = code[pc]; pc++; }
 
 // ---------------------------------------------------------------- the machine
 int vm_init() {
-  vs = malloc(VSTACK * 4); fs = (float *)vs; sp = 0;
-  vt = malloc(VSTACK);
-  cs = malloc(CSTACK * 4); csp = 0;
+  vs = mem_alloc(VSTACK * 4); fs = (float *)vs; sp = 0;
+  vt = mem_alloc(VSTACK);
+  cs = mem_alloc(CSTACK * 4); csp = 0;
   optab[OP_END] = op_end; optab[OP_HALT] = op_end;
   optab[OP_PUSHI] = op_pushi; optab[OP_PUSHF] = op_pushi; optab[OP_PUSHS] = op_pushs;
   optab[OP_LDI] = op_ldi; optab[OP_LDF] = op_ldf; optab[OP_LDS] = op_lds;
@@ -631,9 +635,12 @@ int vm_init() {
   optab[OP_RESTORE] = op_restore;
   optab[OP_LLD] = op_lld; optab[OP_LLDS] = op_llds; optab[OP_LST] = op_lst;
   optab[OP_LSTS] = op_lsts; optab[OP_LREF] = op_lref;
-  optab[OP_PLD] = op_pld; optab[OP_PLDS] = op_plds; optab[OP_PST] = op_pst; optab[OP_PSTS] = op_psts;
-  optab[OP_LDA] = op_lda; optab[OP_LDAS] = op_ldas; optab[OP_STA] = op_sta; optab[OP_STAS] = op_stas;
-  optab[OP_REFA] = op_refa; optab[OP_ELEM] = op_elem; optab[OP_DIM] = op_dim; optab[OP_ERASE] = op_erase;
+  optab[OP_PLD] = op_pld; optab[OP_PLDS] = op_plds;
+  optab[OP_PST] = op_pst; optab[OP_PSTS] = op_psts;
+  optab[OP_LDA] = op_lda; optab[OP_LDAS] = op_ldas;
+  optab[OP_STA] = op_sta; optab[OP_STAS] = op_stas;
+  optab[OP_REFA] = op_refa; optab[OP_ELEM] = op_elem;
+  optab[OP_DIM] = op_dim; optab[OP_ERASE] = op_erase;
   optab[OP_BYVAL] = op_byval; optab[OP_CALL] = op_call; optab[OP_RET] = op_ret;
   dptr = 0; fbase = 0; calls = 0;
   return 0;
@@ -644,7 +651,7 @@ int vm_init() {
 int *cells(int *old, int have, int n) {
   int *p;
   if (n <= have && old) return old;
-  p = malloc((n + 1) * 4);
+  p = mem_alloc((n + 1) * 4);
   if (old) { memcpy(p, old, have * 4); free(old); }
   return p;
 }

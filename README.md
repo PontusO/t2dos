@@ -1132,10 +1132,17 @@ Break at loop.bas:2
 (`loop.bas` is `DO`, `n = n + 1`, `LOOP`.)
 
 The program's memory is freed at the end, also after an error or a break.
+A program that runs out of memory stops with `Out of memory` at its line and
+`basic` ends with exit code 1. Its variables live in PSRAM, and `basic`
+stops while 64 KB of it are still free, so the system keeps its own memory.
 Keys you type while a program runs wait in a queue (up to 64) for `INKEY$`,
 `INPUT` and `SLEEP`. The interpreter gives other tasks a turn often enough
 that a BASIC program never freezes the board, and `basic prog.bas &` runs it
-as a [background job](#background-jobs).
+as a [background job](#background-jobs). Every run of `basic` loads
+`basic.bin` (about 176 KB) into the SRAM that programs run from, so two BASIC
+jobs fit beside each other but a third does not start. For the same reason a
+program started with `^R` in `edit` that runs `SHELL "cc ..."` can run out of
+program memory: `edit`, `basic` and `cc` are then all loaded at once.
 
 ### Writing and running a program in edit
 
@@ -1236,6 +1243,7 @@ FOR i = 1 TO 5
   PINWRITE led, 0
   PAUSE 200
 NEXT
+PRINT "Done."
 ```
 
 **words.bas** counts the lines, words and characters of the text file given
@@ -1281,7 +1289,8 @@ CLOSE
 ```
 
 Saved as `shout.bas`, it runs as a job and is used from the shell (`basic`
-is the job's name):
+is the job's name; at most two BASIC jobs fit in program memory, see
+[Running programs](#running-programs)):
 
 ```
 /src> basic shout.bas &
@@ -1377,15 +1386,22 @@ strings, and strings compare by character codes. Number literals are `12`,
   that keeps the cursor on the line, `TAB(n)` and `SPC(n)`.
 - `INPUT ["prompt";] v1, v2, ...` asks again with `?Redo from start` when
   the answer does not fit; `INPUT "prompt", v` leaves out the `?`.
-  `LINE INPUT ["prompt";] s$` takes the whole line.
+  `LINE INPUT ["prompt";] s$` takes the whole line. A typed line can be
+  up to 1023 characters long; a longer one is the error `Line buffer
+  overflow`.
 - `INKEY$` returns the next key or `""`. The arrow and other special keys
   come as QBasic's two characters: `CHR$(0) + "H"` (up), `"P"` (down), `"K"`
   (left), `"M"` (right) and the codes for Home, End, PgUp, PgDn, Ins, Del.
-- `CLS`, `LOCATE row, col` (1-based), `COLOR fg [, bg]` with QBasic's colour
-  numbers (0 black, 1 blue, 2 green, 3 cyan, 4 red, 5 magenta, 6 brown,
-  7 white; 8 to 15 look the same as 0 to 7), `BEEP`, `SLEEP [seconds]` (without a number it
+- `CLS`, `LOCATE [row] [, col]` (1-based; a row or column left out stays
+  where the cursor is), `COLOR fg [, bg]` with QBasic's colour numbers
+  (0 black, 1 blue, 2 green, 3 cyan, 4 red, 5 magenta, 6 brown, 7 white; 8 to
+  15 look the same as 0 to 7), `BEEP`, `SLEEP [seconds]` (without a number it
   waits for a key; the key stays in the queue), `WIDTH` (accepted, no
-  effect).
+  effect). QBasic's cursor arguments of `LOCATE` (`LOCATE row, col, cursor,
+  start, stop`) are accepted and have no effect: the console cannot hide or
+  shape the cursor. `basic` counts the cursor's row from what it prints, so
+  `LOCATE , col` is right after a `CLS` or a `LOCATE` with a row; before
+  either it takes the top row as the start.
 
 How numbers print is the part of QBasic that is easiest to get wrong, and
 `basic` follows it. A positive number has a space before it and every number
@@ -1417,7 +1433,9 @@ prints
 - `OPEN f$ FOR INPUT|OUTPUT|APPEND AS #n`, `CLOSE [#n, ...]` (without a
   number all files), `PRINT #n, ...`, `WRITE #n, ...` (quoted strings and
   commas), `INPUT #n, ...`, `LINE INPUT #n, s$`, `EOF(n)` and `FREEFILE`.
-  `WRITE` without `#` writes to the screen.
+  `WRITE` without `#` writes to the screen. `INPUT #` reads lines of up to
+  1023 characters and `LINE INPUT #` lines of up to 32767; a longer line is
+  the error `Line buffer overflow`.
 - Paths are T2DOS paths, relative to the current directory. A `\` in a path
   counts as `/`, so QBasic-style names work.
 - `KILL f$`, `NAME old$ AS new$`, `MKDIR`, `RMDIR`, `CHDIR` and
@@ -1436,7 +1454,8 @@ Numbers: `ABS SGN INT FIX SQR SIN COS TAN ATN EXP LOG RND TIMER CINT CLNG CSNG
 CDBL`. `SQR`, `ATN` and `LOG` (natural) are the [maths
 built-ins](#maths) of the system; `^` with a non-integer exponent uses
 `pow`. `RND` gives a number from 0 up to 1, and `TIMER` the seconds since the
-board started (a float; a millisecond is the resolution).
+board started (a float with about seven digits: milliseconds for the first
+few hours, then coarser).
 
 Strings: `LEN LEFT$ RIGHT$ MID$ INSTR UCASE$ LCASE$ LTRIM$ RTRIM$ STR$ VAL CHR$
 ASC STRING$ SPACE$ HEX$ OCT$`. `INKEY$`, `EOF`, `FREEFILE`, `LBOUND`,
@@ -1463,19 +1482,24 @@ Board access (T2DOS extras, so that a blinking LED is a five-line program):
   the same statement gives `Array in use`, which QBasic does not have.
 - A `NEXT` that belongs to a loop of the caller, written inside a `GOSUB`
   routine, is an error (`NEXT without FOR`).
-- A `SHARED` statement inside a `SUB` is not supported (use `DIM SHARED` at
-  the top), and passing `a()` of an array that was never used gives `Array
-  not defined`.
+- A `SHARED` statement inside a `SUB` gives `Advanced feature unavailable`
+  (use `DIM SHARED` at the top), and passing `a()` of an array that was never
+  used gives `Array not defined`.
+- `RUN` works only at the immediate prompt; inside a program it gives
+  `Advanced feature unavailable`.
 - `DATE$` and `TIME$` do not exist: the board has no clock.
 - Any QBasic statement or function that `basic` does not have stops the
-  program, before it runs, with `Advanced feature unavailable`. Nothing is
-  silently ignored. These are not supported: line numbers; graphics and
-  sound (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, `PAINT`, `DRAW`, `SOUND`,
-  `PLAY`, ...); `TYPE` and `STATIC`, `COMMON`, `CHAIN`; `DEF FN`; `ON ...
-  GOTO`/`GOSUB`; `ON ERROR` and `RESUME`; `PRINT USING`; the `MID$`
-  statement; `PEEK` and `POKE`; random-access and binary files (`GET`, `PUT`,
-  `FIELD`, `LOF`, `SEEK`); `ENVIRON`, `FRE` and the rest of QBasic's
-  hardware and event statements. Networking statements may come later.
+  program, before it runs, with `Advanced feature unavailable`. The few
+  things that are accepted without an effect are listed above: `WIDTH`,
+  `DECLARE` lines and the cursor arguments of `LOCATE`. Two values are
+  clamped instead of refused: `TAB(n)` beyond column 80 goes to column 80,
+  and `SPC(n)` gives at most 255 spaces. These are not supported: line
+  numbers; graphics and sound (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, `PAINT`,
+  `DRAW`, `SOUND`, `PLAY`, ...); `TYPE` and `STATIC`, `COMMON`, `CHAIN`;
+  `DEF FN`; `ON ... GOTO`/`GOSUB`; `ON ERROR` and `RESUME`; `PRINT USING`;
+  the `MID$` statement; `PEEK` and `POKE`; random-access and binary files
+  (`GET`, `PUT`, `FIELD`, `LOF`, `SEEK`); `ENVIRON`, `FRE` and the rest of
+  QBasic's hardware and event statements. Networking statements may come later.
 
 ---
 
@@ -2069,9 +2093,11 @@ features that the previous `cc` already supports.
   the same in every run. That is above the 100,000 per second the design
   asked for. It is the figure for a loop of simple arithmetic; calls, string
   work and output are slower.
-- Size: `basic.bin` is 175,228 bytes (it runs from SRAM, of which about 370 KB
+- Size: `basic.bin` is 179,848 bytes (it runs from SRAM, of which about 370 KB
   are free). The design hoped for well below 100 KB; the language turned out
-  larger, and the size has not been tuned.
+  larger, and the size has not been tuned. Every run loads it into SRAM, so
+  two BASIC background jobs fit and a third does not, and `edit`, `^R` and a
+  program that runs `SHELL "cc ..."` can run out of program memory.
 
 ### Not yet verified, known gaps
 

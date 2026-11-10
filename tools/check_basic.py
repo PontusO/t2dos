@@ -2,9 +2,11 @@
 """Run the BASIC interpreter's test cases (tests/basic/) on the PC or on the board.
 
 A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a last line
-`exit N` (the interpreter's exit code). NAME.in, if present, is the program's stdin. NAME.args, if present, holds the arguments after
-`basic NAME.bas` (an empty NAME.args means `basic` alone, with no file). A NAME.bas without a
-NAME.out is a board-only case run by a function below (pipesrv).
+`exit N` (the interpreter's exit code). NAME.in, if present, is the program's stdin.
+NAME.args, if present, holds the arguments after `basic NAME.bas` (an empty NAME.args means
+`basic` alone, with no file). NAME.env, if present, holds VAR=VALUE lines for the PC run's
+environment (basic/pcsys.c reads BASIC_PSRAM and BASIC_MALLOC_CAP); such a case is PC only.
+A NAME.bas without a NAME.out is a board-only case run by a function below (pipesrv).
 
   check_basic.py --pc      build build/basic-pc (gcc -m32, basic/pcsys.h maps the T2DOS
                            library onto libc) and run every case with `basic-pc NAME.bas`
@@ -25,9 +27,10 @@ NAME.out is a board-only case run by a function below (pipesrv).
                            a program ends (it frees every block the program allocated), so
                            an interpreter leak does not show here: --pc's AddressSanitizer
                            run is the leak check.
-                           Cases that need the PC (screen1: the board's conctl output does
-                           not go through the `>` redirection; inkey1, ctrlc1, esc1, sleep1, sleep2: they feed
-                           stdin at once) are not run on the board. The board key cases
+                           Cases that need the PC (screen1, screen2: the board's conctl
+                           output does not go through the `>` redirection; inkey1, ctrlc1,
+                           esc1, sleep1, sleep2, linelong, immediate6: they feed stdin at
+                           once; a case with a NAME.env) are not run on the board. The board key cases
                            (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20, pipeeof, pipedup, editrun) drive the console directly and
                            run only on the board, after the ordinary cases.
   --only NAME              run only that case (may be given more than once); the board key
@@ -47,7 +50,8 @@ CASES = os.path.join(ROOT, 'tests', 'basic')
 PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
-PC_ONLY = ('screen1', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2')
+PC_ONLY = ('screen1', 'screen2', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2', 'linelong',
+           'immediate6')
 KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20', 'pipeeof', 'pipedup', 'editrun')
 BOARD_ONLY = ('pipesrv',)        # tests/basic/NAME.bas without a NAME.out: only the board runs it
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
@@ -75,6 +79,13 @@ class Case:
         if os.path.exists(p):
             self.args = open(p).read().split()
         self.cmd_args = [] if self.args is None else self.args
+        p = os.path.join(CASES, name + '.env')
+        self.env = {}
+        if os.path.exists(p):
+            for l in open(p).read().split('\n'):
+                if '=' in l:
+                    k, v = l.split('=', 1)
+                    self.env[k.strip()] = v.strip()
 
     def argv(self):
         """the words after the interpreter: the file name, then NAME.args if there is one"""
@@ -130,7 +141,7 @@ def run_pc(cases):
     for c in cases:
         try:
             r = subprocess.run([PC_BIN] + c.argv(), cwd=CASES, input=c.stdin or b'',
-                               capture_output=True, timeout=20)
+                               capture_output=True, timeout=20, env=dict(os.environ, **c.env))
             got = r.stdout.decode('latin-1') + 'exit %d\n' % r.returncode
         except subprocess.TimeoutExpired:
             got = 'TIMEOUT\n'
@@ -146,9 +157,9 @@ def run_asan(cases):
     if not build_pc(ASAN_BIN, ['-g', '-fsanitize=address', '-fno-omit-frame-pointer']):
         print('FAIL: the AddressSanitizer build failed')
         return False
-    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1')
     ok = True
     for c in cases:
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1', **c.env)
         try:
             r = subprocess.run([ASAN_BIN] + c.argv(), cwd=CASES, input=c.stdin or b'',
                                capture_output=True, timeout=120, env=env)
@@ -434,7 +445,7 @@ def run_board(cases, only=()):
     r.b.put(os.path.join(ROOT, 'root', 'bin', 'edit.bin'), '/bin/edit.bin')    # editrun
     for d in ('/src', '/src/basic', BOARD_DIR):
         r.run('mkdir ' + d, 10.0)                    # fails harmlessly when it exists
-    cases = [c for c in cases if c.name not in PC_ONLY]
+    cases = [c for c in cases if c.name not in PC_ONLY and not c.env]
     for c in cases:
         r.b.put(c.bas, '%s/%s.bas' % (BOARD_DIR, c.name))
     r.b.put(os.path.join(CASES, 'pipesrv.bas'), BOARD_DIR + '/pipesrv.bas')

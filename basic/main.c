@@ -11,10 +11,13 @@ char **prog_argv;
 
 // ---------------------------------------------------------------- console output
 // PRINT output collects here and goes out with write() at each end of line, when full, and
-// before a message or the exit; out_col follows the cursor for ',' zones.
+// before a message or the exit; out_col follows the cursor for ',' zones, out_row the
+// console's row for LOCATE with the row left out (CLS and LOCATE set it, a new line adds
+// one up to the last row, 24; until the first CLS or LOCATE it counts from row 0).
 char outbuf[512];
 int outn;
 int out_col;
+int out_row;
 int out_fd;                      // 0: the console (fd 1), else a file PRINT # is writing
 
 void out_flush() {
@@ -24,7 +27,10 @@ void out_flush() {
 
 void out_char(int c) {
   outbuf[outn] = c; outn++;
-  if (c == '\n' || c == '\r') out_col = 0;
+  if (c == '\n' || c == '\r') {
+    out_col = 0;
+    if (c == '\n' && !out_fd && out_row < 24) out_row++;
+  }
   else if (c == 8) { if (out_col > 0) out_col--; }
   else out_col++;
   if (c == '\n' || outn >= 512) out_flush();
@@ -79,13 +85,62 @@ int brk_at(int pos) {
   return 0;
 }
 
+// ---------------------------------------------------------------- memory
+// Every block the interpreter allocates comes from mem_alloc(). Out of memory is not a
+// run-time error the program could get past: the message (with the line when a program line
+// is compiling or running), the console back to normal, exit 1. The kernel's malloc takes
+// PSRAM and only when that is full falls back to the SRAM that programs are loaded into, so
+// BASIC stops while MEM_MARGIN bytes of PSRAM are still free. mem_left is the free PSRAM
+// at the last look (sysinfo) less what was allocated since (blocks freed are not counted):
+// a new look comes after MEM_LOOK bytes, or when the estimate says the block would not fit.
+// A board without PSRAM (total 0) has no budget, only malloc's own answer.
+#define MEM_MARGIN 65536
+#define MEM_LOOK 32768
+int mem_left;
+int mem_since;
+int mem_budget;                  // 1: PSRAM is there to keep a margin of
+int compiling;                   // compile() is running: an error has toks[tp]'s line
+
+void out_of_memory() {
+  out_reset();
+  con_restore();                 // the message in the normal colours
+  nerr = 0;
+  if (running) err_at(pc - 1, "Out of memory");
+  else if (compiling && ntok > 0) err_line(toks[tp].line, "Out of memory");
+  else {
+    if (out_col > 0) out_char('\n');
+    out_cstr("Out of memory\n");
+    out_flush();
+  }
+  exit(1);
+}
+
+void mem_init() {
+  mem_budget = sysinfo(INFO_PSRAM_TOTAL) > 0;
+  mem_left = sysinfo(INFO_PSRAM_FREE); mem_since = 0;
+}
+
+void *mem_alloc(int n) {
+  void *p;
+  if (n < 0) out_of_memory();
+  if (mem_budget && (mem_left - n < MEM_MARGIN || mem_since > MEM_LOOK)) {
+    mem_left = sysinfo(INFO_PSRAM_FREE); mem_since = 0;
+    if (mem_left - n < MEM_MARGIN) out_of_memory();
+  }
+  p = malloc(n);
+  if (!p) out_of_memory();
+  mem_left = mem_left - n - 16;  // 16: about what the allocator adds to a block
+  mem_since = mem_since + n;
+  return p;
+}
+
 // ---------------------------------------------------------------- loading
 char *load_file(char *path, int *len) {
   struct stat_t st; int fd; char *buf; int got; int n;
   if (stat(path, &st) < 0 || st.isdir) return 0;
   fd = open(path, OPEN_READ);
   if (fd < 0) return 0;
-  buf = malloc(st.size + 1);
+  buf = mem_alloc(st.size + 1);
   got = 0;
   while (got < st.size) {
     n = read(fd, buf + got, st.size - got);
@@ -134,7 +189,7 @@ int run_program() {
 // runs a program with fresh variables and comes back; SYSTEM leaves.
 void run_file(char *path) {
   int *keep; int nkeep;
-  keep = malloc(64 * 4);
+  keep = mem_alloc(64 * 4);
   memcpy(keep, kq, 64 * 4); nkeep = kqn;
   session_end();                  // (a RUN of a missing file also drops the variables)
   session_start();
@@ -169,7 +224,7 @@ int immediate() {
     else if (toks[0].tk == K_SYSTEM && toks[1].tk == TK_EOL) quit = 1;   // only as a whole line
     else if (toks[0].tk == K_RUN) {
       if (toks[1].tk == TK_STR && toks[2].tk == TK_EOL) {
-        path = malloc(str_len((char *)toks[1].val) + 1);
+        path = mem_alloc(str_len((char *)toks[1].val) + 1);
         memcpy(path, (char *)toks[1].val, str_len((char *)toks[1].val));
         path[str_len((char *)toks[1].val)] = 0;
       }
@@ -177,8 +232,9 @@ int immediate() {
     }
     else {
       comp_line_reset();
-      if (compile()) { vm_alloc(); vm_run(0); }
-      else vm_alloc();            // the slots a failed line made are still symbols
+      comp_line_mark();
+      if (compile()) { vm_alloc(); vm_run(0); comp_line_settle(); }
+      else comp_line_undo();      // its symbols and slots go: nothing of it ran
       vm_line_reset();
       io_line_reset();
     }
@@ -192,6 +248,7 @@ int immediate() {
 
 int main(int argc, char **argv) {
   int code;
+  mem_init();
   session_start();
   if (argc < 2) code = immediate();
   else {
