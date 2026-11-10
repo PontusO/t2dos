@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin basic_examples
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
@@ -32,6 +32,12 @@ root/bin/%.bin: binutils/%.c $(TOOLS) lib/t2obj.h lib/t2obj.c
 BASIC_SRC = $(sort $(filter-out basic/pcsys.c,$(wildcard basic/*.c)))
 root/bin/basic.bin: $(BASIC_SRC) basic/basic.h $(TOOLS)
 	$(call CCBIN,$(BASIC_SRC),-I basic)
+# example programs: examples/basic/*.bas into root/src/basic/
+BASIC_EX = $(patsubst examples/basic/%,root/src/basic/%,$(wildcard examples/basic/*.bas))
+basic_examples: $(BASIC_EX)
+root/src/basic/%.bas: examples/basic/%.bas
+	@mkdir -p root/src/basic && cp $< $@
+.PHONY: basic_examples
 # the assembler: same pattern, source in assembler/
 build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
 	@mkdir -p build/host

@@ -77,6 +77,8 @@ a program no code, use the toolchain C library's single-precision functions
    hard gate, but the design should aim for it from the start (programs
    tokenized at load time, labels, blocks and variables resolved before the
    run), since a slow design is hard to fix later *(my call)*.
+   *Measured:* `examples/basic/bench.bas` runs 200,000 statements in 1.06 s
+   on the CPico, about 188,000 statements per second, so the target is met.
 5. Plays well with background jobs: the interpreter calls `yield()` every few
    hundred statements, so a BASIC program can never freeze the board, even
    as a background job (`basic server.bas &`) *(my call)*. Named pipes
@@ -279,6 +281,8 @@ milliseconds). They map one-to-one onto the library's `gpio_mode`,
   `root/bin/basic.bin`.
 - Program code runs from SRAM (about 370 KB free); data and `malloc` live in
   PSRAM (8 MB). The interpreter's code should stay well below 100 KB.
+  *Measured:* `basic.bin` is 175,228 bytes, above that soft target; it fits
+  the free SRAM and has not been trimmed.
 - Uses only library calls (the existing ones plus part 1's maths
   functions); no other kernel or `sys.h` changes.
 - `make check` must stay green; if `tools/check_ref.py` cannot compare

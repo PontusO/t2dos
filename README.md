@@ -6,6 +6,8 @@ file tools, a full-screen editor, network tools and a complete C development
 toolchain: a C compiler (`cc`), an assembler (`as`), a linker with libraries
 (`ld`, `ar`) and the inspection tools `nm` and `objdump`. The toolchain runs
 on the board itself and rebuilds itself there, byte-identical to the PC build.
+For quick programs there is also a QBasic-style BASIC interpreter (`basic`),
+which runs a `.bas` file straight from the editor.
 
 The kernel is an Arduino sketch. Everything else is a program on the SD card,
 or, when no card is found, in the board's flash.
@@ -17,11 +19,12 @@ Contents
 3. [Command reference](#3-command-reference)
 4. [The editor](#4-the-editor)
 5. [Writing programs in C](#5-writing-programs-in-c)
-6. [The toolchain](#6-the-toolchain)
-7. [Assembly language](#7-assembly-language)
-8. [System reference](#8-system-reference)
-9. [Building T2DOS from source](#9-building-t2dos-from-source)
-10. [Status](#10-status)
+6. [Programming in BASIC](#6-programming-in-basic)
+7. [The toolchain](#7-the-toolchain)
+8. [Assembly language](#8-assembly-language)
+9. [System reference](#9-system-reference)
+10. [Building T2DOS from source](#10-building-t2dos-from-source)
+11. [Status](#11-status)
 
 ---
 
@@ -627,7 +630,25 @@ waits for one incoming connection first. Ctrl-] quits.
 ### Development
 
 `cc`, `as`, `ld`, `ar`, `nm` and `objdump` are described in
-[The toolchain](#6-the-toolchain), with examples.
+[The toolchain](#7-the-toolchain), with examples.
+
+#### basic
+
+```
+basic [file.bas [args...]]
+```
+
+Runs a BASIC program, or with no file name starts the immediate prompt
+(`Ok`), where single lines run at once. Errors print as
+`file.bas:LINE: message`; Ctrl-C stops a program with `Break at file.bas:LINE`.
+The exit code is 0, or 1 after an error or a break. See
+[Programming in BASIC](#6-programming-in-basic) for the language and the
+examples in `/src/basic/`.
+
+```
+/src> basic basic/words.bas basic/guess.bas
+ 15 lines, 77 words, 385 characters
+```
 
 ---
 
@@ -648,6 +669,7 @@ file is created when you save.
 arrows, Home, End, PgUp, PgDn     move
 Backspace, Del, Enter, Tab        edit
 ^O (or ^S)                        save
+^R                                save and run a .bas file with basic
 ^X (or ^Q)                        quit (press twice to leave without saving)
 ^F                                find (^F again or Enter: next match, Esc: cancel)
 ^B                                set the mark (again: clear it)
@@ -678,6 +700,14 @@ clears the mark.
 Example: to duplicate a function, put the cursor on its first character,
 press `^B`, move to its closing `}`, press `^C`, move to where the copy goes,
 and press `^U`.
+
+### Running BASIC programs
+
+`^R` saves the file (including changes you have not saved yet) and, if its
+name ends in `.bas`, runs it with [`basic`](#6-programming-in-basic). When the
+program ends, `edit` shows `Press any key` (with the exit code if it is not
+0), waits for a key and redraws the screen. For other files `^R` only shows
+`^R runs .bas files`.
 
 ### Notes
 
@@ -1021,7 +1051,435 @@ round    -3.0 -2.0
 
 ---
 
-## 6. The toolchain
+## 6. Programming in BASIC
+
+`basic` is an interpreter for a BASIC that follows Microsoft's QBasic: no line
+numbers, labels for jumps, block `IF`, `SUB` and `FUNCTION`. A program is a
+plain text file, usually ending in `.bas`, that you write in `edit` and run
+at once. There is nothing to compile. Someone who knows QBasic should feel at
+home, and listings that stay inside the subset described here run as they
+are.
+
+### Running programs
+
+```
+basic file.bas [args...]
+basic
+```
+
+With a file name `basic` loads the program, checks it and runs it. The
+examples of this chapter are in `/src/basic/`:
+
+```
+/src> basic basic/hanoi.bas
+Moving 3 disks from A to C:
+Disk 1 from A to C
+Disk 2 from A to B
+Disk 1 from C to B
+Disk 3 from A to C
+Disk 1 from B to A
+Disk 2 from B to C
+Disk 1 from A to C
+Moves needed: 7
+```
+
+The rest of the command line is the program's `COMMAND$`. `basic` ends with
+exit code 0 when the program finishes, and 1 after an error.
+
+Errors name the file, the source line and the problem, in QBasic's words.
+Mistakes that can be seen without running the program (a `FOR` without its
+`NEXT`, an undefined label, a call with the wrong number of arguments, a
+string assigned to a number) are found before the first statement runs. This
+`err2.bas`
+
+```
+PRINT "start"
+FOR i = 1 TO 3
+PRINT i
+```
+
+prints nothing but
+
+```
+/src> basic err2.bas
+err2.bas:2: FOR without NEXT
+```
+
+Errors that depend on values stop the program where they happen, after the
+output it has already printed. Here `err1.bas` uses the array `a` with the
+indexes 0 to 5 and goes up to 10:
+
+```
+DIM a(5)
+FOR i = 0 TO 10
+  a(i) = i * i
+NEXT
+```
+
+```
+/src> basic err1.bas
+err1.bas:3: Subscript out of range
+```
+
+Ctrl-C stops a running program, as Ctrl-Break does in QBasic:
+
+```
+/src> basic loop.bas
+Break at loop.bas:2
+[exit 1, 1497 ms]
+```
+
+(`loop.bas` is `DO`, `n = n + 1`, `LOOP`.)
+
+The program's memory is freed at the end, also after an error or a break.
+Keys you type while a program runs wait in a queue (up to 64) for `INKEY$`,
+`INPUT` and `SLEEP`. The interpreter gives other tasks a turn often enough
+that a BASIC program never freezes the board, and `basic prog.bas &` runs it
+as a [background job](#background-jobs).
+
+### Writing and running a program in edit
+
+Open the file in [the editor](#4-the-editor) and press `^R`. The editor saves
+the file, including changes you have not saved yet, runs `basic` on it, and
+when the program ends it shows `Press any key` (with the exit code if it is
+not 0). The next key brings back the editor with your text where you left it.
+This is the whole write, run, fix loop:
+
+```
+/src> edit basic/hanoi.bas
+```
+
+For any file name that does not end in `.bas`, `^R` only shows
+`^R runs .bas files`.
+
+### Immediate mode
+
+`basic` without a file name shows the prompt `Ok`. A line you type runs at
+once; variables stay between lines:
+
+```
+/src> basic
+T2DOS BASIC
+Ok
+PRINT 2^10
+ 1024 
+Ok
+x = 5
+Ok
+PRINT x * 3, SQR(x)
+ 15            2.236068 
+Ok
+FOR i = 1 TO 5: PRINT i;: NEXT
+ 1  2  3  4  5 
+Ok
+a$ = "hello"
+Ok
+PRINT UCASE$(a$); LEN(a$)
+HELLO 5 
+Ok
+PRINT foo(
+LINE 1: Syntax error
+Ok
+RUN "/src/basic/hanoi.bas"
+Moving 3 disks from A to C:
+...
+Moves needed: 7 
+Ok
+SYSTEM
+/src>
+```
+
+A line is one statement or several joined by `:`. Block statements across
+lines are not possible at the prompt, and `SUB`, `FUNCTION` and `DECLARE`
+give `Illegal in direct mode` (as in QBasic); put procedures in a file and
+`RUN "file.bas"` it. `SYSTEM` returns to the shell. Ctrl-C breaks an `INPUT`
+and a running line.
+
+### The examples
+
+The examples are installed in `/src/basic/` (they come from `examples/basic/`
+in the source tree).
+
+**guess.bas** picks a number with `RND` and asks with `INPUT`. The numbers
+differ in every game because `RANDOMIZE TIMER` seeds the generator from the
+clock:
+
+```
+/src> basic basic/guess.bas
+I am thinking of a number from 1 to 100.
+Your guess? 50
+Too high.
+Your guess? 25
+Too low.
+Your guess? 37
+Too high.
+Your guess? 31
+Too high.
+Your guess? 28
+Too high.
+Your guess? 26
+Too low.
+Your guess? 27
+Right! You needed 7 guesses.
+```
+
+**blink.bas** blinks the board LED (pin 25) five times with `PINMODE`,
+`PINWRITE` and `PAUSE`, then prints `Done.` It is the BASIC version of the
+[`blink`](#blink) command:
+
+```
+CONST led = 25
+PINMODE led, 1
+FOR i = 1 TO 5
+  PINWRITE led, 1
+  PAUSE 200
+  PINWRITE led, 0
+  PAUSE 200
+NEXT
+```
+
+**words.bas** counts the lines, words and characters of the text file given
+on the command line, with `COMMAND$`, `LINE INPUT #` and `INSTR`:
+
+```
+/src> basic basic/words.bas basic/guess.bas
+ 15 lines, 77 words, 385 characters
+/src> basic basic/words.bas
+usage: basic words.bas file
+```
+
+**hanoi.bas** moves the disks of the Towers of Hanoi with a recursive `SUB`
+(its output is at the top of this chapter). Change `n = 3` to move more
+disks; the number of moves is 2^n - 1.
+
+**bench.bas** measures the speed of the interpreter, see
+[Status](#11-status):
+
+```
+/src> basic basic/bench.bas
+seconds: 1.063477
+statements per second: 188062
+```
+
+### A BASIC server on a pipe
+
+`PIPE` makes a [named pipe](#named-pipes), so a BASIC program can be a
+server like `demosrv`. This one answers each request in capitals:
+
+```
+PIPE "shout"
+PIPE "shout.out"
+OPEN "/pipe/shout" FOR INPUT AS #1
+DO
+  LINE INPUT #1, a$
+  IF a$ = "quit" THEN EXIT DO
+  OPEN "/pipe/shout.out" FOR OUTPUT AS #2
+  PRINT #2, UCASE$(a$)
+  CLOSE #2
+LOOP
+CLOSE
+```
+
+Saved as `shout.bas`, it runs as a job and is used from the shell (`basic`
+is the job's name):
+
+```
+/src> basic shout.bas &
+[1] basic
+/src> echo hello board > /pipe/shout
+/src> cat /pipe/shout.out
+HELLO BOARD
+/src> echo quit > /pipe/shout
+/src> jobs
+[1] done basic (exit 0)
+```
+
+One request is one message: it ends when the writer closes the pipe, which
+is what `CLOSE #2` does for the reply. `LINE INPUT #1` on a pipe waits for
+the next message while other tasks run, and `EOF(1)` on an empty pipe also
+waits for data. The pipes disappear when the program ends.
+
+### The language
+
+This is a reference, grouped by task. Where nothing special is said, a
+statement works as in QBasic.
+
+#### Source form
+
+- Keywords and names are not case sensitive.
+- One statement per line, or several separated by `:`.
+- Comments: `REM text` and `' text`, to the end of the line.
+- A label is a name followed by `:` at the start of a line (`loop:`). Labels
+  of the main program are global; labels in a `SUB` or `FUNCTION` belong to
+  it.
+- A line ending in `_` continues on the next line.
+- Lines may end with LF or CRLF.
+
+#### Types and variables
+
+| Suffix | `AS` name | Meaning |
+|---|---|---|
+| `%` | `INTEGER` | 32-bit integer |
+| `&` | `LONG` | 32-bit integer (same as `INTEGER`) |
+| `!` | `SINGLE` | 32-bit float |
+| `#` | `DOUBLE` | 32-bit float (same as `SINGLE`) |
+| `$` | `STRING` | text, 0 to 32767 characters |
+
+A name without a suffix is `SINGLE`; `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFDBL`
+and `DEFSTR` with letter ranges change that. Variables need no declaration
+and start at 0 or `""`. `x`, `x$` and the array `x()` are different things.
+
+- `DIM a(10)`, `DIM b(1 TO 5, 0 TO 3) AS INTEGER`, `DIM s AS STRING`:
+  arrays have up to 8 dimensions. An array used without `DIM` gets the
+  bounds 0 to 10. `DIM SHARED` makes a variable visible inside `SUB` and
+  `FUNCTION`. `REDIM` dimensions an array again (the contents are cleared),
+  `ERASE` frees it, `LBOUND` and `UBOUND` give the bounds.
+- `CONST name = expression`.
+- A float stored in an integer variable is rounded (halves to the even
+  number: 2.5 gives 2, 3.5 gives 4); `INT` rounds down and `FIX` towards 0.
+
+#### Expressions
+
+From the highest precedence down: `^`, unary `-`, `*` `/`, `\` (integer
+division), `MOD`, `+` `-`, the comparisons `=` `<>` `<` `>` `<=` `>=`, `NOT`,
+`AND`, `OR`, `XOR`, `EQV`, `IMP`. Comparisons give -1 for true and 0 for
+false, and `AND`, `OR`, `NOT` work on all the bits, as in QBasic. `+` joins
+strings, and strings compare by character codes. Number literals are `12`,
+`1.5`, `1E3`, `&HFF` and `&O17`.
+
+#### Control flow
+
+- `IF cond THEN statements [ELSE statements]` on one line, or a block with
+  `ELSEIF`, `ELSE` and `END IF`. `IF cond THEN label` jumps to the label.
+- `FOR v = a TO b [STEP s]` ... `NEXT [v]`: the bounds and the step are
+  worked out once.
+- `WHILE cond` ... `WEND`, and `DO [WHILE|UNTIL cond]` ... `LOOP
+  [WHILE|UNTIL cond]`.
+- `SELECT CASE expr` with `CASE 1, 2`, `CASE 5 TO 9`, `CASE IS > 10` and
+  `CASE ELSE`, closed by `END SELECT`.
+- `EXIT FOR`, `EXIT DO`, `EXIT SUB`, `EXIT FUNCTION`.
+- `GOTO label`, `GOSUB label` and `RETURN`. `END` and `STOP` end the program.
+  Jumping out of a `FOR` loop or a `SUB` with `GOTO` is allowed.
+- `SUB name (params)` ... `END SUB` and `FUNCTION name (params)` ... `END
+  FUNCTION`; a function returns its value by assigning to its name. A `SUB`
+  is called as `name args` or `CALL name(args)`. Variables and array elements
+  are passed by reference (the procedure can change them), other
+  expressions by value, and `a()` passes a whole array. Locals and recursion
+  work; a runaway recursion stops with `Out of stack space`. `DECLARE` lines
+  are accepted and ignored.
+- `DATA`, `READ` and `RESTORE [label]`.
+- `SWAP a, b`. `RANDOMIZE [seed]`: without a seed the clock is used (there is
+  no prompt for a number as in QBasic); `RANDOMIZE TIMER` also works.
+
+#### Screen and keyboard
+
+- `PRINT` (or `?`) with `;` and `,` (14-column zones), a trailing `;` or `,`
+  that keeps the cursor on the line, `TAB(n)` and `SPC(n)`.
+- `INPUT ["prompt";] v1, v2, ...` asks again with `?Redo from start` when
+  the answer does not fit; `INPUT "prompt", v` leaves out the `?`.
+  `LINE INPUT ["prompt";] s$` takes the whole line.
+- `INKEY$` returns the next key or `""`. The arrow and other special keys
+  come as QBasic's two characters: `CHR$(0) + "H"` (up), `"P"` (down), `"K"`
+  (left), `"M"` (right) and the codes for Home, End, PgUp, PgDn, Ins, Del.
+- `CLS`, `LOCATE row, col` (1-based), `COLOR fg [, bg]` with QBasic's colour
+  numbers (0 black, 1 blue, 2 green, 3 cyan, 4 red, 5 magenta, 6 brown,
+  7 white; 8 to 15 look the same as 0 to 7), `BEEP`, `SLEEP [seconds]` (without a number it
+  waits for a key; the key stays in the queue), `WIDTH` (accepted, no
+  effect).
+
+How numbers print is the part of QBasic that is easiest to get wrong, and
+`basic` follows it. A positive number has a space before it and every number
+a space after it. A `SINGLE` has at most seven significant digits, without
+trailing zeros or a leading 0, and uses the `E` form for very large and very
+small values. Integers print all their digits. `STR$` gives the same text
+without the trailing space.
+
+```
+a = 7: b = 2
+PRINT a / b, a \ b, a MOD b, a ^ b
+PRINT 1E7, .000015, 100000
+x% = 2.5: y% = 3.5
+PRINT x%; y%
+PRINT 1/3
+```
+
+prints
+
+```
+ 3.5           3             1             49
+ 1E+07         1.5E-05       100000
+ 2  4
+ .3333333
+```
+
+#### Files and the system
+
+- `OPEN f$ FOR INPUT|OUTPUT|APPEND AS #n`, `CLOSE [#n, ...]` (without a
+  number all files), `PRINT #n, ...`, `WRITE #n, ...` (quoted strings and
+  commas), `INPUT #n, ...`, `LINE INPUT #n, s$`, `EOF(n)` and `FREEFILE`.
+  `WRITE` without `#` writes to the screen.
+- Paths are T2DOS paths, relative to the current directory. A `\` in a path
+  counts as `/`, so QBasic-style names work.
+- `KILL f$`, `NAME old$ AS new$`, `MKDIR`, `RMDIR`, `CHDIR` and
+  `FILES [dir$]`.
+- `SHELL cmd$` runs a T2DOS program (the first word is the program name, found
+  as the shell finds it) and waits for it; the exit code is not returned.
+  `COMMAND$` is the command line after the file name.
+- `PIPE name$` creates the [named pipe](#named-pipes) `/pipe/name`. Open it
+  like a file.
+- `RUN "file.bas"` (at the immediate prompt) runs a program with fresh
+  variables and comes back to the prompt, and `SYSTEM` ends `basic`.
+
+#### Functions
+
+Numbers: `ABS SGN INT FIX SQR SIN COS TAN ATN EXP LOG RND TIMER CINT CLNG CSNG
+CDBL`. `SQR`, `ATN` and `LOG` (natural) are the [maths
+built-ins](#maths) of the system; `^` with a non-integer exponent uses
+`pow`. `RND` gives a number from 0 up to 1, and `TIMER` the seconds since the
+board started (a float; a millisecond is the resolution).
+
+Strings: `LEN LEFT$ RIGHT$ MID$ INSTR UCASE$ LCASE$ LTRIM$ RTRIM$ STR$ VAL CHR$
+ASC STRING$ SPACE$ HEX$ OCT$`. `INKEY$`, `EOF`, `FREEFILE`, `LBOUND`,
+`UBOUND` and `COMMAND$` are described above.
+
+Board access (T2DOS extras, so that a blinking LED is a five-line program):
+`PINMODE pin, mode`, `PINWRITE pin, value`, `PINREAD(pin)`,
+`ANALOGREAD(pin)`, `PWM pin, value` and `PAUSE ms`. They are the library's
+`gpio_mode`, `gpio_write`, `gpio_read`, `analog_read`, `pwm_write` and
+`sleep`; see [The library](#the-library).
+
+### Differences from QBasic
+
+- `INTEGER` and `LONG` are both 32-bit (QBasic's `INTEGER` has 16 bits), and
+  overflow is not detected.
+- `DOUBLE` is the same 32-bit `float` as `SINGLE`: the board has no 64-bit
+  float. A number prints with at most seven digits whatever its type, and
+  `VAL` of a number with more than about seven digits loses the rest.
+- There are no line numbers (not even as labels), and no `AUTO`, `LIST`,
+  `RENUM` or line editor in `basic`: you write programs in `edit`.
+- `SUB`, `FUNCTION` and `DECLARE` are not allowed at the immediate prompt.
+- `RANDOMIZE` without a number does not ask for one.
+- `REDIM` or `ERASE` of an array while one of its elements is being used in
+  the same statement gives `Array in use`, which QBasic does not have.
+- A `NEXT` that belongs to a loop of the caller, written inside a `GOSUB`
+  routine, is an error (`NEXT without FOR`).
+- A `SHARED` statement inside a `SUB` is not supported (use `DIM SHARED` at
+  the top), and passing `a()` of an array that was never used gives `Array
+  not defined`.
+- `DATE$` and `TIME$` do not exist: the board has no clock.
+- Any QBasic statement or function that `basic` does not have stops the
+  program, before it runs, with `Advanced feature unavailable`. Nothing is
+  silently ignored. These are not supported: line numbers; graphics and
+  sound (`SCREEN`, `PSET`, `LINE`, `CIRCLE`, `PAINT`, `DRAW`, `SOUND`,
+  `PLAY`, ...); `TYPE` and `STATIC`, `COMMON`, `CHAIN`; `DEF FN`; `ON ...
+  GOTO`/`GOSUB`; `ON ERROR` and `RESUME`; `PRINT USING`; the `MID$`
+  statement; `PEEK` and `POKE`; random-access and binary files (`GET`, `PUT`,
+  `FIELD`, `LOF`, `SEEK`); `ENVIRON`, `FRE` and the rest of QBasic's
+  hardware and event statements. Networking statements may come later.
+
+---
+
+## 7. The toolchain
 
 ### How it fits together
 
@@ -1191,7 +1649,7 @@ as [-o out.o] file.s
 ```
 
 Assembles one file (default output: the same name with `.o`). See
-[Assembly language](#7-assembly-language).
+[Assembly language](#8-assembly-language).
 
 ```
 /src> as -o add3.o add3.s
@@ -1296,7 +1754,7 @@ References to `extern` variables always use the 12-byte form.
 
 ---
 
-## 7. Assembly language
+## 8. Assembly language
 
 `as` takes the GNU unified syntax for Thumb-2, the subset that compiled C and
 hand-written code need: the ARMv8-M mainline integer instructions with their
@@ -1392,7 +1850,7 @@ instructions inside IT blocks, and macros (`.macro`, `.rept`).
 
 ---
 
-## 8. System reference
+## 9. System reference
 
 ### Programs and memory
 
@@ -1484,7 +1942,7 @@ described in [Named pipes](#named-pipes).
 
 ---
 
-## 9. Building T2DOS from source
+## 10. Building T2DOS from source
 
 ### Repository layout
 
@@ -1496,6 +1954,8 @@ assembler/as.c    the assembler
 linker/ld.c       the linker
 binutils/         ar, nm, objdump
 lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
+basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
+examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
                   write, edit, blink, wifi, get, send, rls, nc, demosrv
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
@@ -1533,6 +1993,9 @@ compiler/cc -I root/lib -o hello.bin hello.c
 - `tools/check_ref.py`: every single-file program built by today's toolchain
   is byte-identical to the reference compiler's output.
 - `tools/check_toolchain.py --pc`: the multi-file, library and error cases.
+- `tools/check_basic.py --pc`: the BASIC cases of `tests/basic/` (each
+  `NAME.bas` with its expected `NAME.out`) on a native build of the
+  interpreter, with a memory-leak check.
 
 With the board connected (and no `screen` on the port):
 
@@ -1541,6 +2004,7 @@ python3 tools/check_link.py --board
 python3 tools/check_toolchain.py --board      # builds and runs the cases with cc on the board
 python3 tools/check_toolchain.py --selfhost   # the board rebuilds the toolchain identically
 python3 tools/check_jobs.py --board           # background jobs and named pipes on the board
+python3 tools/check_basic.py --board          # the BASIC cases on the board
 ```
 
 `check_jobs.py` uploads the programs of `tests/jobs/`, runs every case
@@ -1564,7 +2028,7 @@ features that the previous `cc` already supports.
 
 ---
 
-## 10. Status
+## 11. Status
 
 ### Verified on the board (CPico 2350, flash filesystem)
 
@@ -1587,6 +2051,27 @@ features that the previous `cc` already supports.
   to test12.c with the same output as gcc.
 - The assembler matches GNU `as` byte for byte on about 120,000 instructions
   from the real programs, and `objdump` matches GNU objdump's text.
+- BASIC: every case of `tests/basic/` runs on the board with the expected
+  output (`tools/check_basic.py --board`), and PSRAM is fully returned after
+  each one. The five examples of `/src/basic/` run on the board, and the
+  outputs in [Programming in BASIC](#6-programming-in-basic) are copied from
+  those runs. This includes Ctrl-C in a running program and in `INPUT`, keys
+  typed while a program prints, deep recursion (`Out of stack space`), files
+  and pipes, `basic` as a background job, immediate mode and `^R` in `edit`.
+  The PC build of the interpreter also passes the same cases under
+  AddressSanitizer without a leak.
+
+### BASIC: speed and size
+
+- Speed: `examples/basic/bench.bas` runs `FOR i = 1 TO 100000: s = s + i * 2:
+  NEXT`, which is 200,000 statements (the assignment and `NEXT` on every
+  pass), and takes 1.06 s on the board: about 188,000 statements per second,
+  the same in every run. That is above the 100,000 per second the design
+  asked for. It is the figure for a loop of simple arithmetic; calls, string
+  work and output are slower.
+- Size: `basic.bin` is 175,228 bytes (it runs from SRAM, of which about 370 KB
+  are free). The design hoped for well below 100 KB; the language turned out
+  larger, and the size has not been tuned.
 
 ### Not yet verified, known gaps
 
@@ -1608,6 +2093,14 @@ features that the previous `cc` already supports.
   file).
 - No `static`: all globals of a program share one namespace.
 - `ld` links a library member whole, not single functions.
+- BASIC: a `DOUBLE` is a 32-bit float, an `INTEGER` is 32 bits, and numbers
+  have about seven digits. There is no graphics, sound, `PRINT USING`,
+  `ON ERROR`, user types or random-access files (the program stops with
+  `Advanced feature unavailable`). Without a real-time clock there is no
+  `DATE$` or `TIME$`. The special-key codes of `INKEY$` depend on the
+  terminal's escape sequences. Whether the E form of very small numbers
+  such as 1/30 matches QBasic's in every case is not verified (no QBasic was
+  available to compare with).
 - `ld -o X X` (the output also named as an input) deletes `X` when the link
   fails.
 - `host_linux.c` does not yet free or zero a program's `malloc` memory, and
