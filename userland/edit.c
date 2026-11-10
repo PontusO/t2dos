@@ -2,6 +2,7 @@
 //   edit file
 // Keys: arrows, Home End PgUp PgDn, Backspace Del Enter Tab
 //       ^O save   ^X quit   ^F find (^F again, Enter: next match)   ^S also saves, ^Q also quits
+//       ^R save and run a .bas file with BASIC (any key returns to the editor)
 //       ^B mark (again: clear)   ^K cut   ^C copy   ^U paste
 //       With a mark, ^K and ^C take the text from the mark to the cursor, both included; without one,
 //       the current line (repeated ^K or ^C collect the following lines into one block).
@@ -28,6 +29,7 @@ char findbuf[64];
 char num[16];
 char line[256];
 char indent[64];
+char *rargv[2];                        // basic's command line for ^R
 
 int flush() { if (on) write(1, ob, on); on = 0; return 0; }
 int outc(int c) { if (on >= 4000) flush(); ob[on++] = c; return 0; }
@@ -106,7 +108,7 @@ int status() {
   sprintf(line, " %s%s  line %d col %d   ", fname, dirty ? " [modified]" : "", lineno(), col_of(cur) + 1);
   n = strlen(line);
   if (msg[0]) { i = 0; while (msg[i] && n < 250) { line[n] = msg[i]; n++; i++; } }
-  else { strcpy(line + n, mark >= 0 ? "^K cut  ^C copy  ^B clear mark" : "^O save ^X quit ^F find ^B mark ^K cut ^C copy ^U paste"); n = strlen(line); }
+  else { strcpy(line + n, mark >= 0 ? "^K cut  ^C copy  ^B clear mark" : "^O save ^X quit ^F find ^B mark ^K cut ^C copy ^U paste ^R run"); n = strlen(line); }
   i = 0;
   while (i < cols - 1) { outc(i < n ? line[i] : ' '); i++; }
   csi("0m");
@@ -214,6 +216,30 @@ int save() {
   close(fd);
   if (w != n) { sprintf(msg, "write error: %d of %d bytes", w, n); return 0; }
   dirty = 0; sprintf(msg, "saved %d bytes", n);
+  return 1;
+}
+
+// ^R: save, and if the file is a .bas program run it with BASIC on a cleared screen; any key
+// brings the editor back
+int is_bas() {
+  int n; char *e;
+  n = strlen(fname);
+  if (n < 4) return 0;
+  e = fname + n - 4;
+  return e[0] == '.' && (e[1] | 32) == 'b' && (e[2] | 32) == 'a' && (e[3] | 32) == 's';
+}
+int run_bas() {
+  int code;
+  if (!save()) return 0;
+  if (!is_bas()) { strcpy(msg, "^R runs .bas files"); return 0; }
+  csi("2J"); csi("H"); csi("?25h"); flush();
+  rargv[0] = "basic"; rargv[1] = fname;
+  code = exec("/bin/basic.bin", 2, rargv);
+  conctl(CON_COLOR, 7, 0);
+  out("\r\nPress any key");
+  if (code != 0) { out(" (exit "); outn(code); out(")"); }
+  flush();
+  getkey();
   return 1;
 }
 
@@ -346,6 +372,7 @@ int main(int argc, char **argv) {
       else break;
     }
     else if (k == 15 || k == 19) save();          // ^O ^S
+    else if (k == 18) run_bas();                  // ^R
     else if (k == 6) find();                      // ^F
     else if (k == 2) {                            // ^B
       if (mark >= 0) { mark = -1; strcpy(msg, "mark cleared"); }

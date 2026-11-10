@@ -168,9 +168,13 @@ int read_line() {
   out_flush();
   while (1) {
     c = key_wait();
-    if (c == -2) { brk_at(pc - 1); return 0; }
+    if (c == -2) {
+      if (imm_mode) { linen = 0; out_cstr("^C"); break; }
+      brk_at(pc - 1); return 0;
+    }
     if (c == -1) {
       if (linen > 0) break;
+      if (imm_mode) return 0;
       vm_err("Input past end");
       return 0;
     }
@@ -967,6 +971,12 @@ void io_init() {
   fn_tab[K_EOF] = fn_eof; fnop[K_EOF] = h_eof;
   fn_tab[K_FREEFILE] = fn_freefile; fnop[K_FREEFILE] = h_freefile;
   fn_tab[K_COMMANDS] = fn_commands; fnop[K_COMMANDS] = h_commands;
+}
+
+// after an immediate-mode line: nothing of an aborted INPUT or a PRINT # stays behind
+void io_line_reset() {
+  in_free(32);
+  out_reset();
 }
 
 // at the end of the program: strs an aborted INPUT left, the colours back to normal

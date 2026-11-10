@@ -4,6 +4,7 @@
 
 char *srcname;
 int nerr;
+int imm_mode;
 int prog_argc;
 char **prog_argv;
 
@@ -44,8 +45,10 @@ int err_line(int line, char *msg) {
   out_reset();
   if (nerr == 0) {
     if (out_col > 0) out_char('\n');
-    out_cstr(srcname); out_char(':');
-    fmt_int(num, line); out_cstr(num); out_cstr(": ");
+    fmt_int(num, line);
+    if (imm_mode) { out_cstr("LINE "); out_cstr(num); }
+    else { out_cstr(srcname); out_char(':'); out_cstr(num); }
+    out_cstr(": ");
     out_cstr(msg); out_char('\n');
     out_flush();
   }
@@ -62,8 +65,12 @@ int brk_at(int pos) {
   out_reset();
   if (nerr == 0) {
     if (out_col > 0) out_char('\n');
-    out_cstr("Break at "); out_cstr(srcname); out_char(':');
-    fmt_int(num, line_of(pos)); out_cstr(num); out_char('\n');
+    if (imm_mode) out_cstr("Break");
+    else {
+      out_cstr("Break at "); out_cstr(srcname); out_char(':');
+      fmt_int(num, line_of(pos)); out_cstr(num);
+    }
+    out_char('\n');
     out_flush();
   }
   nerr++;
@@ -89,25 +96,101 @@ char *load_file(char *path, int *len) {
   return buf;
 }
 
-int main(int argc, char **argv) {
+// ---------------------------------------------------------------- sessions
+// Everything the interpreter owns is made by session_start() and given back by
+// session_end(); RUN in immediate mode ends one and starts the next, so a program begins
+// with fresh variables.
+void session_start() {
+  lex_init(); vm_init(); comp_init(); funcs_init(); io_init();
+  nerr = 0;
+}
+
+void session_end() {
+  out_reset();
+  if (out_col > 0) out_char('\n');   // the shell's prompt starts on a line of its own
+  out_flush();
+  io_free();
+  vm_free(); comp_free(); lex_free();
+}
+
+// Loads, compiles and runs the file srcname in the current session; returns the exit code.
+int run_program() {
   char *src; int len;
-  if (argc < 2) { out_cstr("usage: basic FILE [args]\n"); out_flush(); return 1; }
-  srcname = argv[1];
-  prog_argc = argc - 2; prog_argv = argv + 2;
   src = load_file(srcname, &len);
   if (!src) { out_cstr(srcname); out_cstr(": File not found\n"); out_flush(); return 1; }
-  lex_init(); vm_init(); comp_init(); funcs_init(); io_init();
   lex(src, len);
   free(src);
   if (compile()) {
     vm_alloc();
     vm_run(0);
   }
-  out_reset();
-  if (out_col > 0) out_char('\n');   // the shell's prompt starts on a line of its own
-  out_flush();
-  io_free();
-  vm_free(); comp_free(); lex_free();
-  if (nerr) return 1;
+  return nerr != 0;
+}
+
+// ---------------------------------------------------------------- immediate mode
+// `basic` alone: each line is compiled and run at once against the variables of the lines
+// before (the symbols and the slot store stay, the code, labels and stacks do not). RUN "file"
+// runs a program with fresh variables and comes back; SYSTEM leaves.
+void run_file(char *path) {
+  int *keep; int nkeep;
+  keep = malloc(64 * 4);
+  memcpy(keep, kq, 64 * 4); nkeep = kqn;
+  session_end();
+  session_start();
+  imm_mode = 0; srcname = path;
+  run_program();
+  session_end();
+  session_start();
+  imm_mode = 1; srcname = 0;
+  memcpy(kq, keep, 64 * 4); kqn = nkeep;
+  free(keep);
+}
+
+int immediate() {
+  char *path; int quit;
+  imm_mode = 1; srcname = 0;
+  out_cstr("T2DOS BASIC\n");
+  quit = 0;
+  while (!quit) {
+    out_cstr("Ok\n");
+    if (!read_line()) break;
+    if (linen == 0) continue;
+    lex(linebuf, linen);
+    nerr = 0;
+    path = 0;
+    if (toks[0].tk == K_SYSTEM && toks[1].tk == TK_EOL) quit = 1;
+    else if (toks[0].tk == K_RUN) {
+      if (toks[1].tk == TK_STR && toks[2].tk == TK_EOL) {
+        path = malloc(str_len((char *)toks[1].val) + 1);
+        memcpy(path, (char *)toks[1].val, str_len((char *)toks[1].val));
+        path[str_len((char *)toks[1].val)] = 0;
+      }
+      else err_line(1, "Syntax error");
+    }
+    else {
+      comp_line_reset();
+      if (compile()) { vm_alloc(); vm_run(0); }
+      else vm_alloc();            // the slots a failed line made are still symbols
+      vm_line_reset();
+      io_line_reset();
+    }
+    lex_free_toks();
+    if (out_col > 0) out_char('\n');
+    out_flush();
+    if (path) { run_file(path); free(path); }
+  }
   return 0;
+}
+
+int main(int argc, char **argv) {
+  int code;
+  session_start();
+  if (argc < 2) code = immediate();
+  else {
+    srcname = argv[1];
+    prog_argc = argc - 2; prog_argv = argv + 2;
+    code = run_program();
+  }
+  session_end();
+  return code;
 }

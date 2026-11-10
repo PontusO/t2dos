@@ -270,14 +270,20 @@ int lex(char *src, int len) {
   return ntok;
 }
 
-void lex_free() {
+// the token list only (immediate mode lexes one line after another against one keyword table)
+void lex_free_toks() {
   int i;
   for (i = 0; i < ntok; i++) {
     if (toks[i].tk == TK_STR || toks[i].tk == K_UNSUP || toks[i].tk == K_DATA) str_free((char *)toks[i].val);
     else if (toks[i].tk == TK_ID) free((char *)toks[i].val);
   }
+  free(toks); toks = 0; ntok = 0;
+}
+
+void lex_free() {
+  int i;
+  lex_free_toks();
   for (i = 0; i < nkw; i++) if (kw_tk[i] == K_UNSUP) free(kw_name[i]);
   if (kw_name) { free(kw_name); free(kw_tk); }
   kw_name = 0; kw_tk = 0; nkw = 0; kwcap = 0;
-  free(toks); toks = 0; ntok = 0;
 }

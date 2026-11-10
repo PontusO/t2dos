@@ -679,6 +679,11 @@ int vm_run(int start) {
   return 0;
 }
 
+void vm_line_reset() {
+  free_cells(1);
+  sp = 0; csp = 0; fbase = 0; calls = 0; dptr = 0;
+}
+
 void vm_free() {
   int i;
   if (svar) for (i = 0; i < nalloc[T_STR]; i++) str_free(svar[i]);

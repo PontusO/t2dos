@@ -1,0 +1,58 @@
+T2DOS BASIC
+Ok
+CONST k$ = "hi": s$ = "abc"
+Ok
+PRINT k$; s$
+hiabc
+Ok
+DIM q(3): q(2) = 7
+Ok
+PRINT q(2)
+ 7 
+Ok
+PRINT "a" + LEFT$("bcd", 1 \ 0)
+LINE 1: Division by zero
+Ok
+PRINT s$; q(2)
+abc 7 
+Ok
+IF q(2) = 7 THEN
+LINE 1: Block IF without END IF
+Ok
+FOR i = 1 TO 2
+LINE 1: FOR without NEXT
+Ok
+PRINT zz
+ 0 
+Ok
+RUN "hello.bas"
+Hello from BASIC
+Ok
+PRINT s$
+
+Ok
+L1: a = 3: IF a = 3 THEN GOTO L2
+LINE 1: Label not defined
+Ok
+L2: PRINT a
+ 0 
+Ok
+GOSUB nowhere
+LINE 1: Label not defined
+Ok
+x = 2
+Ok
+RUN
+LINE 1: Syntax error
+Ok
+PRINT x
+ 2 
+Ok
+PRINT "unterminated
+unterminated
+Ok
+PRINT 5 +
+LINE 1: Syntax error
+Ok
+SYSTEM
+exit 0

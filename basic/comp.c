@@ -1734,6 +1734,18 @@ int comp_init() {
   return 0;
 }
 
+void comp_line_reset() {
+  int i;
+  for (i = 0; i < nlb; i++) free((char *)lb_name[i]);
+  for (i = 0; i < nfx; i++) free((char *)fx_name[i]);
+  for (i = 0; i < ndata; i++) str_free(d_item[i]);
+  nlb = 0; nfx = 0; ndata = 0; nblk = 0; npa = 0;
+  for (i = 0; i < nproc; i++) { free(procs[i].uname); if (procs[i].tags) free(procs[i].tags); }
+  nproc = 0;
+  cur_scope = 0; cur_proc = -1; scanning = 0; const_mode = 0;
+  ncode = 0; nlm = 0;
+}
+
 void comp_free() {
   int i;
   for (i = 0; i < nsym; i++) {

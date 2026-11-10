@@ -1,0 +1,20 @@
+CONST k$ = "hi": s$ = "abc"
+PRINT k$; s$
+DIM q(3): q(2) = 7
+PRINT q(2)
+PRINT "a" + LEFT$("bcd", 1 \ 0)
+PRINT s$; q(2)
+IF q(2) = 7 THEN
+FOR i = 1 TO 2
+PRINT zz
+RUN "hello.bas"
+PRINT s$
+L1: a = 3: IF a = 3 THEN GOTO L2
+L2: PRINT a
+GOSUB nowhere
+x = 2
+RUN
+PRINT x
+PRINT "unterminated
+PRINT 5 +
+SYSTEM

@@ -66,6 +66,7 @@ extern int ntok;
 int lex_init();
 int lex(char *src, int len);     // fills toks from the source text; returns ntok
 void lex_free();
+void lex_free_toks();            // the token list only, the keyword table stays
 
 // ---------------------------------------------------------------- strings
 // A str is a char * to len bytes of data (any byte, CHR$(0) too) followed by a 0, with the
@@ -223,6 +224,8 @@ extern int (*fn_tab[NTOK])();    // built-in function compilers by token (Task 4
 int comp_init();
 int compile();                   // the whole token list, then OP_END; returns nerr == 0
 void comp_free();
+void comp_line_reset();          // immediate mode: forget the last line's code, labels, DATA and
+                                 // procedures; the symbols and their slots stay
 int emit(int op);                // append; returns the position written
 int emit_arg(int v);
 int expr();                      // compile an expression; returns its type
@@ -264,6 +267,8 @@ int vm_init();
 int vm_alloc();                  // (re)allocate the slot store for nslot[]
 int vm_run(int start);           // run from code[start] to OP_END / OP_HALT / an error
 void vm_free();
+void vm_line_reset();            // immediate mode: empty the stacks (freeing what an error left),
+                                 // keep the variables
 int vm_err(char *msg);           // run-time error at the current op
 int f2i(float f);                // QBasic float to integer: round half to even
 int fok(float f);                // 1 if f is a number; else the run-time error Overflow, 0
@@ -298,6 +303,13 @@ void emit_fn(int k, int v);      // OP_FN, token, count: the handler may read mo
 #define INPUT_MAX 32             // variables in one INPUT
 int key_poll();
 void io_init();
+void io_line_reset();            // immediate mode: after a line, an aborted INPUT and the output
+                                 // target stack cleared, the key queue kept
+extern int kq[64];               // the key queue (main.c keeps it across RUN)
+extern int kqn;
+int read_line();                 // a line from the console into linebuf / linen, echoed
+extern char linebuf[256];
+extern int linen;
 void io_free();                  // at the end: strings an aborted INPUT left, colours back,
                                  // every file closed
 // Files (io.c): file numbers 1 to 15. PRINT #n and WRITE #n send their items to the file by
@@ -316,6 +328,8 @@ void out_push(int idx);          // output to target idx (0 console, else a file
 void out_pop();                  // back to the target before the matching out_push
 
 // ---------------------------------------------------------------- main.c
+extern int imm_mode;             // 1 in immediate mode: messages say LINE n, not FILE:n; read_line()
+                                 // returns 0 at the end of the input, and a ^C ends the line
 extern char *srcname;            // the program's file name as given, for messages
 extern int nerr;                 // errors so far (only the first is reported)
 extern int prog_argc;            // the arguments after the file name (COMMAND$, Task 7)

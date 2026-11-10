@@ -1,0 +1,18 @@
+T2DOS BASIC
+Ok
+a = 5
+Ok
+PRINT a * 2
+ 10 
+Ok
+PRINT x$ + "z"
+z
+Ok
+FOR i=1 TO 3: PRINT i;: NEXT
+ 1  2  3 
+Ok
+PRINT 1/0
+LINE 1: Division by zero
+Ok
+SYSTEM
+exit 0

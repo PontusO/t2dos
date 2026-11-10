@@ -13,7 +13,7 @@ NAME.out is a board-only case run by a function below (pipesrv).
                            and run every case again: any AddressSanitizer or
                            LeakSanitizer report (a leak, a double free, a bad access)
                            fails the case; this is the interpreter's leak check
-  check_basic.py --board   upload root/bin/basic.bin to /bin/basic.bin and the cases to
+  check_basic.py --board   upload root/bin/basic.bin to /bin/basic.bin (and edit.bin, for editrun) and the cases to
                            /src/basic/t/, run `basic NAME.bas > NAME.txt` there through the
                            shell and fetch NAME.txt: the output must match NAME.out byte for
                            byte and the exit code too. A case with a NAME.in is run without
@@ -28,7 +28,7 @@ NAME.out is a board-only case run by a function below (pipesrv).
                            Cases that need the PC (screen1: the board's conctl output does
                            not go through the `>` redirection; inkey1, ctrlc1, esc1, sleep1, sleep2: they feed
                            stdin at once) are not run on the board. The board key cases
-                           (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20, pipeeof, pipedup) drive the console directly and
+                           (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20, pipeeof, pipedup, editrun) drive the console directly and
                            run only on the board, after the ordinary cases.
   --only NAME              run only that case (may be given more than once); the board key
                            cases are named like that too
@@ -48,7 +48,7 @@ PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
 PC_ONLY = ('screen1', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2')
-KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20', 'pipeeof', 'pipedup')
+KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20', 'pipeeof', 'pipedup', 'editrun')
 BOARD_ONLY = ('pipesrv',)        # tests/basic/NAME.bas without a NAME.out: only the board runs it
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
@@ -393,9 +393,35 @@ def case_pipedup(r):
     return key_result('pipedup', out == ['pd.bas:2: Path/File access error'] and code == 1, '%r exit %d' % (out, code))
 
 
+def case_editrun(r):
+    """edit hello.bas, ^R: the program's output and `Press any key`; a key brings the editor back,
+    ^X leaves it, the prompt returns and PSRAM is as before"""
+    before = psram_free(r)
+    b = r.b
+    b.s.reset_input_buffer()
+    b._write(b'edit /src/basic/t/hello.bas\r')
+    time.sleep(2.0)
+    b.s.reset_input_buffer()
+    b._write(b'\x12')
+    raw = b''
+    end = time.time() + 15
+    while b'Press any key' not in raw and time.time() < end:
+        raw += b._read(1.0, 0.3)
+    shown = b'Hello from BASIC' in raw and b'Press any key' in raw
+    b._write(b'x')
+    time.sleep(1.0)
+    b._write(b'\x18')
+    tail = b._read(10.0, 0.5, True)
+    good = shown and tail.endswith(b'> ')      # the editor's redraw has no line breaks
+    out, _ = r.run('echo hi', 10.0)
+    after = psram_free(r)
+    return key_result('editrun', good and out == ['hi'] and before == after,
+                      '%r then %r out %r free %d -> %d' % (raw[-200:], tail[-200:], out, before, after))
+
+
 def run_key_case(r, name):
     return {'ctrlc': case_ctrlc, 'keyqueue': case_keyqueue, 'bgyield': case_bgyield,
-            'pins': case_pins, 'pipesrv': case_pipesrv, 'pipeeof': case_pipeeof, 'pipedup': case_pipedup, 'fileerr20': case_fileerr20}[name](r)
+            'pins': case_pins, 'pipesrv': case_pipesrv, 'pipeeof': case_pipeeof, 'pipedup': case_pipedup, 'editrun': case_editrun, 'fileerr20': case_fileerr20}[name](r)
 
 
 def run_board(cases, only=()):
@@ -406,6 +432,7 @@ def run_board(cases, only=()):
         return False
     binp = os.path.join(ROOT, 'root', 'bin', 'basic.bin')
     r.b.put(binp, '/bin/basic.bin')
+    r.b.put(os.path.join(ROOT, 'root', 'bin', 'edit.bin'), '/bin/edit.bin')    # editrun
     for d in ('/src', '/src/basic', BOARD_DIR):
         r.run('mkdir ' + d, 10.0)                    # fails harmlessly when it exists
     cases = [c for c in cases if c.name not in PC_ONLY]
