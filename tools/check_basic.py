@@ -24,7 +24,7 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
                            an interpreter leak does not show here: --pc's AddressSanitizer
                            run is the leak check.
                            Cases that need the PC (screen1: the board's conctl output does
-                           not go through the `>` redirection; inkey1, ctrlc1: they feed
+                           not go through the `>` redirection; inkey1, ctrlc1, esc1, sleep1, sleep2: they feed
                            stdin at once) are not run on the board. The board key cases
                            (ctrlc, keyqueue, bgyield, pins) drive the console directly and
                            run only on the board, after the ordinary cases.
@@ -44,7 +44,7 @@ CASES = os.path.join(ROOT, 'tests', 'basic')
 PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
-PC_ONLY = ('screen1', 'inkey1', 'ctrlc1')
+PC_ONLY = ('screen1', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2')
 KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins')
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)

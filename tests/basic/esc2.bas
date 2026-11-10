@@ -1,0 +1,2 @@
+LINE INPUT s$
+PRINT LEN(s$); s$

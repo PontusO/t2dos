@@ -47,8 +47,8 @@ int key_wait() {
   return c;
 }
 
-// Waits ms milliseconds, looking for Ctrl-C; with stop, a key (taken from the queue) ends
-// the wait early.
+// Waits ms milliseconds, looking for Ctrl-C; with stop, a waiting key (it stays in the
+// queue) ends the wait early, as QBasic's SLEEP.
 void wait_ms(int ms, int stop) {
   int t0; int left;
   t0 = millis();
@@ -56,7 +56,7 @@ void wait_ms(int ms, int stop) {
     left = ms - (millis() - t0);
     if (left <= 0) return;
     if (key_poll() < 0) { brk_at(pc - 1); return; }
-    if (stop && kqn > 0) { kq_pop(); return; }
+    if (stop && kqn > 0) return;
     if (left > 10) left = 10;
     sleep(left);
   }
@@ -89,12 +89,45 @@ int esc_code(int *len) {
   return 0;
 }
 
+// 1 if the queue holds only the beginning of an escape sequence: ESC, ESC [, ESC O,
+// ESC [ digit
+int esc_partial() {
+  if (kqn == 0 || kq[0] != 27) return 0;
+  if (kqn == 1) return 1;
+  if (kq[1] != '[' && kq[1] != 'O') return 0;
+  if (kqn == 2) return 1;
+  if (kqn == 3 && kq[1] == '[' && kq[2] >= '0' && kq[2] <= '9') return 1;
+  return 0;
+}
+
+// A key sequence may arrive in pieces: when the queue starts with an incomplete one, poll
+// for up to 30 ms for the rest. Returns 0 on Ctrl-C (the break is made).
+int esc_settle() {
+  int t0;
+  t0 = millis();
+  while (esc_partial() && millis() - t0 < 30) {
+    if (key_poll() < 0) { brk_at(pc - 1); return 0; }
+    if (!esc_partial()) break;
+    sleep(2);
+  }
+  return 1;
+}
+
+void kq_unshift(int c) {
+  int i;
+  if (kqn >= 64) kqn = 63;
+  for (i = kqn; i > 0; i--) kq[i] = kq[i - 1];
+  kq[0] = c;
+  kqn++;
+}
+
 void h_inkeys() {
   int c; int len; int letter; char *s;
   yield();
   sp++; vs[sp] = 0; vt[sp] = 0;
   if (key_poll() < 0) { brk_at(pc - 1); return; }
   if (kqn == 0) return;
+  if (!esc_settle()) return;
   letter = esc_code(&len);
   if (letter) {
     s = str_new(2); s[0] = 0; s[1] = letter;
@@ -108,18 +141,16 @@ void h_inkeys() {
 }
 
 // ---------------------------------------------------------------- INPUT, LINE INPUT
-// After an ESC, drop the rest of the key sequence (an arrow key) from a line being typed.
-// Returns 0 on Ctrl-C.
+// After an ESC was read from a line being typed: take the key sequence it begins (an arrow
+// key) off the queue so that none of it is typed; a lone ESC is dropped, the text after it
+// stays. Returns 0 on Ctrl-C.
 int skip_esc() {
-  int c;
+  int len;
+  kq_unshift(27);
   if (key_poll() < 0) { brk_at(pc - 1); return 0; }
-  if (kqn > 0 && (kq[0] == '[' || kq[0] == 'O')) {
-    kq_pop();
-    while (kqn > 0) {
-      c = kq_pop();
-      if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~') break;
-    }
-  }
+  if (!esc_settle()) return 0;
+  esc_code(&len);
+  while (len > 0) { kq_pop(); len--; }
   return 1;
 }
 
@@ -260,6 +291,14 @@ void h_locate() {
   out_col = col - 1;
 }
 
+// QBasic's colour numbers (0 black, 1 blue, 2 green, 3 cyan, 4 red, 5 magenta, 6 brown,
+// 7 white) to conctl's ANSI order
+int ansi_color(int c) {
+  char *map;
+  map = "04261537";
+  return map[c & 7] - '0';
+}
+
 void h_color() {
   int fg; int bg;
   bg = vs[sp]; fg = vs[sp - 1]; sp = sp - 2;
@@ -267,7 +306,7 @@ void h_color() {
   if (fg >= 0) cur_fg = fg & 7;
   if (bg >= 0) cur_bg = bg & 7;
   out_flush();
-  conctl(CON_COLOR, cur_fg, cur_bg);
+  conctl(CON_COLOR, ansi_color(cur_fg), ansi_color(cur_bg));
 }
 
 void h_beep() { out_flush(); putchar(7); }
@@ -364,9 +403,10 @@ void h_sleep() {
     wait_ms((int)(f * 1000.0), 1);
     return;
   }
-  if (kqn > 0) { kq_pop(); return; }
+  if (kqn > 0) return;                                     // the key stays queued
   c = key_wait();
   if (c == -2) brk_at(pc - 1);
+  else if (c >= 0) kq_unshift(c);
 }
 
 void st_pause() {

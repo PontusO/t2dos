@@ -1,0 +1,6 @@
+DO
+  k$ = INKEY$
+  IF k$ = "" THEN EXIT DO
+  PRINT ASC(k$);
+LOOP
+PRINT
