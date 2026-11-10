@@ -1,0 +1,2 @@
+OPEN "fe3.tmp" FOR OUTPUT AS #1
+OPEN "fe3.tmp" FOR OUTPUT AS #1

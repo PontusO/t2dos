@@ -1,0 +1,7 @@
+OPEN "fe4.tmp" FOR OUTPUT AS #1
+PRINT #1, "one"
+CLOSE #1
+OPEN "fe4.tmp" FOR INPUT AS #1
+LINE INPUT #1, a$
+PRINT a$
+LINE INPUT #1, a$

@@ -34,11 +34,23 @@ int t2_now_ms(void) {
   return (int)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+// /bin/NAME.bin is the T2DOS program NAME; on the PC it is the host's /bin/NAME (SHELL tests)
+char *t2_hostpath(char *path, char *buf, int n) {
+  int len = strlen(path);
+  if (!strncmp(path, "/bin/", 5) && len > 9 && len < n && !strcmp(path + len - 4, ".bin")) {
+    memcpy(buf, path, len - 4);
+    buf[len - 4] = 0;
+    return buf;
+  }
+  return path;
+}
+
 void t2_exit(int code) { exit(code); }
 
 int t2_exec(char *path, int argc, char **argv) {
   // runs a PC program: the T2DOS paths do not exist here, so this is for tests that need it
-  pid_t pid; int st; char **av; int i;
+  pid_t pid; int st; char **av; int i; char hp[256];
+  path = t2_hostpath(path, hp, sizeof(hp));
   av = calloc(argc + 1, sizeof(char *));
   for (i = 0; i < argc; i++) av[i] = argv[i];
   pid = fork();
@@ -116,8 +128,8 @@ int t2_seek(int fd, int offset, int whence) {
 }
 
 int t2_stat(char *path, struct stat_t *st) {
-  struct stat s;
-  if (stat(path, &s) < 0) return -1;
+  struct stat s; char hp[256];
+  if (stat(t2_hostpath(path, hp, sizeof(hp)), &s) < 0) return -1;
   st->size = (int)s.st_size;
   st->isdir = S_ISDIR(s.st_mode) ? 1 : 0;
   st->mtime = (int)s.st_mtime;

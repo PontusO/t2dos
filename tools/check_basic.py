@@ -2,7 +2,9 @@
 """Run the BASIC interpreter's test cases (tests/basic/) on the PC or on the board.
 
 A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a last line
-`exit N` (the interpreter's exit code). NAME.in, if present, is the program's stdin.
+`exit N` (the interpreter's exit code). NAME.in, if present, is the program's stdin. NAME.args, if present, holds the arguments after
+`basic NAME.bas` (an empty NAME.args means `basic` alone, with no file). A NAME.bas without a
+NAME.out is a board-only case run by a function below (pipesrv).
 
   check_basic.py --pc      build build/basic-pc (gcc -m32, basic/pcsys.h maps the T2DOS
                            library onto libc) and run every case with `basic-pc NAME.bas`
@@ -26,7 +28,7 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
                            Cases that need the PC (screen1: the board's conctl output does
                            not go through the `>` redirection; inkey1, ctrlc1, esc1, sleep1, sleep2: they feed
                            stdin at once) are not run on the board. The board key cases
-                           (ctrlc, keyqueue, bgyield, pins) drive the console directly and
+                           (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20) drive the console directly and
                            run only on the board, after the ordinary cases.
   --only NAME              run only that case (may be given more than once); the board key
                            cases are named like that too
@@ -35,6 +37,7 @@ Both may be given; the PC run comes first. Exit status 0 when every case passes.
 import glob
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -45,7 +48,8 @@ PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
 PC_ONLY = ('screen1', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2')
-KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins')
+KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20')
+BOARD_ONLY = ('pipesrv',)        # tests/basic/NAME.bas without a NAME.out: only the board runs it
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
 PC_CFLAGS = ['-m32', '-w', '-msse2', '-mfpmath=sse', '-fsingle-precision-constant',
@@ -65,16 +69,39 @@ class Case:
         self.out = ''.join(l + '\n' for l in lines[:-1])     # expected stdout
         p = os.path.join(CASES, name + '.in')
         self.stdin = open(p, 'rb').read() if os.path.exists(p) else None
+        p = os.path.join(CASES, name + '.args')
+        # the arguments after `basic NAME.bas`; an empty file means `basic` alone, no file
+        self.args = None
+        if os.path.exists(p):
+            self.args = open(p).read().split()
+        self.cmd_args = [] if self.args is None else self.args
+
+    def argv(self):
+        """the words after the interpreter: the file name, then NAME.args if there is one"""
+        if self.args is not None and not self.args:
+            return []
+        return [self.name + '.bas'] + self.cmd_args
 
 
 def load_cases(only):
     names = sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(CASES, '*.bas')))
+    names = [n for n in names if n not in BOARD_ONLY]
     if only:
         missing = [n for n in only if n not in names and n not in KEY_CASES]
         if missing:
             raise SystemExit('no such case: %s' % ', '.join(missing))
         names = [n for n in names if n in only]
     return [Case(n) for n in names]
+
+
+def clean_scratch():
+    """the files and directories the cases leave in tests/basic (*.tmp; the board's file
+    system drops a directory with its last entry, the PC's does not)"""
+    for p in glob.glob(os.path.join(CASES, '*.tmp')):
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            os.remove(p)
 
 
 def report(where, case, ok, want, got):
@@ -102,12 +129,13 @@ def run_pc(cases):
     ok = True
     for c in cases:
         try:
-            r = subprocess.run([PC_BIN, c.name + '.bas'], cwd=CASES, input=c.stdin or b'',
+            r = subprocess.run([PC_BIN] + c.argv(), cwd=CASES, input=c.stdin or b'',
                                capture_output=True, timeout=20)
             got = r.stdout.decode('latin-1') + 'exit %d\n' % r.returncode
         except subprocess.TimeoutExpired:
             got = 'TIMEOUT\n'
         want = c.out + 'exit %d\n' % c.code
+        clean_scratch()
         report('pc', c, got == want, want, got)
         ok = ok and got == want
     return run_asan(cases) and ok
@@ -122,13 +150,14 @@ def run_asan(cases):
     ok = True
     for c in cases:
         try:
-            r = subprocess.run([ASAN_BIN, c.name + '.bas'], cwd=CASES, input=c.stdin or b'',
+            r = subprocess.run([ASAN_BIN] + c.argv(), cwd=CASES, input=c.stdin or b'',
                                capture_output=True, timeout=120, env=env)
             err = r.stderr.decode('latin-1')
             good = 'Sanitizer' not in err
             got = '' if good else err[:1500]
         except subprocess.TimeoutExpired:
             good, got = False, 'TIMEOUT'
+        clean_scratch()
         if not good:
             print('FAIL %s (asan)' % c.name)
             print('  ' + got.replace('\n', '\n  '))
@@ -196,12 +225,12 @@ def fetch_text(r, path):
 def run_board_case(r, c):
     """(ok, wanted, got) for one case, comparing as the docstring says"""
     if c.stdin is not None:
-        out, code = r.run('basic %s.bas' % c.name, 60.0, c.stdin)
+        out, code = r.run(' '.join(['basic'] + c.argv()), 60.0, c.stdin)
         got = [l.rstrip() for l in out] + ['exit %d' % code]
         want = [l.rstrip() for l in c.out.split('\n')[:-1]] + ['exit %d' % c.code]
         return got == want, want, got
     out_file = '%s.txt' % c.name
-    out, code = r.run('basic %s.bas > %s' % (c.name, out_file), 60.0)
+    out, code = r.run(' '.join(['basic'] + c.argv()) + ' > ' + out_file, 60.0)
     text = fetch_text(r, out_file)
     r.run('rm ' + out_file, 10.0)
     got = text + 'exit %d\n' % code
@@ -299,9 +328,52 @@ def case_pins(r):
     return key_result('pins', out == ['pins ok'] and code == 0, '%r exit %d' % (out, code))
 
 
+def case_pipesrv(r):
+    """a BASIC server in the background: it answers a request pipe on a reply pipe, `quit`
+    ends it, and PSRAM is back to where it was"""
+    before = psram_free(r)
+    out, _ = r.run('basic pipesrv.bas &', 10.0)
+    m = re.search(r'\[(\d+)\] basic', ' '.join(out))
+    if not m:
+        return key_result('pipesrv', False, 'no job line in %r' % out)
+    job = m.group(1)
+    try:
+        r.run('echo hello > /pipe/bsrv', 10.0)
+        rep, _ = r.run('cat /pipe/bsrv.out', 10.0)
+        r.run('echo again > /pipe/bsrv', 10.0)
+        rep2, _ = r.run('cat /pipe/bsrv.out', 10.0)
+        r.run('echo quit > /pipe/bsrv', 10.0)
+        time.sleep(0.5)
+        jobs, _ = r.run('jobs', 10.0)
+    finally:
+        r.run('kill ' + job, 10.0)             # harmless once it has ended
+    after = psram_free(r)
+    running = any(l.startswith('[%s] running' % job) for l in jobs)
+    good = rep == ['got: hello'] and rep2 == ['got: again'] and not running and before == after
+    return key_result('pipesrv', good, 'replies %r %r jobs %r free %d -> %d' % (rep, rep2, jobs, before, after))
+
+
+def case_fileerr20(r):
+    """a program that errors with a file open, 20 times: the kernel's open-file table is not exhausted"""
+    put_text(r, 'OPEN "fe20.tmp" FOR OUTPUT AS #1\nPRINT #1, "x"\nOPEN "fe20.tmp" FOR INPUT AS #2\n'
+             'OPEN "fe20.tmp" FOR OUTPUT AS #1\n', 'fe20.bas')
+    ok = True
+    last = ''
+    for i in range(20):
+        out, code = r.run('basic fe20.bas', 20.0)
+        last = repr((out, code))
+        if code != 1 or not out or 'File already open' not in out[-1]:
+            ok = False
+            break
+    r.run('rm fe20.tmp', 10.0)
+    out, code = r.run('basic file1.bas', 20.0)
+    ok = ok and code == 0
+    return key_result('fileerr20', ok, 'run %d: %s; then %r' % (i, last, out[:2]))
+
+
 def run_key_case(r, name):
     return {'ctrlc': case_ctrlc, 'keyqueue': case_keyqueue, 'bgyield': case_bgyield,
-            'pins': case_pins}[name](r)
+            'pins': case_pins, 'pipesrv': case_pipesrv, 'fileerr20': case_fileerr20}[name](r)
 
 
 def run_board(cases, only=()):
@@ -317,6 +389,7 @@ def run_board(cases, only=()):
     cases = [c for c in cases if c.name not in PC_ONLY]
     for c in cases:
         r.b.put(c.bas, '%s/%s.bas' % (BOARD_DIR, c.name))
+    r.b.put(os.path.join(CASES, 'pipesrv.bas'), BOARD_DIR + '/pipesrv.bas')
     r.run('cd ' + BOARD_DIR, 10.0)
     ok = True
     try:

@@ -13,9 +13,10 @@ char **prog_argv;
 char outbuf[512];
 int outn;
 int out_col;
+int out_fd;                      // 0: the console (fd 1), else a file PRINT # is writing
 
 void out_flush() {
-  if (outn > 0) write(1, outbuf, outn);
+  if (outn > 0) write(out_fd ? out_fd : 1, outbuf, outn);
   outn = 0;
 }
 
@@ -40,6 +41,7 @@ void out_cstr(char *s) { out_str(s, strlen(s)); }
 // messages) and running (the VM loop stops).
 int err_line(int line, char *msg) {
   char num[16];
+  out_reset();
   if (nerr == 0) {
     if (out_col > 0) out_char('\n');
     out_cstr(srcname); out_char(':');
@@ -57,6 +59,7 @@ int err_at(int pos, char *msg) { return err_line(line_of(pos), msg); }
 
 int brk_at(int pos) {
   char num[16];
+  out_reset();
   if (nerr == 0) {
     if (out_col > 0) out_char('\n');
     out_cstr("Break at "); out_cstr(srcname); out_char(':');
@@ -100,6 +103,7 @@ int main(int argc, char **argv) {
     vm_alloc();
     vm_run(0);
   }
+  out_reset();
   if (out_col > 0) out_char('\n');   // the shell's prompt starts on a line of its own
   out_flush();
   io_free();

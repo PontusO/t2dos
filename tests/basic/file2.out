@@ -1,0 +1,9 @@
+a.txt
+b.txt
+sub/
+b.txt
+c.txt
+sub/
+bee
+done
+exit 0

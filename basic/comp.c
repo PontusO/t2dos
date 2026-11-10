@@ -527,8 +527,15 @@ int expr() {
 // PRINT [items]: items separated by ';' (nothing between), ',' (next 14-column zone) or
 // nothing; no newline after a final ';' or ','. `?` is PRINT.
 void st_print() {
-  int sep; int t;
+  int sep; int t; int file;
   next();
+  file = 0;
+  if (TK == TK_HASH) {                                   // PRINT #n, items: to file n
+    next(); expr_to(T_INT);
+    emit_fn(K_PRINT, 0);
+    file = 1;
+    if (!at_end() && !need(TK_COMMA)) return;
+  }
   sep = 0;
   while (!at_end()) {
     if (TK == TK_SEMI) { next(); sep = 1; continue; }
@@ -547,6 +554,7 @@ void st_print() {
     sep = 0;
   }
   if (!sep) emit(OP_PRNL);
+  if (file) emit_fn(K_PRINT, 1);
 }
 
 // name = expression (also after LET)
@@ -1541,7 +1549,12 @@ void st_input() {
   int fl; int nv; int i; int d; int s; int t; int tpos; int k;
   next();
   fl = 2;
-  if (TK == TK_STR) {
+  if (TK == TK_HASH) {                                    // INPUT #n, v1, ...: from file n
+    next(); expr_to(T_INT);
+    if (!need(TK_COMMA)) return;
+    fl = 4;
+  }
+  else if (TK == TK_STR) {
     if (toks[tp + 1].tk != TK_SEMI && toks[tp + 1].tk != TK_COMMA) { bad_token(); return; }
     if (toks[tp].val) { emit(OP_PUSHS); emit_arg(toks[tp].val); }
     else { emit(OP_PUSHI); emit_arg(0); }
@@ -1588,7 +1601,12 @@ void st_line() {
   if (toks[tp + 1].tk != K_INPUT) { st_unsup(); return; }
   next(); next();
   fl = 0;
-  if (TK == TK_STR) {
+  if (TK == TK_HASH) {                                    // LINE INPUT #n, v$: from file n
+    next(); expr_to(T_INT);
+    if (!need(TK_COMMA)) return;
+    fl = 4;
+  }
+  else if (TK == TK_STR) {
     if (toks[tp + 1].tk != TK_SEMI && toks[tp + 1].tk != TK_COMMA) { bad_token(); return; }
     if (toks[tp].val) { emit(OP_PUSHS); emit_arg(toks[tp].val); }
     else { emit(OP_PUSHI); emit_arg(0); }

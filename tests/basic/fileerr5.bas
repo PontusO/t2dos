@@ -1,0 +1,4 @@
+OPEN "fe5.tmp" FOR OUTPUT AS #1
+CLOSE #1
+OPEN "fe5.tmp" FOR INPUT AS #1
+PRINT #1, "x"
