@@ -1315,7 +1315,10 @@ statement works as in QBasic.
 
 #### Source form
 
-- Keywords and names are not case sensitive.
+- Keywords are not case sensitive; names are (unlike QBasic): `Total`, `total`
+  and `TOTAL` are three variables, and the same goes for arrays, labels,
+  `SUB`s and `FUNCTION`s. A name that matches a keyword in any case is still
+  the keyword, so `Name$` is the `NAME` statement.
 - One statement per line, or several separated by `:`.
 - Comments: `REM text` and `' text`, to the end of the line.
 - A label is a name followed by `:` at the start of a line (`loop:`). Labels

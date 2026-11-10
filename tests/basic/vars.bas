@@ -19,7 +19,7 @@ PRINT x; b
 SWAP a$, x$
 PRINT a$; x$
 PRINT undefined; undefined$; "|"
-Mixed = 4: PRINT MIXED; mixed
+Mixed = 4: mixed = 5: PRINT Mixed; mixed; MIXED
 DEFINT A-Z
 i = 7.5
 PRINT i

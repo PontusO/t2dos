@@ -138,10 +138,14 @@ int suf_type(int suf) {
   return T_SNG;
 }
 
-void upname(char *dst, char *src) {
-  int c;
-  while (*src) { c = *src; if (c >= 'a' && c <= 'z') c = c - 32; *dst = c; dst++; src++; }
-  *dst = 0;
+// names are case sensitive (keywords are not): copy a name token as written
+void cpname(char *dst, char *src) {
+  strcpy(dst, src);
+}
+
+// the DEFtype suffix for a name without one, by its first letter in either case
+int dsuf(char *u) {
+  return defsuf[(u[0] | 32) - 'a'];
 }
 
 int sym_hash(char *u) {
@@ -211,7 +215,7 @@ int lookup(char *u, int suf, int kind) {
       s = sym_in(u, -1, kind, 0);
       if (s >= 0 && (syms[s].flags & F_SHARED)) return s;
     }
-    suf = defsuf[u[0] - 'A'];
+    suf = dsuf(u);
   }
   s = sym_in(u, suf, kind, cur_scope);
   if (s >= 0) return s;
@@ -244,13 +248,13 @@ int var_new(char *u, int suf, int kind, int type) {
 // use. Constants answer to their name with any suffix.
 int name_ref() {
   char u[48]; int suf; int s;
-  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  cpname(u, (char *)toks[tp].val); suf = toks[tp].suf;
   next();
   s = const_find(u);
   if (s >= 0) return s;
   s = lookup(u, suf, S_VAR);
   if (s >= 0) return s;
-  if (!suf) suf = defsuf[u[0] - 'A'];
+  if (!suf) suf = dsuf(u);
   return var_new(u, suf, S_VAR, suf_type(suf));
 }
 
@@ -362,7 +366,7 @@ int primary() {
     return T_INT;
   }
   if (t == TK_ID) {
-    upname(u, (char *)toks[tp].val);
+    cpname(u, (char *)toks[tp].val);
     if (const_mode && const_find(u) < 0) { cerr("Invalid constant"); return T_INT; }
     s = proc_find(u);
     if (s >= 0 && procs[s].isfn) {                        // a FUNCTION call
@@ -569,7 +573,7 @@ void st_print() {
 void st_assign() {
   int s; int t; char u[48];
   if (TK != TK_ID) { bad_token(); return; }
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   s = proc_find(u);
   if (s >= 0 && procs[s].isfn) {                          // a FUNCTION's result, in its body
     if (toks[tp + 1].tk == TK_LPAR) { cerr("Array not defined"); return; }
@@ -627,7 +631,7 @@ void st_const() {
   next();
   while (1) {
     if (TK != TK_ID) { bad_token(); return; }
-    upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+    cpname(u, (char *)toks[tp].val); suf = toks[tp].suf;
     if (sym_in(u, 0, S_CONST, cur_scope) >= 0 || var_named(u, cur_scope)) {
       cerr("Duplicate definition");
       return;
@@ -740,7 +744,7 @@ int find_label(char *u, int scope) {
 // name: at the start of a line (the label and its ':' are consumed)
 void define_label() {
   char u[48];
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   if (find_label(u, cur_scope) >= 0) { cerr("Duplicate label"); return; }
   if (nlb >= caplb) {
     caplb = caplb * 2 + 32;
@@ -756,7 +760,7 @@ void define_label() {
 // the label named by the token at tp (consumed): the argument at code[pos] is patched later
 void label_ref(int pos, int kind) {
   char u[48];
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   if (nfx >= capfx) {
     capfx = capfx * 2 + 32;
     fx_name = grow(fx_name, nfx, capfx); fx_scope = grow(fx_scope, nfx, capfx);
@@ -798,7 +802,7 @@ void if_part() {
   int k; int p; char u[48];
   k = toks[tp + 1].tk;
   if (TK == TK_ID && (k == TK_EOL || k == TK_EOF || k == K_ELSE)) {
-    upname(u, (char *)toks[tp].val);
+    cpname(u, (char *)toks[tp].val);
     p = proc_find(u);
     if (p >= 0 && !procs[p].isfn && procs[p].np == 0) { next(); call_args(p, 0); return; }
     goto_label(OP_JMP);
@@ -904,7 +908,7 @@ void st_next() {
     if (!blk_expect(B_FOR, "NEXT without FOR")) return;
     b = &blk[nblk - 1];
     if (TK == TK_ID) {                                    // only looked up, never created
-      upname(u, (char *)toks[tp].val);
+      cpname(u, (char *)toks[tp].val);
       s = lookup(u, toks[tp].suf, S_VAR);
       next();
       if (s != b->c) { err_line(toks[tp - 1].line, "NEXT without FOR"); return; }
@@ -1163,7 +1167,7 @@ int arr_find(char *u, int suf, int shared_too) {
   if (!suf) {
     s = sym_in(u, -1, S_ARR, cur_scope);
     if (s >= 0) return s;
-    suf = defsuf[u[0] - 'A'];
+    suf = dsuf(u);
   }
   return sym_in(u, suf, S_ARR, cur_scope);
 }
@@ -1173,11 +1177,11 @@ int arr_find(char *u, int suf, int shared_too) {
 // element is first reached.
 int elem_ref() {
   char u[48]; int suf; int s; int nd; int it;
-  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  cpname(u, (char *)toks[tp].val); suf = toks[tp].suf;
   next();
   s = lookup(u, suf, S_ARR);
   if (s < 0) {
-    if (!suf) suf = defsuf[u[0] - 'A'];
+    if (!suf) suf = dsuf(u);
     s = var_new(u, suf, S_ARR, suf_type(suf));
     syms[s].flags = syms[s].flags | F_IMPL;
   }
@@ -1202,7 +1206,7 @@ int elem_ref() {
 int arr_named() {
   char u[48]; int s;
   if (TK != TK_ID) { bad_token(); return -1; }
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   s = lookup(u, toks[tp].suf, S_ARR);
   if (s < 0) { cerr("Array not defined"); return -1; }
   next();
@@ -1244,7 +1248,7 @@ int dim_array(char *u, int suf, int as, int nd, int mask, int redim, int shared)
     if (syms[s].dims && syms[s].dims != nd) { cerr("Wrong number of dimensions"); return 0; }
   }
   else {
-    if (!k) k = defsuf[u[0] - 'A'];
+    if (!k) k = dsuf(u);
     s = var_new(u, k, S_ARR, suf_type(k));
     if (as) syms[s].flags = syms[s].flags | F_AS;
     if (shared) syms[s].flags = syms[s].flags | F_SHARED;
@@ -1259,7 +1263,7 @@ int dim_array(char *u, int suf, int as, int nd, int mask, int redim, int shared)
 int dim_var(char *u, int suf, int as, int shared) {
   int s; int k;
   k = suf;
-  if (!k) k = defsuf[u[0] - 'A'];
+  if (!k) k = dsuf(u);
   if (as) k = as;
   if (const_find(u) >= 0 || (as && var_named(u, cur_scope)) ||
       sym_in(u, k, S_VAR, cur_scope) >= 0 || sym_in(u, -1, S_VAR, cur_scope) >= 0) {
@@ -1283,7 +1287,7 @@ void st_dim() {
   shared = accept(K_SHARED);
   while (1) {
     if (TK != TK_ID) { bad_token(); return; }
-    upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+    cpname(u, (char *)toks[tp].val); suf = toks[tp].suf;
     next();
     nd = 0; mask = 0;
     if (TK == TK_LPAR) {
@@ -1331,7 +1335,7 @@ int proc_add(char *u, int suf, int isfn) {
   }
   n = &procs[nproc];
   n->uname = dupstr(u); n->suf = suf; n->isfn = isfn; n->type = T_NONE;
-  if (isfn) { k = suf; if (!k) k = defsuf[u[0] - 'A']; n->type = suf_type(k); }
+  if (isfn) { k = suf; if (!k) k = dsuf(u); n->type = suf_type(k); }
   n->np = 0; n->pfirst = npa; n->entry = 0; n->ncell = 0; n->tags = 0; n->tok = 0; n->line = 0;
   nproc++;
   return nproc - 1;
@@ -1366,7 +1370,7 @@ int header(int p) {
   isfn = TK == K_FUNCTION;
   next();
   if (TK != TK_ID) { bad_token(); return -1; }
-  upname(u, (char *)toks[tp].val); suf = toks[tp].suf;
+  cpname(u, (char *)toks[tp].val); suf = toks[tp].suf;
   if (suf && !isfn) { bad_token(); return -1; }
   if (scanning) {
     if (proc_find(u) >= 0) return -1;       // a second definition: reported when compiled
@@ -1377,7 +1381,7 @@ int header(int p) {
   if (accept(TK_LPAR) && !accept(TK_RPAR)) {
     while (1) {
       if (TK != TK_ID) { bad_token(); return -1; }
-      upname(u, (char *)toks[tp].val); psuf = toks[tp].suf;
+      cpname(u, (char *)toks[tp].val); psuf = toks[tp].suf;
       next();
       arr = 0;
       if (TK == TK_LPAR) { next(); if (!need(TK_RPAR)) return -1; arr = 1; }
@@ -1388,7 +1392,7 @@ int header(int p) {
         if (psuf && suf_type(psuf) != suf_type(as)) { cerr("Duplicate definition"); return -1; }
         psuf = as;
       }
-      if (!psuf) psuf = defsuf[u[0] - 'A'];
+      if (!psuf) psuf = dsuf(u);
       kind = S_VAR;
       if (arr) kind = S_ARR;
       if (scanning) param_add(p, suf_type(psuf), arr);
@@ -1444,7 +1448,7 @@ void st_sub() {
   if (cur_proc >= 0) { err_line(procs[cur_proc].line, proc_unclosed(cur_proc)); return; }
   if (nblk > 0) { err_line(blk[nblk - 1].line, unclosed(blk[nblk - 1].kind)); return; }
   p = -1;
-  if (toks[tp + 1].tk == TK_ID) { upname(u, (char *)toks[tp + 1].val); p = proc_find(u); }
+  if (toks[tp + 1].tk == TK_ID) { cpname(u, (char *)toks[tp + 1].val); p = proc_find(u); }
   if (p < 0) { header(-1); if (!nerr) cerr("Syntax error"); return; }   // the scan failed
   if (procs[p].tok != kw) { cerr("Duplicate definition"); return; }
   proc_skip = jump(OP_JMP, -1);
@@ -1482,7 +1486,7 @@ void end_proc(int isfn) {
 int ref_arg(int paren) {
   char u[48]; int j; int d; int k;
   if (TK != TK_ID) return 0;
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   if (const_find(u) >= 0 || proc_find(u) >= 0) return 0;
   j = tp + 1;
   if (toks[j].tk == TK_LPAR) {
@@ -1507,7 +1511,7 @@ int call_arg(int p, int i, int paren) {
   int pt; int pa; int s; int t; char u[48];
   pt = pa_type[procs[p].pfirst + i]; pa = pa_arr[procs[p].pfirst + i];
   if (TK == TK_ID && toks[tp + 1].tk == TK_LPAR && toks[tp + 2].tk == TK_RPAR) {   // a whole array
-    upname(u, (char *)toks[tp].val);
+    cpname(u, (char *)toks[tp].val);
     s = lookup(u, toks[tp].suf, S_ARR);
     if (s < 0) { cerr("Array not defined"); return 0; }
     if (!pa || syms[s].type != pt) { cerr("Parameter type mismatch"); return 0; }
@@ -1553,7 +1557,7 @@ void st_call() {
   char u[48]; int p;
   next();
   if (TK != TK_ID) { bad_token(); return; }
-  upname(u, (char *)toks[tp].val);
+  cpname(u, (char *)toks[tp].val);
   p = proc_find(u);
   if (p < 0 || procs[p].isfn) { cerr("Subprogram not defined"); return; }
   next();
@@ -1674,7 +1678,7 @@ void statement() {
     return;
   }
   if (t == TK_ID) {                                       // `name args` calls a SUB
-    upname(u, (char *)toks[tp].val);
+    cpname(u, (char *)toks[tp].val);
     p = proc_find(u);
     if (p >= 0 && !procs[p].isfn) { next(); call_args(p, 0); return; }
     st_assign();
