@@ -1,0 +1,6 @@
+sh /tmp/sh/script.sh one two
+echo after $?
+/tmp/sh/inner.sh a b
+echo rc $? shared=$shared args=$#
+sh /tmp/sh/unclosed.sh
+echo rc $?

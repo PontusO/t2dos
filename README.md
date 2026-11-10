@@ -149,11 +149,12 @@ A command is a program name followed by arguments separated by spaces:
 
 The shell looks for `name.bin` in the current directory first, then in
 `/bin`. A name that contains a dot is used as given (`tool.bin`,
-`/bin/ls.bin`). Arguments are split at spaces; there is no quoting. A line
-holds up to 255 characters and 15 arguments.
+`/bin/ls.bin`). Arguments are split at spaces; quotes keep spaces inside one
+argument (see [Scripts](#scripts)). A line holds up to 255 characters and 63
+arguments (a background job keeps 15).
 
-When a program ends with a non-zero exit code, the shell reports it with the
-run time:
+When a program typed at the prompt ends with a non-zero exit code, the shell
+reports it with the run time (in a script it does not: test `$?` instead):
 
 ```
 /src> cat nosuch.txt
@@ -166,11 +167,20 @@ cat: nosuch.txt: not found
 ```
 cd [dir]        change directory (no argument: /)
 pwd             print the current directory
-exit [code]     leave the shell (the kernel's recovery prompt takes over)
+exit [code]     leave the shell (the kernel's recovery prompt takes over);
+                in a script: end the script, with that exit code
 jobs            list the background jobs
 kill N          end background job N
-help            a one-line summary
+set             list the variables
+unset name...   remove variables
+read name       read a line from the keyboard into a variable
+test ..., [ ... ]  compare numbers or strings, check files (see Scripts)
+true, false     exit code 0, exit code 1
+sh file [args]  run a script in this shell
+help            a short summary
 ```
+
+The output of a built-in can be redirected like a program's (`set > vars.txt`).
 
 ### Output redirection
 
@@ -274,24 +284,101 @@ Rules for jobs:
 - Up and Down scroll through the last 16 command lines. A recalled line can
   be edited before pressing Enter. Down past the newest line brings back what
   you had started typing.
+- Tab completes the word being typed: a command name for the first word
+  (the built-ins and the programs in `/bin` and the current directory),
+  a file or directory name after it, also after `/` in a path. When several
+  names match, Tab adds what they have in common and a second Tab lists them.
 
 ### Scripts
 
-A script is a text file with one command per line; empty lines and lines
-starting with `#` are skipped.
+A script is a text file of commands. `sh build.sh args` runs it, and so does
+its name if it ends in `.sh` (`build.sh args`, found like a program: the
+current directory first, then `/bin`). `/autoexec.sh`, if it exists, runs
+every time the shell starts.
 
 ```sh
-# build.sh: build and run the example
-cc -o hello.bin hello.c
-hello
+# build.sh: build a program and run it if the build worked
+name=$1
+cc -o /bin/$name.bin $name.c
+if [ $? -eq 0 ]; then
+  $name
+else
+  echo build of $name failed
+  exit 1
+fi
 ```
 
 ```
-/src> sh build.sh
+/src> build.sh hello
 hello from T2DOS, 1 args
 ```
 
-`/autoexec.sh`, if it exists, runs every time the shell starts.
+The language is a small part of the Unix `sh`:
+
+- **Commands** are separated by newlines or `;`. A `#` at the start of a word
+  begins a comment that runs to the end of the line.
+- **Variables:** `name=value` sets one (no spaces around `=`; several may
+  share a line, but not with a command). `$name` or `${name}` is replaced by
+  its value anywhere in a line, an unknown name by nothing. Names are letters,
+  digits and `_`, at most 31 characters; a value holds up to 255 characters,
+  and there are at most 64 variables. A script shares the variables of the
+  shell that runs it, so it can set values for the prompt or for the next
+  script.
+- **Special values:** `$?` is the exit code of the last command (127: not
+  found), `$1` to `$9` are the script's arguments, `$#` how many there are and
+  `$0` the script's name.
+- **Arithmetic:** `$((expr))` is replaced by the value of an integer
+  expression with `+ - * / %`, parentheses, unary `-` and `!`, and the
+  comparisons `< <= > >= == !=` (1 or 0). Variables can be named without `$`:
+  `i=$((i + 1))`.
+- **Quotes:** `"..."` keeps spaces and still replaces `$` values (`\"`, `\$`
+  and `\\` inside it are a plain `"`, `$` and `\`); `'...'` keeps everything
+  as written; `\` before a character outside quotes keeps it as written. A
+  value with spaces stays one argument after `$name` (unlike the Unix `sh`),
+  but an unquoted value that is empty disappears, so write `"$x"` to compare a
+  value that may be empty.
+- **Patterns:** a word with `*` or `?` outside quotes is replaced by the
+  matching file names, sorted (`cat /src/*.c`, `rm /tmp/*.o`). Only the last
+  part of a path may contain them, and case is ignored. A pattern that matches
+  nothing is passed on unchanged.
+- **Conditions:** `if`, `while` and `for` lines take any command and look at
+  its exit code (0 is true). `test` and its other name `[ ... ]` compare:
+  `[ $n -eq 3 ]` (also `-ne -lt -le -gt -ge`) for numbers,
+  `[ "$s" = abc ]` and `!=` for strings, `-z s` (empty), `-n s` (not empty),
+  `-f path` (a file), `-d path` (a directory), `-e path` (either), and `!`
+  in front turns the answer round.
+
+```sh
+if [ -f /src/hello.c ]; then
+  echo found
+else
+  echo missing
+fi
+
+i=1
+while [ $i -le 3 ]; do
+  echo pass $i
+  i=$((i + 1))
+done
+
+for f in /src/basic/*.bas; do
+  echo $f
+done
+```
+
+`then`, `do` and `else` may share a line with the commands after them, and a
+whole block can be written on one line:
+`for x in a b c; do echo $x; done`. `for x; do ...` (no `in`) goes through
+the script's arguments. Blocks nest. At the prompt, a line that opens a block
+asks for more lines with `> ` until the block is closed.
+
+Ctrl-C between the commands of a `while` or `for` loop stops the loop and the
+scripts that are running. A program that runs inside the loop gets the key
+first, so it is checked when the program has ended. Keys typed while a script
+runs are kept for the next prompt.
+
+Not there (yet): `elif`, `break` and `continue`, functions, pipes, and
+putting a command's output into a variable.
 
 ---
 

@@ -89,7 +89,7 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
 
 static int run_bin(const char *name, int argc, char **argv);
 static int millis_() { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec * 1000 + tv.tv_usec / 1000; }
-static int kbhit() { struct pollfd p = { 0, POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
+static int kbhit() { struct pollfd p = { 0, POLLIN, 0 }; return poll(&p, 1, 0) > 0 && (p.revents & POLLIN); }   // not at the end of piped input
 static int listen_fd = -1; static char ipbuf[20] = "127.0.0.1";
 static int sock_recv(int fd, char *buf, int n, int timeout) {
   struct pollfd p = { fd, POLLIN, 0 }; int r = poll(&p, 1, timeout);

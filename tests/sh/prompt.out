@@ -1,0 +1,45 @@
+T2DOS shell, type help
+/> for i in 1 2
+> do
+>   echo loop $i
+> done
+loop 1
+loop 2
+/> if [ 1 -lt 2 ]
+> then
+> echo yes
+> fi
+yes
+/> fi
+sh: unexpected fi
+/> x=1 echo hi
+sh: echo: assignments go on a line of their own
+/> echo [$x] $ lone, $nosuch. end
+[] $ lone, . end
+/> f=/tmp/sh/v.txt
+/> echo via var > $f
+/> cat $f
+via var
+/> read answer
+hello there
+/> echo got $answer
+got hello there
+/> a=1 b=2
+/> echo $a$b
+12
+/> unset a answer
+/> set
+i=2
+f=/tmp/sh/v.txt
+b=2
+/> echo a;echo b
+a
+b
+/> sh
+T2DOS shell, type help
+/> echo nested shell
+nested shell
+/> exit 0
+/> echo back $?
+back 0
+/> 

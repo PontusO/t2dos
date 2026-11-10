@@ -1,0 +1,26 @@
+for i in 1 2
+do
+  echo loop $i
+done
+if [ 1 -lt 2 ]
+then
+echo yes
+fi
+fi
+x=1 echo hi
+echo [$x] $ lone, $nosuch. end
+f=/tmp/sh/v.txt
+echo via var > $f
+cat $f
+read answer
+hello there
+echo got $answer
+a=1 b=2
+echo $a$b
+unset a answer
+set
+echo a;echo b
+sh
+echo nested shell
+exit 0
+echo back $?

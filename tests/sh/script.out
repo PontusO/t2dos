@@ -1,0 +1,45 @@
+T2DOS shell, type help
+/> sh /tmp/sh/script.sh one two
+hello world worlds $name
+args: 2 first=one second=two zero=/tmp/sh/script.sh
+sum 7 cmp 1 1 neg -2 div 3
+cat: /nosuch: not found
+status 1
+t 0
+f 1
+n is 3
+not moon
+i=0
+i=1
+i=2
+i=3
+item a
+item b
+item c d
+arg one
+arg two
+file /tmp/sh/inner.sh
+file /tmp/sh/script.sh
+file /tmp/sh/unclosed.sh
+literal /tmp/sh/nomatch*
+script exists
+no dir
+empty is empty
+differ
+[a b]
+out
+more
+/
+nested ok
+a"b a b x  y
+/> echo after $?
+after 7
+/> /tmp/sh/inner.sh a b
+inner args 2 a
+/> echo rc $? shared=$shared args=$#
+rc 3 shared=frominner args=0
+/> sh /tmp/sh/unclosed.sh
+sh: while without done
+/> echo rc $?
+rc 2
+/> 
