@@ -516,6 +516,7 @@ void op_call() {
   fbase = sp - p->ncell - 2 * p->np;
   pc = p->entry;
   calls++;
+  out_push(0);                 // the body prints to the console
 }
 
 // free what the cells from..sp own (by their tags) and pop them
@@ -541,6 +542,7 @@ void op_ret() {
   pc = cs[i - 3]; fbase = cs[i - 2];
   csp = i - 4;
   calls--;
+  out_pop();
 }
 
 // ---------------------------------------------------------------- DATA

@@ -301,15 +301,19 @@ void io_init();
 void io_free();                  // at the end: strings an aborted INPUT left, colours back,
                                  // every file closed
 // Files (io.c): file numbers 1 to 15. PRINT #n and WRITE #n send their items to the file by
-// switching the output buffer's target for the statement: a select op before the items
-// (out_fd is the file's descriptor, out_col its column), a reset op after them, and
-// out_reset() when an error or Ctrl-C ends the program in between. INPUT #n and LINE INPUT
+// switching the output target for the statement: an OP_FN K_PRINT op before the items
+// (out_push: the target is saved on a stack, out_fd is the file's descriptor, out_col that
+// target's column), another after them (out_pop). Every SUB / FUNCTION call pushes the console
+// and its return pops, so what a called function prints never goes to the caller's file. A
+// CLOSE of a file that a pending pop returns to makes that pop the error Bad file number.
+// out_reset() clears the stack when an error or Ctrl-C ends the program in between. INPUT #n and LINE INPUT
 // #n read through a 512-byte buffer per file. On a pipe /pipe/NAME a read waits for data
-// by polling stat() (so Ctrl-C works); a message end is a 0 read that sets EOF(n), and the
-// next input statement then waits for the next message. Known limit: a user FUNCTION that
-// itself prints, called inside a PRINT #n item, prints to the file.
+// by polling stat() (so Ctrl-C works); a message end is a 0 read that sets EOF(n) (EOF on a pipe with nothing buffered waits for the next read), and the
+// next input statement then waits for the next message.
 extern int out_fd;               // the descriptor out_flush() writes to; 0 is the console
-void out_reset();                // output back to the console
+void out_reset();                // output back to the console, stack cleared
+void out_push(int idx);          // output to target idx (0 console, else a file number)
+void out_pop();                  // back to the target before the matching out_push
 
 // ---------------------------------------------------------------- main.c
 extern char *srcname;            // the program's file name as given, for messages

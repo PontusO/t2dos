@@ -250,7 +250,7 @@ int in_parse(int *types, int nv) {
 // File numbers 1 to 15 index the tables. f_mode: 0 closed, 1 INPUT, 2 OUTPUT, 3 APPEND.
 // An INPUT file has a 512-byte read buffer (f_buf, f_pos of f_len used); f_eof is 1 after a
 // read that returned 0 (the end of the file, or of a pipe's message) and 2 after an error;
-// f_path keeps a pipe's name for stat(); f_col is the column of an output file.
+// f_path keeps a pipe's name for stat().
 int f_fd[16];
 int f_mode[16];
 char *f_buf[16];
@@ -259,19 +259,60 @@ int f_len[16];
 int f_eof[16];
 char *f_path[16];
 int f_col[16];
-int out_idx;                     // the file PRINT # is writing, and the console's column
-int out_save;
+int f_ser[16];                   // counts the opens of each number (a stale output target is told apart)
+int ocol[16];                    // the column of each output target (0 is the console)
+int out_idx;                     // the current output target: 0 the console, else a file number
+int *ostack;                     // the targets to go back to (index and f_ser of each)
+int onsp;
+#define OSTACK 8300
 char path1[200];                 // the paths of the statement running
 char path2[200];
 
-// Switches PRINT's output back to the console (after PRINT #, or when an error ends it).
-void out_reset() {
-  if (out_fd) {
-    out_flush();
-    f_col[out_idx] = out_col;
-    out_col = out_save;
-    out_fd = 0;
+// Makes target idx current (the console buffer or a file's) without saving anything.
+void out_set(int idx) {
+  out_idx = idx;
+  out_fd = 0;
+  if (idx) out_fd = f_fd[idx];
+  out_col = ocol[idx];
+}
+
+void out_switch(int idx) {
+  if (idx == out_idx) return;
+  out_flush();
+  ocol[out_idx] = out_col;
+  out_set(idx);
+}
+
+// Output goes to target idx until the matching out_pop(): PRINT # and WRITE # for their
+// items, and every SUB / FUNCTION call for its body (the console), so that a function called
+// from an item prints to the console and a PRINT # inside it ends back at the outer file.
+void out_push(int idx) {
+  if (!ostack) return;
+  if (onsp >= OSTACK) { vm_err("Out of stack space"); return; }
+  ostack[onsp] = f_ser[out_idx] * 16 + out_idx; onsp++;
+  out_switch(idx);
+}
+
+void out_pop() {
+  int c; int idx;
+  if (onsp == 0) return;
+  onsp--;
+  c = ostack[onsp];
+  idx = c & 15;
+  if (idx && (!f_mode[idx] || f_ser[idx] != c >> 4)) {      // closed meanwhile
+    out_switch(0);
+    vm_err("Bad file number");
+    return;
   }
+  out_switch(idx);
+}
+
+// Output back to the console, the stack empty (an error or the end of the program).
+void out_reset() {
+  out_flush();
+  ocol[out_idx] = out_col;
+  onsp = 0;
+  out_set(0);
 }
 
 // 1 if n is an open file usable for input (want 1) or output (want 2, OUTPUT or APPEND);
@@ -284,6 +325,7 @@ int file_ok(int n, int want) {
 
 void file_close(int n) {
   if (!f_mode[n]) return;
+  out_switch(0);                                  // not the current output any more
   close(f_fd[n]);
   if (f_buf[n]) free(f_buf[n]);
   if (f_path[n]) free(f_path[n]);
@@ -330,7 +372,7 @@ void h_open() {
   if (f_mode[n]) { vm_err("File already open"); return; }
   fd = open(path1, mode == 1 ? OPEN_READ : mode == 2 ? OPEN_WRITE : OPEN_APPEND);
   if (fd < 0) { vm_err(mode == 1 ? "File not found" : "Path not found"); return; }
-  f_fd[n] = fd; f_mode[n] = mode; f_pos[n] = 0; f_len[n] = 0; f_eof[n] = 0; f_col[n] = 0;
+  f_fd[n] = fd; f_mode[n] = mode; f_pos[n] = 0; f_len[n] = 0; f_eof[n] = 0; ocol[n] = 0; f_ser[n]++;
   if (mode == 1) f_buf[n] = malloc(512);
   if (strncmp(path1, "/pipe/", 6) == 0) {
     f_path[n] = malloc(strlen(path1) + 1);
@@ -351,14 +393,10 @@ void h_close() {
 // 1 back to the console
 void h_setout() {
   int n;
-  if (fn_n == 1) { out_reset(); return; }
+  if (fn_n == 1) { out_pop(); return; }
   n = vs[sp]; sp--;
   if (!file_ok(n, 2)) return;
-  out_flush();
-  out_save = out_col;
-  out_idx = n;
-  out_fd = f_fd[n];
-  out_col = f_col[n];
+  out_push(n);
 }
 
 // Reads more into the file's buffer. A pipe is polled with stat() until a message has data
@@ -893,6 +931,7 @@ int fn_inkeys() { next(); emit_fn(K_INKEYS, 0); return T_STR; }
 
 // ---------------------------------------------------------------- registration
 void io_init() {
+  ostack = malloc(OSTACK * 4); onsp = 0;
   cur_fg = 7; cur_bg = 0;
   kqn = 0;
   stmt_tab[K_CLS] = st_cls; fnop[K_CLS] = h_cls;
@@ -936,5 +975,7 @@ void io_free() {
   in_free(32);
   out_reset();
   files_close_all();
+  if (ostack) free(ostack);
+  ostack = 0;
   if (cur_fg != 7 || cur_bg != 0) { conctl(CON_COLOR, 7, 0); cur_fg = 7; cur_bg = 0; }
 }

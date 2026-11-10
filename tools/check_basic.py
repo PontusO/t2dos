@@ -28,7 +28,7 @@ NAME.out is a board-only case run by a function below (pipesrv).
                            Cases that need the PC (screen1: the board's conctl output does
                            not go through the `>` redirection; inkey1, ctrlc1, esc1, sleep1, sleep2: they feed
                            stdin at once) are not run on the board. The board key cases
-                           (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20) drive the console directly and
+                           (ctrlc, keyqueue, bgyield, pins, pipesrv, fileerr20, pipeeof, pipedup) drive the console directly and
                            run only on the board, after the ordinary cases.
   --only NAME              run only that case (may be given more than once); the board key
                            cases are named like that too
@@ -48,7 +48,7 @@ PC_BIN = os.path.join(ROOT, 'build', 'basic-pc')
 ASAN_BIN = os.path.join(ROOT, 'build', 'basic-asan')
 BOARD_DIR = '/src/basic/t'
 PC_ONLY = ('screen1', 'inkey1', 'ctrlc1', 'esc1', 'sleep1', 'sleep2')
-KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20')
+KEY_CASES = ('ctrlc', 'keyqueue', 'bgyield', 'pins', 'pipesrv', 'fileerr20', 'pipeeof', 'pipedup')
 BOARD_ONLY = ('pipesrv',)        # tests/basic/NAME.bas without a NAME.out: only the board runs it
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
@@ -371,9 +371,31 @@ def case_fileerr20(r):
     return key_result('fileerr20', ok, 'run %d: %s; then %r' % (i, last, out[:2]))
 
 
+def case_pipeeof(r):
+    """EOF(n) on a pipe at the end of a message: DO UNTIL EOF reads both lines, then ends"""
+    put_text(r, 'PIPE "be"\nOPEN "/pipe/be" FOR INPUT AS #1\nDO UNTIL EOF(1)\n  LINE INPUT #1, a$\n'
+             '  PRINT a$\nLOOP\nPRINT "end"\n', 'pe_r.bas')
+    put_text(r, 'OPEN "/pipe/be" FOR OUTPUT AS #1\nPRINT #1, "l1"\nPRINT #1, "l2"\nCLOSE #1\n', 'pe_w.bas')
+    before = psram_free(r)
+    r.run('basic pe_r.bas > pe.txt &', 10.0)
+    r.run('basic pe_w.bas', 10.0)
+    time.sleep(1.0)
+    text = fetch_text(r, 'pe.txt')
+    r.run('rm pe.txt', 10.0)
+    after = psram_free(r)
+    return key_result('pipeeof', text == 'l1\nl2\nend\n' and before == after, '%r free %d -> %d' % (text, before, after))
+
+
+def case_pipedup(r):
+    """creating a pipe twice is the run-time error Path/File access error at its line"""
+    put_text(r, 'PIPE "pd"\nPIPE "pd"\n', 'pd.bas')
+    out, code = r.run('basic pd.bas', 10.0)
+    return key_result('pipedup', out == ['pd.bas:2: Path/File access error'] and code == 1, '%r exit %d' % (out, code))
+
+
 def run_key_case(r, name):
     return {'ctrlc': case_ctrlc, 'keyqueue': case_keyqueue, 'bgyield': case_bgyield,
-            'pins': case_pins, 'pipesrv': case_pipesrv, 'fileerr20': case_fileerr20}[name](r)
+            'pins': case_pins, 'pipesrv': case_pipesrv, 'pipeeof': case_pipeeof, 'pipedup': case_pipedup, 'fileerr20': case_fileerr20}[name](r)
 
 
 def run_board(cases, only=()):
