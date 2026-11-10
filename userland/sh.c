@@ -1,7 +1,8 @@
 // sh.c - T2DOS shell. Builtins: cd pwd exit help jobs kill. Everything else is /bin/name.bin or ./name.bin.
 // Output redirection with "> file" and ">> file". "sh script" runs a script.
 // "cmd args &" runs cmd as a background job; the prompt reports jobs that have ended.
-// Up and Down scroll through the last 16 command lines.
+// Up and Down scroll through the last 16 command lines. Tab completes a command name (first word) or a
+// file name; a second Tab lists the matches when there is more than one.
 #include "sys.h"
 
 char line[256];
@@ -56,11 +57,128 @@ int retype(char *buf, int len, char *s) {
   return strlen(buf);
 }
 
+// Tab completion of the last word: a command name for the first word, else a file or directory name
+#define MAXM 64
+char mt[MAXM][64];                     // the matching names
+int misdir[MAXM];
+int nm;
+char cpre[64];                         // the longest prefix all matches share
+char cdir[160];
+
+int lower(int c) { if (c >= 'A' && c <= 'Z') return c + 32; return c; }
+// s starts with prefix p, ignoring case (names on the card are FAT)
+int has_prefix(char *s, char *p) {
+  while (*p) { if (lower(*s) != lower(*p)) return 0; s++; p++; }
+  return 1;
+}
+int add_match(char *s, int n, int isdir) {
+  int i;
+  if (n > 63) return 0;
+  i = 0;
+  while (i < nm) { if (!strncmp(mt[i], s, n) && !mt[i][n]) return 0; i++; }   // already there
+  if (nm == MAXM) return 0;
+  memcpy(mt[nm], s, n); mt[nm][n] = 0; misdir[nm] = isdir; nm++;
+  return 1;
+}
+// add the entries of dir that start with p; progs: only *.bin files, shown without .bin
+int scan_dir(char *dir, char *p, int progs) {
+  struct dirent_t e; int d; int n;
+  d = opendir(dir);
+  if (d < 0) return 0;
+  while (readdir(d, &e)) {
+    if (!has_prefix(e.name, p)) continue;
+    if (progs && !strchr(p, '.')) {
+      n = strlen(e.name);
+      if (!e.isdir && n > 4 && !strcmp(e.name + n - 4, ".bin")) add_match(e.name, n - 4, 0);
+    }
+    else if (!progs || !e.isdir) add_match(e.name, strlen(e.name), e.isdir);   // "name.b" finds name.bin
+  }
+  closedir(d);
+  return 0;
+}
+int find_matches(char *w, int cmd) {
+  char *b; char *slash; char *q;
+  nm = 0;
+  if (cmd) {
+    b = "cd pwd exit help jobs kill ";
+    while (*b) {
+      q = b; while (*q != ' ') q++;
+      if (q - b >= strlen(w) && has_prefix(b, w)) add_match(b, q - b, 0);
+      b = q + 1;
+    }
+    scan_dir("/bin", w, 1);
+    scan_dir(".", w, 1);
+    return nm;
+  }
+  slash = 0; q = w;
+  while (*q) { if (*q == '/') slash = q; q++; }
+  if (!slash) { scan_dir(".", w, 0); return nm; }
+  if (slash == w) strcpy(cdir, "/");
+  else { memcpy(cdir, w, slash - w); cdir[slash - w] = 0; }
+  scan_dir(cdir, slash + 1, 0);
+  return nm;
+}
+// list the matches in columns, then show the prompt and the line again
+int show_matches(char *buf, int len) {
+  int i; int w; int cols; int n;
+  w = 0; i = 0;
+  while (i < nm) { n = strlen(mt[i]) + misdir[i]; if (n > w) w = n; i++; }
+  w = w + 2; cols = 80 / w; if (cols < 1) cols = 1;
+  putchar('\n');
+  i = 0;
+  while (i < nm) {
+    printf("%s%s", mt[i], misdir[i] ? "/" : "");
+    if (i % cols == cols - 1 || i == nm - 1) putchar('\n');
+    else { n = strlen(mt[i]) + misdir[i]; while (n < w) { putchar(' '); n++; } }
+    i++;
+  }
+  buf[len] = 0;
+  printf("%s> %s", getcwd(cwd, 128), buf);
+  return 0;
+}
+// Tab at the end of buf: returns the new length. again: the key before was Tab too
+int complete(char *buf, int len, int max, int again) {
+  int ws; int i; int cmd; int base; int plen; int n; char *last;
+  ws = len;
+  while (ws > 0 && buf[ws - 1] != ' ' && buf[ws - 1] != '>') ws--;
+  cmd = 1; i = 0;
+  while (i < ws) { if (buf[i] != ' ') cmd = 0; i++; }
+  buf[len] = 0;
+  base = ws;                           // where the name being completed starts
+  i = ws; while (i < len) { if (buf[i] == '/') { cmd = 0; base = i + 1; } i++; }
+  if (!find_matches(buf + ws, cmd)) return len;
+  plen = len - base;                   // characters typed of the name
+  strcpy(cpre, mt[0]);                 // the longest common prefix, ignoring case
+  i = 1;
+  while (i < nm) {
+    n = 0; while (cpre[n] && lower(cpre[n]) == lower(mt[i][n])) n++;
+    cpre[n] = 0; i++;
+  }
+  if (nm == 1) { last = misdir[0] ? "/" : " "; }
+  else last = "";
+  if (nm > 1 && strlen(cpre) <= plen) {   // nothing to add
+    if (again) show_matches(buf, len);
+    return len;
+  }
+  if (base + strlen(cpre) + strlen(last) >= max) return len;
+  while (len > base) { printf("\b \b"); len--; }    // retype the name in its real case
+  strcpy(buf + base, cpre); strcpy(buf + base + strlen(cpre), last);
+  printf("%s", buf + base);
+  return strlen(buf);
+}
+
 int readline(char *buf, int max) {
-  int len; int c; int h;
+  int len; int c; int h; int tabs;
   len = 0; h = hcount;                 // h: the history line shown, hcount = the line being typed
+  tabs = 0;
   while (1) {
     c = getkey();
+    if (c == 9) {                      // a second Tab that adds nothing lists the matches
+      c = complete(buf, len, max, tabs);
+      tabs = c == len; len = c;
+      continue;
+    }
+    tabs = 0;
     if (c == '\r' || c == '\n') { buf[len] = 0; putchar('\n'); hist_add(buf); return len; }
     if (c == 8 || c == 127) { if (len) { len--; printf("\b \b"); } }
     else if (c == 3) { buf[0] = 0; putchar('\n'); return 0; }
