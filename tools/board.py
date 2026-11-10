@@ -5,7 +5,8 @@ CLI:
   board.py put LOCAL REMOTE
   board.py run 'COMMAND' [WAIT_SECONDS]
   board.py fetch REMOTE LOCAL
-Port: $T2DOS_PORT, else the first /dev/serial/by-id/*CPico*.
+Port: $T2DOS_PORT, else the first /dev/serial/by-id/ entry of an iLabs RP2350 board (CPico 2350 or
+Challenger 2350).
 """
 import difflib
 import glob
@@ -31,9 +32,9 @@ def find_port():
     p = os.environ.get('T2DOS_PORT')
     if p:
         return p
-    m = sorted(glob.glob('/dev/serial/by-id/*CPico*'))
+    m = sorted(glob.glob('/dev/serial/by-id/*iLabs_CPico_2350*') + glob.glob('/dev/serial/by-id/*iLabs_Challenger_2350*'))
     if not m:
-        raise BoardError('no board found: set T2DOS_PORT or plug in the CPico')
+        raise BoardError('no board found: set T2DOS_PORT or plug in a CPico 2350 or Challenger 2350')
     return m[0]
 
 
