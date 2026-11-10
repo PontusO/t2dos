@@ -57,6 +57,8 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 // kill(job): marks a running job to end (exit code JOB_KILLED); returns 0 once it has ended, -1 if no such running job
 // mkpipe(name): name is WITHOUT the /pipe/ prefix (mkpipe("x") creates /pipe/x), owned by the caller; name is at most 31 chars with no '/'; returns 0, or -1 if it exists, the table is full or the name is invalid
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
+// listen(port): 0, or -1 if another running job owns the listener or the port can't be bound (in use, e.g.
+// for a while after this board closed a connection on that port, which then sits in TCP TIME_WAIT)
 // accept(timeout_ms): >0 a connection's socket fd (they start at 100), 0 nobody connected within the timeout
 // (accept(0) never waits), -1 no listener or no free socket.  timeout -1 = wait forever.  Test sock > 0, not >= 0
 // jobs(buf, max) fills this

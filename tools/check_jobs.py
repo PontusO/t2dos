@@ -62,8 +62,10 @@ Cases (spawner CASE on the board):
                       quits (^Q) and the board's cc builds and runs a program; quit gives bye
                       and the shell reports [1] done demosrv (exit 0)
   demosrv_kill        `demosrv x &`, `kill 1`: its pipes are gone (cat /pipe/x: not found)
-  demosrv_tcp         only when the network is up (else SKIP): `demosrv -p 2323 &`, a PC socket to
-                      the board's IP reads the status line; then kill
+  demosrv_tcp         only when the network is up (else SKIP): `demosrv -p PORT &`, a PC socket to
+                      the board's IP reads the status line; then kill. PORT is new each run: the board
+                      closes the connection, so the port stays in TIME_WAIT for a while and listen()
+                      on it fails (arduino-pico's lwIP has no SO_REUSE)
   sh_script_spawn     (nested shell) `sh srv.sh`, a script of `demosrv &`, `echo status >
                       /pipe/demosrv`, `cat /pipe/demosrv.out`: the shell runs a new job to its
                       first wait before the next line, so the status line comes back; then quit
@@ -77,6 +79,7 @@ Cases (spawner CASE on the board):
                       read by the shell as an empty line)
 """
 import os
+import random
 import re
 import socket
 import subprocess
@@ -546,12 +549,23 @@ def case_demosrv_tcp(r):
         print('SKIP demosrv_tcp: the network is not up (real TCP not tested)')
         return good
 
+    port = random.randint(20000, 29999)    # see the case list: a reused port may still be in TIME_WAIT
     def body():
         n = 'demosrv_tcp'
-        good = expect(n, 'demosrv -p 2323 &', sh_lines(r, 'demosrv -p 2323 &', 1.0), ['[1] demosrv'])
+        cmd = 'demosrv -p %d &' % port
+        good = expect(n, cmd, sh_lines(r, cmd, 1.0), ['[1] demosrv'])
         data = b''
         try:
-            c = socket.create_connection((ip, 2323), timeout=10)
+            # the job may not have reached listen() yet when [1] demosrv is printed
+            t_end = time.time() + 5
+            while True:
+                try:
+                    c = socket.create_connection((ip, port), timeout=10)
+                    break
+                except ConnectionRefusedError:
+                    if time.time() > t_end:
+                        raise
+                    time.sleep(0.2)
             try:
                 c.settimeout(10)
                 while True:
@@ -562,7 +576,7 @@ def case_demosrv_tcp(r):
             finally:
                 c.close()
         except OSError as e:
-            good = fail('%s: connect to %s:2323: %s' % (n, ip, e))
+            good = fail('%s: connect to %s:%d: %s' % (n, ip, port, e))
         if not re.match(r'^demosrv: up \d+ s, \d+ requests\n$', data.decode('latin-1')):
             good = fail('%s: the connection gave %r' % (n, data))
         sh_lines(r, 'kill 1', 1.0)

@@ -53,6 +53,21 @@ arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel
 The `flash=` layout gives the kernel 1 MB and the flash filesystem 7 MB.
 Reflashing the kernel keeps the filesystem.
 
+On the iLabs Challenger 2350 WiFi/BLE, WiFi goes through the ESP32-C6, which
+must run ESP-Hosted firmware, so build with the ESP-Hosted driver (the
+board's default `ESP AT` setting has no WiFi driver in arduino-pico), and
+with the ESPHost copy in `third_party/ESPHost`:
+
+```sh
+FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted
+arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --library third_party/ESPHost --output-dir build/kernel-challenger-hosted kernel
+arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel-challenger-hosted
+```
+
+The ESPHost copy bundled with arduino-pico 6.2.0 hangs the board once WiFi
+is up; `third_party/ESPHost/T2DOS.md` says what the copy here fixes. The
+kernel refuses to build for ESP-Hosted without it.
+
 Then put the files on the board:
 
 - **SD card:** copy the contents of `root/` to the card.

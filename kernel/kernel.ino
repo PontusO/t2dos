@@ -16,6 +16,12 @@
 #include <math.h>
 #include "sys.h"
 
+// The ESPHost copy bundled with arduino-pico 6.2.0 waits on other interrupts inside the
+// handshake GPIO IRQ and hangs the board once WiFi is up; third_party/ESPHost has the fixes.
+#if defined(ESPHOSTSPI) && !__has_include("ESPHost_t2dos.h")
+#error "build the ESP-Hosted kernel with --library third_party/ESPHost (see README)"
+#endif
+
 #define SD_CS SS
 #define MAX_FD 16          // 0,1 console; 2.. files
 #define MAX_DIR 4
@@ -491,7 +497,11 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_recv: return sock_recv(A(0), (char *)A(1), A(2), A(3));
     case SYS_listen:                      // a running task's listener is its own: only it may replace it
       if (server && server_owner != cur_id() && tasks[server_owner].state == T_RUN) return -1;
-      if (server) { server->stop(); delete server; } server = new WiFiServer(A(0)); server->begin(); server_owner = cur_id(); return 0;
+      if (server) { server->stop(); delete server; } server = new WiFiServer(A(0)); server->begin();
+      // begin() fails silently, e.g. ERR_USE while closed connections on the port are in
+      // TIME_WAIT (arduino-pico's lwIP has no SO_REUSE): report it instead of a dead listener
+      if (!(bool)*server) { delete server; server = nullptr; return -1; }
+      server_owner = cur_id(); return 0;
     case SYS_accept: { if (!server) return -1; int to = A(0); uint32_t t0 = millis();
       for (;;) {
         { WiFiClient c = server->accept(); if (c) { int i = sock_alloc(); if (i < 0) { c.stop(); return -1; } socks[i] = c; return SOCK_FD + i; } }  // c is gone before k_wait (kill unwinds past it)
