@@ -650,68 +650,111 @@ The network tools use the board's WiFi and a small file server on the PC.
 #### wifi
 
 ```
-wifi ssid password
+wifi ssid password [-s host[:port]]
+wifi -s host[:port]
 wifi
 ```
 
-Joins a network (15 s timeout), or shows the status.
+Joins a network (15 s timeout), or shows the status. `-s` saves the default
+file server (see below) in `/etc/remote`, so `rls`, `get`, `send` and `rcd`
+can be used without a host. The port defaults to 7777. The WiFi password is
+not saved: after a reset, join again.
 
 ```
-/> wifi homenet secret123
+/> wifi homenet secret123 -s 192.168.1.10
+server 192.168.1.10
 joining homenet...
 connected, ip 192.168.1.42
 /> wifi
 connected, ip 192.168.1.42
+server 192.168.1.10 /
 ```
 
 #### The PC file server
 
-`rls`, `get` and `send` talk to `tools/fileserver.py` on the PC, which serves
-one directory (default port 7777):
+`rls`, `get`, `send` and `rcd` talk to `tools/fileserver.py` on the PC, which
+serves one directory (default port 7777) and refuses names outside it:
 
 ```sh
 python3 tools/fileserver.py ~/t2files 7777
 ```
 
+Each of these tools takes the server as an optional first argument. Without
+one they use the server saved by `wifi -s` or `rcd`. The first argument
+counts as a server when it is a numeric IPv4 address, an mDNS name ending in
+`.local` (such as `mypc.local`, answered by Avahi or Bonjour on the PC) or
+contains a `:`. Write any other host name with a colon: `pc.lan:` (empty port
+means 7777) or `pc.lan:7777`.
+
+Remote names are relative to the remote directory set with `rcd` (`/`, the
+served directory, until you change it). A name starting with `/` starts from
+the served directory. `..` works and stops at `/`. The saved remote directory
+applies only to the saved server: another server given on the command line
+starts at `/`.
+
+#### rcd
+
+```
+rcd [host[:port]] [dir]
+rcd
+```
+
+Changes the remote directory, and with a host also the saved server (its
+directory then defaults to `/`). The directory is checked on the server
+before it is saved. Without arguments it shows the server and the remote
+directory.
+
+```
+/> rcd projects/game
+192.168.1.10 /projects/game
+/> rcd ..
+192.168.1.10 /projects
+/> rcd 192.168.1.20:8000
+192.168.1.20:8000 /
+```
+
 #### rls
 
 ```
-rls host[:port] [dir]
+rls [host[:port]] [dir]
 ```
 
-Lists files on the server.
+Lists files on the server, in the remote directory by default.
 
 ```
-/> rls 192.168.1.10
+/> rls
+/> rls projects
 /> rls 192.168.1.10:7777 projects
 ```
 
 #### get
 
 ```
-get host[:port] remote [local]
+get [host[:port]] remote [local]
 ```
 
 Downloads a file from the server. The default local name is the remote
 file's name without its directory.
 
 ```
+/src> get game.c
+/src> get /projects/game.c game2.c
 /src> get 192.168.1.10 game.c
-/src> get 192.168.1.10 projects/game.c game2.c
 ```
 
 #### send
 
 ```
-send host[:port] local [remote]
+send [host[:port]] local [remote]
 ```
 
-Uploads a file to the server. The default remote name is the local file's
-name without its directory.
+Uploads a file to the server, into the remote directory by default. The
+default remote name is the local file's name without its directory.
 
 ```
+/src> send hello.c
+/src> send hello.bin builds/hello.bin
 /src> send 192.168.1.10 hello.c
-/src> send 192.168.1.10 hello.bin builds/hello.bin
 ```
 
 #### nc
@@ -2059,7 +2102,11 @@ described in [Named pipes](#named-pipes).
 
 `fileserver.py` handles one request per connection: `GET name`,
 `PUT name size` followed by the bytes, or `LS [dir]`. It answers
-`OK [size]` and the data, or `ERR text`. Socket fds start at 100.
+`OK [size]` and the data, or `ERR text`. Names are relative to the served
+directory, and a leading `/` is ignored. Socket fds start at 100. The
+board keeps the default server and the remote directory in `/etc/remote`
+(two lines: `host[:port]` and the directory), which `wifi -s` and `rcd`
+write.
 
 ### File formats
 
@@ -2086,7 +2133,7 @@ lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
 basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
-                  write, edit, blink, wifi, get, send, rls, nc, demosrv
+                  write, edit, blink, wifi, get, send, rls, rcd, nc, demosrv
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
                   programs for the background job checks
 tools/            board.py (board access), fileserver.py, the check scripts
@@ -2125,6 +2172,9 @@ compiler/cc -I root/lib -o hello.bin hello.c
 - `tools/check_basic.py --pc`: the BASIC cases of `tests/basic/` (each
   `NAME.bas` with its expected `NAME.out`) on a native build of the
   interpreter, with a memory-leak check.
+- `tools/check_net.py --pc`: `wifi -s`, `rcd`, `rls`, `get` and `send` under
+  qemu against a local `fileserver.py`, plus requests that try to leave the
+  served directory.
 
 With the board connected (and no `screen` on the port):
 

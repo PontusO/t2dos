@@ -8,7 +8,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 7777
 
 def safe(name):
     p = os.path.abspath(os.path.join(ROOT, name.lstrip("/")))
-    if not p.startswith(ROOT): raise ValueError("outside root")
+    if os.path.commonpath([ROOT, p]) != ROOT: raise ValueError("outside root")
     return p
 
 def readline(c):
@@ -47,7 +47,9 @@ def handle(c, addr):
         else:
             c.sendall(b"ERR bad request\n")
     except Exception as e:
-        try: c.sendall(f"ERR {e}\n".encode())
+        # an OSError's text holds the full PC path: send only the reason
+        msg = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
+        try: c.sendall(f"ERR {msg}\n".encode())
         except Exception: pass
     finally:
         c.close()
