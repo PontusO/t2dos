@@ -571,6 +571,22 @@ demo.
 /> blink 25 3
 ```
 
+#### reboot
+
+```
+reboot [-b]
+```
+
+Closes every open file and restarts the board. With `-b` it restarts into
+the USB bootloader instead, so the `RP2350` drive appears and a new kernel
+`.uf2` can be copied onto it. The files on the board are kept either way.
+After a restart, join WiFi again.
+
+```
+/> reboot -b
+rebooting into the bootloader
+```
+
 ### Background
 
 `jobs`, `kill` and `&` are part of the shell, see
@@ -900,7 +916,7 @@ pointers, except for the maths functions, which take and return `float`
 
 | Group | Functions |
 |---|---|
-| Process | `exit(code)`, `exec(path, argc, argv)` (runs a program, returns its exit code), `millis()`, `sleep(ms)`, `sysinfo(kind)`, `spawn(path, argc, argv)` (starts a background job, returns its number), `yield()`, `jobs(buf, max)`, `kill(job)` |
+| Process | `exit(code)`, `exec(path, argc, argv)` (runs a program, returns its exit code), `millis()`, `sleep(ms)`, `sysinfo(kind)`, `spawn(path, argc, argv)` (starts a background job, returns its number), `yield()`, `jobs(buf, max)`, `kill(job)`, `reboot(mode)` |
 | Console | `putchar(c)`, `getchar()` (waits for a key), `kbhit()` (1 if a key is waiting), `conctl(cmd, a, b)`, `redirect(fd)` |
 | Files | `open(path, mode)` (mode `OPEN_READ`, `OPEN_WRITE`, `OPEN_APPEND`; -1 on error), `mkpipe(name)`, `close(fd)`, `read(fd, buf, n)`, `write(fd, buf, n)`, `seek(fd, offset, whence)`, `stat(path, &st)`, `unlink(path)`, `rename(old, new)`, `mkdir(path)`, `rmdir(path)`, `chdir(path)`, `getcwd(buf, n)` |
 | Directories | `opendir(path)`, `readdir(d, &entry)` (1 while there are entries), `closedir(d)` |
@@ -2077,6 +2093,7 @@ the kernel computes with `sinf`, `cosf`, ..., `fmodf`.
 | `yield()` | 6 | let another runnable task run; returns 1 if one did, else 0 |
 | `jobs(buf, max)` | 7 | fill `buf` (an array of `struct job_t`) with the job table, return how many entries it wrote; the slots of jobs reported as done are freed |
 | `kill(job)` | 8 | end a running job (its exit code becomes `JOB_KILLED`, -9); returns 0 once it has ended, -1 if there is no such running job |
+| `reboot(mode)` | 9 | close every open file and restart the board; mode 1 restarts into the USB bootloader. Returns -1 only where it is not supported (under `host_linux`) |
 | `mkpipe(name)` | 47 | create `/pipe/name` (the name without the prefix, up to 31 characters, no `/`), owned by the caller; returns 0, or -1 if it exists, the table is full or the name is invalid |
 
 ```c
@@ -2133,7 +2150,7 @@ lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
 basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
-                  write, edit, blink, wifi, get, send, rls, rcd, nc, demosrv
+                  write, edit, blink, reboot, wifi, get, send, rls, rcd, nc, demosrv
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
                   programs for the background job checks
 tools/            board.py (board access), fileserver.py, the check scripts

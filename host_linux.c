@@ -156,6 +156,7 @@ int sys(int num, int n, int *argv) {
     case SYS_yield: return 0;                   // one task on the host: nothing else to run
     case SYS_jobs: return 0;                    // no background jobs
     case SYS_kill: return -1;                   // no such running job
+    case SYS_reboot: return -1;                 // a board feature
     case SYS_putchar: { char c = A(0); k_write(1, &c, 1); return c; }
     case SYS_getchar: { unsigned char c; if (read(0, &c, 1) != 1) exit(0); return c; }
     case SYS_kbhit: return kbhit();

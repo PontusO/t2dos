@@ -424,6 +424,12 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_yield: return k_yield();
     case SYS_jobs: return k_jobs((job_t *)A(0), A(1));
     case SYS_kill: return k_kill(A(0));
+    case SYS_reboot: {        // close every file so the filesystem is consistent, let the console drain
+      for (int i = 2; i < MAX_FD; i++) if (fds[i]) { fds[i].close(); fds[i] = File(); }
+      Serial.flush(); delay(100);
+      if (A(0) == 1) rp2040.rebootToBootloader(); else rp2040.reboot();
+      return -1;
+    }
     case SYS_sysinfo: {
       int k = A(0);
       if (k == INFO_SRAM_FREE) return rp2040.getFreeHeap();

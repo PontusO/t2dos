@@ -7,7 +7,7 @@
 enum {
   // process
   SYS_exit = 0, SYS_exec = 1, SYS_millis = 2, SYS_sleep = 3, SYS_sysinfo = 4,
-  SYS_spawn = 5, SYS_yield = 6, SYS_jobs = 7, SYS_kill = 8,
+  SYS_spawn = 5, SYS_yield = 6, SYS_jobs = 7, SYS_kill = 8, SYS_reboot = 9,
   // console (fd 0 = console in, fd 1 = console out)
   SYS_putchar = 16, SYS_getchar = 17, SYS_kbhit = 18, SYS_conctl = 19, SYS_redirect = 20,
   // files
@@ -55,6 +55,8 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 // yield(): lets another runnable task run; returns 1 if one did, else 0
 // jobs(buf, max): fills buf with the job table and returns how many it wrote
 // kill(job): marks a running job to end (exit code JOB_KILLED); returns 0 once it has ended, -1 if no such running job
+// reboot(mode): closes every open file and restarts the board; mode 1 restarts into the USB
+// bootloader (the RP2350 drive) instead.  Returns -1 only where it is not supported (host_linux)
 // mkpipe(name): name is WITHOUT the /pipe/ prefix (mkpipe("x") creates /pipe/x), owned by the caller; name is at most 31 chars with no '/'; returns 0, or -1 if it exists, the table is full or the name is invalid
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
 // listen(port): 0, or -1 if another running job owns the listener or the port can't be bound (in use, e.g.
