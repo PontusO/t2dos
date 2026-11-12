@@ -456,6 +456,27 @@ Copies a file.
 /src> cp hello.c /src/old/hello.c
 ```
 
+#### cmp
+
+```
+cmp [-s] a b
+```
+
+Compares two files byte by byte. When they are the same it prints nothing;
+otherwise it prints the first byte that differs (counted from 1) and its line,
+or which file ended first. `-s` prints nothing at all, for scripts. The exit
+code is 0 for the same files, 1 when they differ and 2 when one cannot be read.
+
+```
+/src> cmp hello.c hello.bak
+/src> get tools.bin /tmp/tools.bin
+/src> cmp /tmp/tools.bin /bin/tools.bin
+/tmp/tools.bin /bin/tools.bin differ: byte 1025, line 12
+[exit 1, 31 ms]
+/src> cmp -s a.txt b.txt
+[exit 1, 4 ms]
+```
+
 #### mv
 
 ```

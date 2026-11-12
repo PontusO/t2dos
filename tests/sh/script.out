@@ -18,6 +18,7 @@ item b
 item c d
 arg one
 arg two
+file /tmp/sh/cmp.sh
 file /tmp/sh/inner.sh
 file /tmp/sh/script.sh
 file /tmp/sh/unclosed.sh

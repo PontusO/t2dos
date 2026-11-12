@@ -1,0 +1,15 @@
+T2DOS shell, type help
+/> sh /tmp/sh/cmp.sh
+same 0
+/tmp/sh/c1.txt /tmp/sh/c2.txt differ: byte 7, line 2
+differ 1
+cmp: EOF on /tmp/sh/c2.txt after byte 4, in line 2
+shorter 1
+quiet 1
+cmp: /tmp/sh/nosuch.txt: not found
+missing 2
+cmp: /tmp/sh: is a directory
+dir 2
+usage: cmp [-s] a b
+usage 2
+/> 
