@@ -4,6 +4,7 @@
 char buf[512];
 int main(int argc, char **argv) {
   int fd; int size; int got; int n; int i; int t0;
+  conctl(CON_BREAK, 0, 0);       // the bytes are raw: a 3 is data
   if (argc < 3) { printf("usage: put name size\n"); return 1; }
   size = atoi(argv[2]);
   fd = open(argv[1], OPEN_WRITE);

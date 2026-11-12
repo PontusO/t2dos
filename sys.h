@@ -40,7 +40,11 @@ enum { SEEK_BEGIN = 0, SEEK_CURRENT = 1, SEEK_FINISH = 2 };
 enum { INFO_SRAM_FREE = 0, INFO_PSRAM_TOTAL = 1, INFO_PSRAM_FREE = 2, INFO_DISK_TOTAL_KB = 3, INFO_DISK_USED_KB = 4, INFO_CONSOLE = 5,
        INFO_PREEMPTS = 6 };   // INFO_PREEMPTS: how often the tick has preempted a program since boot
 // conctl() commands
-enum { CON_CLEAR = 0, CON_GOTO = 1, CON_COLOR = 2, CON_SIZE = 3 };
+enum { CON_CLEAR = 0, CON_GOTO = 1, CON_COLOR = 2, CON_SIZE = 3, CON_BREAK = 4 };
+// conctl(CON_BREAK, on, 0): with on (the default for every program) Ctrl-C ends the running
+// foreground program while it computes or sleeps, with exit code EXIT_BREAK; getchar still
+// returns a 3 as a key.  Programs that use Ctrl-C themselves (sh, edit, basic) or read raw
+// bytes from the console (put, nc) turn it off.
 // gpio_mode()
 enum { PIN_INPUT = 0, PIN_OUTPUT = 1, PIN_INPUT_PULLUP = 2 };
 
@@ -53,6 +57,7 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 #define MAX_JOBS 4
 #define PIPE_SIZE 512
 #define JOB_KILLED -9   // exit code of a killed job
+#define EXIT_BREAK 130  // exit code of a foreground program ended by Ctrl-C
 // spawn(path, argc, argv): starts path as a background job; returns its id (1..MAX_JOBS) or a SPAWN_ error
 // yield(): lets another runnable task run; returns 1 if one did, else 0
 // jobs(buf, max): fills buf with the job table and returns how many it wrote

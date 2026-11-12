@@ -3,6 +3,7 @@
 char buf[512];
 int main(int argc, char **argv) {
   int sock; int n; int c; int i;
+  conctl(CON_BREAK, 0, 0);       // Ctrl-C goes to the remote end; Ctrl-] quits
   if (argc < 3) { printf("usage: nc host port | nc -l port\n"); return 1; }
   if (!strcmp(argv[1], "-l")) {
     if (listen(atoi(argv[2])) < 0) { printf("listen failed\n"); return 1; }

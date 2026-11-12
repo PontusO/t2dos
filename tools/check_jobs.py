@@ -30,6 +30,9 @@ Cases (spawner CASE on the board):
                       foreground's and both jobs' results equal the one computed alone (the
                       registers and float state survive preemption), sysinfo(INFO_PREEMPTS) grew
   spinkill            spawn `spin 0` (never makes a syscall), kill it: 0, done with JOB_KILLED
+  ctrl_c_busy         in the foreground, Ctrl-C ends `spin 0` (computing, no job to switch to)
+                      and `tick 0 1000` (sleeping): "^C", exit 130, the prompt, then pwd works; a file
+                      with 3 bytes in it goes through put unharmed (put turns the break off)
   redirect_isolation  spawn `tick 3 100`, the foreground redirects to /tmp/r.txt and writes
                       "fg" while sleeping 500: the file holds exactly "fg", the ticks are on
                       the console
@@ -227,6 +230,34 @@ def case_preempt(r):
 def case_spinkill(r):
     out, code = r.run(SPAWNER + ' spinkill', 30.0)
     good, ticks, rest = verdict('spinkill', out, code)
+    return good
+
+
+def case_ctrl_c_busy(r):
+    b = r.b
+    good = True
+    for cmd in ('spin 0', 'tick 0 1000'):
+        b.s.reset_input_buffer()
+        b._write(('%s/%s\r' % (REMOTE, cmd.replace(' ', '.bin ', 1))).encode())
+        raw = b._read(1.5, 1.5).decode('latin-1')
+        last = raw.replace('\r', '\n').split('\n')[-1]
+        if r.board.PROMPT_RE.match(last):
+            good = fail('ctrl_c_busy: %s returned at once (got %r)' % (cmd, raw))
+        b._write(b'\x03')
+        raw = b._read(5.0, 0.5, True).decode('latin-1')
+        last = raw.replace('\r', '\n').split('\n')[-1]
+        if not r.board.PROMPT_RE.match(last):
+            return fail('ctrl_c_busy: no prompt after Ctrl-C in %s (got %r); the board needs a reset' % (cmd, raw))
+        if '^C' not in raw or '[exit 130' not in raw:
+            good = fail('ctrl_c_busy: %s: no ^C or exit 130 in %r' % (cmd, raw))
+        out, code = r.run('pwd', 10.0)
+        if out != ['/'] or code:
+            good = fail('ctrl_c_busy: after %s, pwd printed %r, exit %d' % (cmd, out, code))
+    data = bytes(range(256)) * 8
+    r.put(data, REMOTE + '/bytes.bin')
+    if r.fetch(REMOTE + '/bytes.bin') != data:
+        good = fail('ctrl_c_busy: a file with 3 bytes in it did not survive put')
+    r.run('rm ' + REMOTE + '/bytes.bin', 10.0)
     return good
 
 
@@ -644,7 +675,7 @@ def case_job_exec_kill(r):
 
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
-         ('preempt', case_preempt), ('spinkill', case_spinkill),
+         ('preempt', case_preempt), ('spinkill', case_spinkill), ('ctrl_c_busy', case_ctrl_c_busy),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
          ('listen_owner', case_listen_owner),
          ('pipe_roundtrip', case_pipe_roundtrip), ('reply_before_request', case_reply_before_request),

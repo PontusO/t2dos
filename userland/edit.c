@@ -338,6 +338,7 @@ int newline() {                        // Enter: break the line, keep the indent
 
 int main(int argc, char **argv) {
   int fd; int n; int k; int i; int size; int lastcr; int lastk; struct stat_t st;
+  conctl(CON_BREAK, 0, 0);       // Ctrl-C is copy
   if (argc < 2) { printf("usage: edit file\n"); return 1; }
   fname = argv[1];
   size = 0; msg[0] = 0;

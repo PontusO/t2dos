@@ -177,6 +177,19 @@ cat: nosuch.txt: not found
 [exit 1, 12 ms]
 ```
 
+Ctrl-C stops a program that is computing or sleeping. It ends with exit code
+130:
+
+```
+/src> cc -o cc2.bin cc.c
+^C
+[exit 130, 2210 ms]
+```
+
+Programs that use Ctrl-C themselves keep it: in `edit` it copies, in `basic`
+it stops the BASIC program, and `put` and `nc` pass it on as data. A program
+waiting in `getchar` gets Ctrl-C as an ordinary key (a 3).
+
 ### Built-in commands
 
 ```
@@ -949,7 +962,9 @@ pointers, except for the maths functions, which take and return `float`
 `printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
 a width and a precision (`%-8s`, `%04x`, `%.3f`). fd 0 and 1 are the console;
 `redirect(fd)` sends fd 1 and `printf` to a file. `conctl` takes `CON_CLEAR`,
-`CON_GOTO` (column, row) and `CON_COLOR` (foreground, background, 0 to 7).
+`CON_GOTO` (column, row), `CON_COLOR` (foreground, background, 0 to 7) and
+`CON_BREAK` (`conctl(CON_BREAK, 0, 0)` keeps Ctrl-C from ending the program, so
+`getchar` gets it as a key instead; see below).
 `sysinfo` takes `INFO_SRAM_FREE`, `INFO_PSRAM_TOTAL`, `INFO_PSRAM_FREE`,
 `INFO_DISK_TOTAL_KB` and `INFO_DISK_USED_KB`. Socket fds also work with
 `read`, `write` and `close`; `recv` returns 0 on a timeout and -1 when the
@@ -1093,10 +1108,14 @@ these in mind when several programs run at once:
   and frees its memory, but a file it was writing stays as far as it got.
   Write to a temporary file and `rename` it into place when a half-written
   file would cause trouble.
-- **Ctrl-C does not stop a busy foreground program.** Keys reach a program
-  only through `getchar` and `kbhit`, so a long foreground computation that
-  should be stoppable checks `kbhit()` now and then. A busy background job can
-  always be ended with `kill`.
+- **Ctrl-C ends a foreground program** that is computing or in `sleep`, as if
+  it had called `exit(EXIT_BREAK)` (130) there; the kernel closes its files and
+  frees its memory as for any exit. A program that waits in `getchar` gets
+  the 3 as a key and decides itself. A program that uses Ctrl-C as a key, or
+  reads raw bytes from the console, calls `conctl(CON_BREAK, 0, 0)` first:
+  otherwise a 3 that arrives while it computes ends it. `sh`, `edit`,
+  `basic`, `put` and `nc` do this. Background jobs never see keys; end them
+  with `kill`.
 - **Floats are safe.** The switch saves the floating-point registers too, so
   float code needs nothing special.
 
@@ -2312,7 +2331,8 @@ features that the previous `cc` already supports.
   output to a file, switching between the shell and jobs, and preemption of
   programs that never make a system call (Challenger 2350).
   Named pipes between jobs and the shell, `demosrv` in pipe mode, and
-  Ctrl-C ending a wait on a pipe. `tools/check_jobs.py --board` runs these.
+  Ctrl-C ending a wait on a pipe, a busy program and a sleeping one.
+  `tools/check_jobs.py --board` runs these.
 - `edit` through `screen`, including cut, copy, paste and the mark.
 - The toolchain: every case in `tests/toolchain/` (C calling assembly,
   assembly calling C, globals shared with `extern`, symbols named like

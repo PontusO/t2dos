@@ -47,7 +47,7 @@
 // The structs come before the first function: Arduino puts its generated
 // prototypes there.
 struct Blk { Blk *next, *prev; };
-struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Blk heap; void *code, *data, *stack; uint32_t code_size; };
+struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Blk heap; void *code, *data, *stack; uint32_t code_size; bool brk; };   // brk: Ctrl-C ends it
 
 // Cooperative tasks: tasks[0] is the foreground (the shell and what it runs),
 // tasks[1..MAX_JOBS] are background jobs. A task gives up the CPU only in
@@ -257,16 +257,25 @@ static int con_getc() {
 }
 // Ctrl-C ends a foreground pipe wait: true if the foreground task is running and
 // a 3 is among the pending console bytes. The bytes before it are kept for the
-// program (beyond TYPEAHEAD they are dropped), the 3 is taken, the bytes after it
-// stay unread. Jobs never read keys.
+// program (once TYPEAHEAD is full the rest stays unread on the console), the 3 is
+// taken, the bytes after it stay unread. Jobs never read keys.
 static bool fg_break() {
   if (cur != tasks) return false;
-  while (con->kbhit()) {
+  while (ta_n < TYPEAHEAD && con->kbhit()) {
     int c = con->getc();
     if (c == 3) return true;
-    if (ta_n < TYPEAHEAD) tahead[(ta_head + ta_n++) % TYPEAHEAD] = c;
+    tahead[(ta_head + ta_n++) % TYPEAHEAD] = c;
   }
   return false;
+}
+// Ctrl-C for a busy or sleeping foreground program that left CON_BREAK on: it ends
+// as if it had called exit(EXIT_BREAK). Only from a switch point (sleep, the
+// preemption tick), where the kernel holds nothing the program's exit would leave behind.
+static void brk_check() {
+  if (cur != tasks || cur->nest < 0 || !cur->procs[cur->nest].brk || !fg_break()) return;
+  con->putc('^'); con->putc('C'); con->putc('\n');
+  Proc *p = &cur->procs[cur->nest];
+  p->exit_code = EXIT_BREAK; longjmp(p->jb, 1);
 }
 static int pipe_open(int i, int mode) {
   static int next_id;
@@ -459,7 +468,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_exit: PROC.exit_code = A(0); longjmp(PROC.jb, 1);
     case SYS_exec: return run_bin((const char *)A(0), A(1), (char **)A(2));
     case SYS_millis: return millis();
-    case SYS_sleep: { int ms = A(0); uint32_t t0 = millis(); while ((int)(millis() - t0) < ms) k_wait(); return 0; }
+    case SYS_sleep: { int ms = A(0); uint32_t t0 = millis(); while ((int)(millis() - t0) < ms) { brk_check(); k_wait(); } return 0; }
     case SYS_spawn: return k_spawn((const char *)A(0), A(1), (char **)A(2));
     case SYS_yield: return k_yield();
     case SYS_jobs: return k_jobs((job_t *)A(0), A(1));
@@ -486,7 +495,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_putchar: { char c = A(0); k_write(1, &c, 1); return A(0); }
     case SYS_getchar: return k_getc();
     case SYS_kbhit: return k_kbhit();
-    case SYS_conctl: con->ctl(A(0), A(1), A(2)); return 0;
+    case SYS_conctl: if (A(0) == CON_BREAK) PROC.brk = A(1) != 0; else con->ctl(A(0), A(1), A(2)); return 0;
     case SYS_redirect: { int old = stdout_fd; stdout_fd = A(0) ? A(0) : 1; return old; }
     // ---- files
     case SYS_open: return k_open((const char *)A(0), A(1));
@@ -674,6 +683,7 @@ static int run_loaded(uint8_t *code, uint32_t code_size, uint8_t *data, uint8_t 
   pr->heap.next = pr->heap.prev = &pr->heap;
   pr->code = code; pr->data = data; pr->stack = stack;       // freed by task_end if the task is killed
   pr->code_size = code_size;                                 // the tick preempts only inside it
+  pr->brk = true;                                            // Ctrl-C ends it until it says otherwise
   // what this task's parent level already holds; other tasks' slots are left out, so a slot
   // another task frees and the child reuses is still the child's to close
   pr->fd_mask = 0; for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self) pr->fd_mask |= 1 << i;
@@ -766,6 +776,7 @@ static volatile bool preempt_on;
 void preempt_tramp();
 __attribute__((used)) void preempt_yield() {
   if (cur->killed && cur != tasks) longjmp(cur->jb, 1);
+  brk_check();
   k_yield();
 }
 
@@ -778,14 +789,14 @@ __attribute__((used)) void preempt_tick(uint32_t *f) {   // f: the exception fra
   uint32_t pc = f[6];
   if (pc - (uint32_t)p->code >= p->code_size) return;
   if (f[7] & ((3u << 25) | (0x3fu << 10))) return;     // ICI/IT bits: retry on the next tick
-  if (!t->killed || t == tasks) {
-    bool other = false;
-    for (int i = 0; i <= MAX_JOBS; i++) if (&tasks[i] != t && tasks[i].state == T_RUN) other = true;
-    if (!other) return;
-  }
+  bool other = false;
+  for (int i = 0; i <= MAX_JOBS; i++) if (&tasks[i] != t && tasks[i].state == T_RUN) other = true;
+  // a busy foreground program that takes Ctrl-C goes through preempt_yield on every tick,
+  // even alone: the console cannot be read from an interrupt, so brk_check looks there
+  if (!other && !(t->killed && t != tasks) && !(t == tasks && p->brk)) return;
   preempt_pc = pc | 1;
   f[6] = (uint32_t)preempt_tramp & ~1u;
-  preempt_count++;
+  if (other) preempt_count++;
 }
 
 // the alarm's handler: pass the frame (on MSP, which threads use here, or PSP) to

@@ -774,6 +774,7 @@ int run_script(char *name, int argc, char **argv) {
 
 int main(int argc, char **argv) {
   struct stat_t st; int n; int k;
+  conctl(CON_BREAK, 0, 0);       // Ctrl-C discards the line and stops scripts (see brk)
   if (argc > 1) return run_script(argv[1], argc - 1, argv + 1);
   if (stat("/autoexec.sh", &st) == 0) { argv[0] = "/autoexec.sh"; run_script("/autoexec.sh", 1, argv); }
   printf("T2DOS shell, type help\n");

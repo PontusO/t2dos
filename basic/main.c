@@ -248,6 +248,7 @@ int immediate() {
 
 int main(int argc, char **argv) {
   int code;
+  conctl(CON_BREAK, 0, 0);       // BASIC stops its program on Ctrl-C itself
   mem_init();
   session_start();
   if (argc < 2) code = immediate();
