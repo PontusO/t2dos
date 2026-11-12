@@ -3,7 +3,8 @@
 
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
 exectick (`exectick DIR`: chdir DIR, print "exectick cwd DIR", then exec `tick 0 1000`),
-hog (getchar() forever), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
+hog (getchar() forever), spin (`spin N [WANT]`: N rounds of integer and float work with no
+syscalls, 0 = forever; exit 1 if the result is WANT, else 2), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
 The pipe cases use pecho (`pecho NAME` makes /pipe/NAME and /pipe/NAME.out and answers each
 message uppercased; "quit" answers "BYE" and exits 3) and pclient (`pclient CASE [NAME [TEXT]]`,
@@ -24,6 +25,11 @@ Cases (spawner CASE on the board):
   kill_sleeping       spawn `tick 0 5000`, kill it inside its sleep: 0, done with JOB_KILLED
   kill_getchar        spawn hog (blocked in getchar in the background); the foreground still
                       reads the line this script types; kill of the hog returns 0
+  preempt             spin 300000 alone (at least 300 ms), then two `spin` jobs and the foreground
+                      compute at once: the foreground's sleep(100) returns within 300 ms, the
+                      foreground's and both jobs' results equal the one computed alone (the
+                      registers and float state survive preemption), sysinfo(INFO_PREEMPTS) grew
+  spinkill            spawn `spin 0` (never makes a syscall), kill it: 0, done with JOB_KILLED
   redirect_isolation  spawn `tick 3 100`, the foreground redirects to /tmp/r.txt and writes
                       "fg" while sleeping 500: the file holds exactly "fg", the ticks are on
                       the console
@@ -92,7 +98,7 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick']
+PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick', 'spin']
 SRCS = {'demosrv': os.path.join(ROOT, 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
@@ -209,6 +215,18 @@ def case_kill_sleeping(r):
     good, ticks, rest = verdict('kill_sleeping', out, code)
     if ticks:
         good = fail('kill_sleeping: the killed job printed %r' % ticks)
+    return good
+
+
+def case_preempt(r):
+    out, code = r.run(SPAWNER + ' preempt', 120.0)
+    good, ticks, rest = verdict('preempt', out, code)
+    return good
+
+
+def case_spinkill(r):
+    out, code = r.run(SPAWNER + ' spinkill', 30.0)
+    good, ticks, rest = verdict('spinkill', out, code)
     return good
 
 
@@ -626,6 +644,7 @@ def case_job_exec_kill(r):
 
 CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('kill_sleeping', case_kill_sleeping), ('kill_getchar', case_kill_getchar),
+         ('preempt', case_preempt), ('spinkill', case_spinkill),
          ('redirect_isolation', case_redirect_isolation), ('fg_exec_with_job', case_fg_exec_with_job),
          ('listen_owner', case_listen_owner),
          ('pipe_roundtrip', case_pipe_roundtrip), ('reply_before_request', case_reply_before_request),

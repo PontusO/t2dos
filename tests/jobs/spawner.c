@@ -1,11 +1,14 @@
 // spawner.c - foreground driver for the background job tests (tools/check_jobs.py).
 // spawner CASE runs one case, prints one line per check ("ok ..." or "FAIL ...")
-// and then PASS or FAIL. Cases: basic errors sleeping getchar redirect exec listen.
+// and then PASS or FAIL. Cases: basic errors sleeping getchar redirect exec listen preempt
+// spinkill.
 // Every case leaves the job table empty (all jobs ended and reported by jobs()).
 #include "sys.h"
 
 #define TICK "/src/jobs/tick.bin"
 #define HOG "/src/jobs/hog.bin"
+#define SPIN "/src/jobs/spin.bin"
+#define SPIN_N 300000
 
 struct job_t jb[8];
 char *av[8];
@@ -206,9 +209,82 @@ int case_listen() {
   return 0;
 }
 
+// the same as spin() in spin.c: integer and float work with no syscalls inside the loop
+int spin(int n) {
+  int i; int a; int b; int c; float x; float y; float z;
+  a = 1; b = 7; c = 0; x = 1.0; y = 0.5; z = 0.0;
+  i = 0;
+  while (n == 0 || i < n) {
+    a = a * 1103515245 + 12345;
+    b = b ^ (a >> 7);
+    c = b & 255;
+    z = c;
+    x = x * 1.0001 + y;
+    if (x > 1000.0) x = x - 999.0;
+    y = y * 0.999 + z * 0.001;
+    i = i + 1;
+  }
+  return a ^ b ^ (int)(x * 1000.0) ^ (int)(y * 1000.0);
+}
+
+// two spin jobs and the foreground compute at once: a foreground sleep(100) returns on
+// time, every result equals the one computed alone, the tick preempted
+int case_preempt() {
+  int want; int t0; int t1; int dt; int got; int p0; int n; int i; int good; int ids[2];
+  char nbuf[16]; char wbuf[16];
+  p0 = sysinfo(INFO_PREEMPTS);
+  t0 = millis();
+  want = spin(SPIN_N);
+  t1 = millis() - t0;
+  sprintf(msg, "spin %d alone: %d ms", SPIN_N, t1);
+  check(t1 >= 300);
+  sprintf(nbuf, "%d", SPIN_N); sprintf(wbuf, "%d", want);
+  av[0] = "spin"; av[1] = nbuf; av[2] = wbuf; av[3] = 0;
+  ids[0] = spawn(SPIN, 3, av);
+  ids[1] = spawn(SPIN, 3, av);
+  sprintf(msg, "spawn spin twice = %d %d", ids[0], ids[1]);
+  check(ids[0] >= 1 && ids[1] >= 1);
+  t0 = millis();
+  sleep(100);
+  dt = millis() - t0;
+  sprintf(msg, "sleep(100) next to two spinning jobs took %d ms (want < 300)", dt);
+  check(dt < 300);
+  got = spin(SPIN_N);
+  sprintf(msg, "foreground spin while preempted = %d (want %d)", got, want);
+  check(got == want);
+  n = 0; i = 0;
+  while (n < 2 && i < 600) { n = n + jobs(jb + n, 8 - n); if (n < 2) sleep(50); i = i + 1; }
+  good = n == 2;
+  i = 0;
+  while (i < n) { if (jb[i].state != JOB_DONE || jb[i].exit_code != 1) good = 0; i = i + 1; }
+  sprintf(msg, "both jobs done with the right result: %d done, exits %d %d (want 1 1)", n, jb[0].exit_code, jb[1].exit_code);
+  check(good);
+  sprintf(msg, "preemptions %d", sysinfo(INFO_PREEMPTS) - p0);
+  check(sysinfo(INFO_PREEMPTS) - p0 > 10);
+  empty();
+  return 0;
+}
+
+// a job that never makes a syscall still ends when killed
+int case_spinkill() {
+  int id; int r; int t0;
+  av[0] = "spin"; av[1] = "0"; av[2] = 0;
+  id = spawn(SPIN, 2, av);
+  sprintf(msg, "spawn spin 0 = %d", id);
+  check(id >= 1);
+  sleep(200);
+  t0 = millis();
+  r = kill(id);
+  sprintf(msg, "kill of the spinning job = %d in %d ms", r, millis() - t0);
+  check(r == 0);
+  expect_done(id, JOB_KILLED);
+  empty();
+  return 0;
+}
+
 int main(int argc, char **argv) {
   fails = 0;
-  if (argc < 2) { printf("usage: spawner basic|errors|sleeping|getchar|redirect|exec|listen\n"); return 2; }
+  if (argc < 2) { printf("usage: spawner basic|errors|sleeping|getchar|redirect|exec|listen|preempt|spinkill\n"); return 2; }
   if (!strcmp(argv[1], "basic")) case_basic();
   else if (!strcmp(argv[1], "errors")) case_errors();
   else if (!strcmp(argv[1], "sleeping")) case_sleeping();
@@ -216,6 +292,8 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[1], "redirect")) case_redirect();
   else if (!strcmp(argv[1], "exec")) case_exec();
   else if (!strcmp(argv[1], "listen")) case_listen();
+  else if (!strcmp(argv[1], "preempt")) case_preempt();
+  else if (!strcmp(argv[1], "spinkill")) case_spinkill();
   else { printf("unknown case %s\n", argv[1]); return 2; }
   if (fails) printf("FAIL\n"); else printf("PASS\n");
   return 0;

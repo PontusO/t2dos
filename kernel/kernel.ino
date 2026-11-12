@@ -16,6 +16,8 @@
 #include <math.h>
 #include "sys.h"
 #include "vault.h"
+#include <hardware/irq.h>
+#include <hardware/structs/timer.h>
 
 // The ESPHost copy bundled with arduino-pico 6.2.0 waits on other interrupts inside the
 // handshake GPIO IRQ and hangs the board once WiFi is up; third_party/ESPHost has the fixes.
@@ -45,7 +47,7 @@
 // The structs come before the first function: Arduino puts its generated
 // prototypes there.
 struct Blk { Blk *next, *prev; };
-struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Blk heap; void *code, *data, *stack; };
+struct Proc { jmp_buf jb; int exit_code; uint16_t fd_mask; uint8_t sock_mask; Blk heap; void *code, *data, *stack; uint32_t code_size; };
 
 // Cooperative tasks: tasks[0] is the foreground (the shell and what it runs),
 // tasks[1..MAX_JOBS] are background jobs. A task gives up the CPU only in
@@ -68,7 +70,7 @@ struct Task {
   int nest;                             // procs[nest] is the running program, -1 none
   Proc procs[MAX_NEST];
   jmp_buf jb;                           // task-level unwind (kill)
-  uint8_t *code, *data, *stack; uint32_t entry;   // loaded by spawn, not yet started
+  uint8_t *code, *data, *stack; uint32_t entry, code_size;   // loaded by spawn, not yet started
   int argc; char *argv[MAX_ARGS + 1]; char args[ARG_BYTES];
   char fmtbuf[1024];                    // printf's buffer: a write to a full pipe switches mid-printf
 };
@@ -76,6 +78,7 @@ static Task tasks[1 + MAX_JOBS];
 static Task *cur = &tasks[0];
 static int k_yield();
 static void k_wait();
+extern "C" volatile uint32_t preempt_count;
 
 // Named pipes: /pipe/NAME, made by mkpipe, owned by the task (and nesting
 // level) that made it and removed when that program ends. A writer's close
@@ -476,6 +479,7 @@ extern "C" int sys(int num, int n, int *argv) {
 #endif
       if (k == INFO_DISK_TOTAL_KB || k == INFO_DISK_USED_KB) { FSInfo fi; fsys->info(fi); return (k == INFO_DISK_TOTAL_KB ? fi.totalBytes : fi.usedBytes) / 1024; }
       if (k == INFO_CONSOLE) return con->width() | con->height() << 16;
+      if (k == INFO_PREEMPTS) return preempt_count;
       return -1;
     }
     // ---- console
@@ -642,7 +646,7 @@ __attribute__((naked)) static int run(void *entry, void *sysfn, void *data, void
 // Load a T2CC file: code in SRAM (PSRAM if SRAM is short), data and the
 // program stack in PSRAM. Returns 0, -1 (not found), -2 (not a T2CC program)
 // or -3 (out of memory): the SPAWN_ error codes.
-static int load_bin(const char *name, uint8_t **pcode, uint8_t **pdata, uint8_t **pstack, uint32_t *pentry) {
+static int load_bin(const char *name, uint8_t **pcode, uint8_t **pdata, uint8_t **pstack, uint32_t *pentry, uint32_t *psize) {
   char path[160]; resolve(name, path, sizeof path);
   File f = fsys->open(path, "r");
   if (!f) return -1;
@@ -656,19 +660,20 @@ static int load_bin(const char *name, uint8_t **pcode, uint8_t **pdata, uint8_t 
   f.read(code, hdr[1]); f.read(data, hdr[2]); f.close();
   memset(data + hdr[2], 0, hdr[3]);
   asm volatile("dsb\n isb");
-  *pcode = code; *pdata = data; *pstack = stack; *pentry = hdr[4];
+  *pcode = code; *pdata = data; *pstack = stack; *pentry = hdr[4]; *psize = hdr[1];
   return 0;
 }
 
 // Run a loaded program as the running task's next nesting level; frees it after.
 // A task's code runs only while it is cur, so cur is the same before and after run().
-static int run_loaded(uint8_t *code, uint8_t *data, uint8_t *stack, uint32_t entry, int argc, char **argv) {
+static int run_loaded(uint8_t *code, uint32_t code_size, uint8_t *data, uint8_t *stack, uint32_t entry, int argc, char **argv) {
   Task *t = cur;
   int self = cur_id();
   int level = t->nest + 1;
   Proc *pr = &t->procs[level];
   pr->heap.next = pr->heap.prev = &pr->heap;
   pr->code = code; pr->data = data; pr->stack = stack;       // freed by task_end if the task is killed
+  pr->code_size = code_size;                                 // the tick preempts only inside it
   // what this task's parent level already holds; other tasks' slots are left out, so a slot
   // another task frees and the child reuses is still the child's to close
   pr->fd_mask = 0; for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self) pr->fd_mask |= 1 << i;
@@ -698,10 +703,10 @@ static int run_loaded(uint8_t *code, uint8_t *data, uint8_t *stack, uint32_t ent
 
 static int run_bin(const char *name, int argc, char **argv) {
   if (cur->nest + 1 >= MAX_NEST) { Serial.println("kernel: exec nesting too deep"); return -1; }
-  uint8_t *code, *data, *stack; uint32_t entry;
-  int r = load_bin(name, &code, &data, &stack, &entry);
+  uint8_t *code, *data, *stack; uint32_t entry, size;
+  int r = load_bin(name, &code, &data, &stack, &entry, &size);
   if (r) return r;
-  return run_loaded(code, data, stack, entry, argc, argv);
+  return run_loaded(code, size, data, stack, entry, argc, argv);
 }
 
 // ============================================================ task switching
@@ -744,6 +749,95 @@ static int k_yield() {
 }
 static void k_wait() { if (!k_yield()) delay(1); }
 
+// ============================================================ preemption
+// Program code is preempted; the kernel never is. A TIMER1 alarm every PREEMPT_MS (SysTick is
+// arduino-pico's cycle counter) at the lowest priority looks at what it interrupted: when that is the running task's program code (not
+// the kernel, a library, the ROM or sys_entry), not inside an IT block or an interrupted
+// LDM/STM, and another task can run (or this one was killed), it makes the exception
+// return to preempt_tramp instead. That saves what the program could have live (r0-r4,
+// r12, lr, the flags, s0-s15, FPSCR), moves to the task's kernel stack as sys_entry does
+// and calls k_yield(): to the kernel it is as if the program had called yield() there.
+// So all switching stays in k_yield/ctx_switch, and only one task is ever in the kernel.
+#define PREEMPT_MS 10
+extern "C" {
+__attribute__((used)) volatile uint32_t preempt_pc;   // where preempt_tramp goes back to (Thumb bit set)
+volatile uint32_t preempt_count;                     // sysinfo(INFO_PREEMPTS)
+static volatile bool preempt_on;
+void preempt_tramp();
+__attribute__((used)) void preempt_yield() {
+  if (cur->killed && cur != tasks) longjmp(cur->jb, 1);
+  k_yield();
+}
+
+__attribute__((used)) void preempt_tick(uint32_t *f) {   // f: the exception frame r0 r1 r2 r3 r12 lr pc xpsr
+  timer1_hw->intr = 1;                                     // ack alarm 0 and set the next one
+  timer1_hw->alarm[0] = timer1_hw->timerawl + PREEMPT_MS * 1000;
+  Task *t = cur;
+  if (!preempt_on || t->nest < 0) return;
+  Proc *p = &t->procs[t->nest];
+  uint32_t pc = f[6];
+  if (pc - (uint32_t)p->code >= p->code_size) return;
+  if (f[7] & ((3u << 25) | (0x3fu << 10))) return;     // ICI/IT bits: retry on the next tick
+  if (!t->killed || t == tasks) {
+    bool other = false;
+    for (int i = 0; i <= MAX_JOBS; i++) if (&tasks[i] != t && tasks[i].state == T_RUN) other = true;
+    if (!other) return;
+  }
+  preempt_pc = pc | 1;
+  f[6] = (uint32_t)preempt_tramp & ~1u;
+  preempt_count++;
+}
+
+// the alarm's handler: pass the frame (on MSP, which threads use here, or PSP) to
+// preempt_tick, which returns through the EXC_RETURN still in lr
+__attribute__((naked)) void preempt_isr() {
+  asm volatile(
+    "tst lr, #4\n"
+    "ite eq\n"
+    "mrseq r0, msp\n"
+    "mrsne r0, psp\n"
+    "b preempt_tick\n");
+}
+
+__attribute__((naked)) void preempt_tramp() {
+  asm volatile(
+    "sub sp, #4\n"                  // the return pc goes here (sub without s keeps the flags)
+    "push {r0-r4, r12, lr}\n"
+    "mrs r0, apsr\n"
+    "push {r0}\n"
+    "vmrs r0, fpscr\n"
+    "push {r0}\n"
+    "vpush {s0-s15}\n"
+    "movw r0, #:lower16:preempt_pc\n"
+    "movt r0, #:upper16:preempt_pc\n"
+    "ldr r0, [r0]\n"
+    "str r0, [sp, #100]\n"         // 64 s + fpscr + apsr + 7 r
+    "mov r4, sp\n"
+    "movw r3, #:lower16:t2_sys_sp\n"
+    "movt r3, #:upper16:t2_sys_sp\n"
+    "ldr r3, [r3]\n"
+    "mov sp, r3\n"
+    "bl preempt_yield\n"
+    "mov sp, r4\n"
+    "vpop {s0-s15}\n"
+    "pop {r0}\n"
+    "vmsr fpscr, r0\n"
+    "pop {r0}\n"
+    "msr APSR_nzcvqg, r0\n"
+    "pop {r0-r4, r12, lr}\n"
+    "pop {pc}\n");
+}
+}
+
+static void preempt_start() {
+  irq_set_exclusive_handler(TIMER1_IRQ_0, preempt_isr);
+  irq_set_priority(TIMER1_IRQ_0, PICO_LOWEST_IRQ_PRIORITY);
+  timer1_hw->alarm[0] = timer1_hw->timerawl + PREEMPT_MS * 1000;
+  hw_set_bits(&timer1_hw->inte, 1);
+  irq_set_enabled(TIMER1_IRQ_0, true);
+  preempt_on = true;
+}
+
 // A background task ends: free what its programs left (all nesting levels,
 // it may have been killed deep inside), close what it owns, become DONE
 // and switch away for good. Its slot is FREE once jobs() has reported it.
@@ -773,7 +867,7 @@ static void task_start() {
     else {
       uint8_t *c = t->code, *d = t->data, *s = t->stack;
       t->code = t->data = t->stack = nullptr;             // run_loaded owns them now
-      code = run_loaded(c, d, s, t->entry, t->argc, t->argv);
+      code = run_loaded(c, t->code_size, d, s, t->entry, t->argc, t->argv);
     }
   } else code = JOB_KILLED;              // kill: k_yield longjmps here
   task_end(code);
@@ -787,8 +881,8 @@ static int k_spawn(const char *name, int argc, char **argv) {
   int j = 1;
   while (j <= MAX_JOBS && tasks[j].state != T_FREE) j++;
   if (j > MAX_JOBS) return SPAWN_FULL;
-  uint8_t *code, *data, *stack; uint32_t entry;
-  int r = load_bin(name, &code, &data, &stack, &entry);
+  uint8_t *code, *data, *stack; uint32_t entry, size;
+  int r = load_bin(name, &code, &data, &stack, &entry, &size);
   if (r) return r;
   Task *t = &tasks[j];
   if (argc < 0) argc = 0;
@@ -805,7 +899,7 @@ static int k_spawn(const char *name, int argc, char **argv) {
   const char *sl = strrchr(base, '/'); if (sl) base = sl + 1;
   strlcpy(t->name, base, sizeof t->name);
   char *dot = strrchr(t->name, '.'); if (dot && !strcmp(dot, ".bin")) *dot = 0;
-  t->code = code; t->data = data; t->stack = stack; t->entry = entry;
+  t->code = code; t->data = data; t->stack = stack; t->entry = entry; t->code_size = size;
   t->nest = -1; t->killed = 0; t->exit_code = 0; t->gen++;
   memcpy(t->cwd, cwd, sizeof cwd);
   t->stdout_fd = stdout_fd;
@@ -895,6 +989,7 @@ void setup() {
   Serial.printf("T2DOS kernel  psram %d  sram free %d  fs %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), fsname);
 #endif
   if (mounted && !is_dir("/bin")) fsys->mkdir("/bin");
+  preempt_start();
   vault_boot();
   char ssid[33], pass[64];          // join the saved network, without waiting for it
   int saved = mounted ? wifi_load(ssid, pass) : 0;

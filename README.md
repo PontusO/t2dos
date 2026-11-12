@@ -288,10 +288,10 @@ Rules for jobs:
   the shell at its next prompt.
 - Keys always go to the foreground program. A job that calls `getchar` just
   waits, and never gets a key.
-- Tasks switch only when a program waits (see
-  [Writing a background program](#writing-a-background-program)). One effect:
-  while `cc` runs, the jobs wait, because `cc` compiles without waiting.
-  They continue when `cc` ends.
+- Tasks switch when a program waits, and every 10 ms while a program
+  computes (see [Writing a background program](#writing-a-background-program)).
+  So jobs keep running while `cc` compiles, only slower: a system call, such
+  as `cc` reading its source, runs to the end before another task gets a turn.
 
 ### Line editing and history
 
@@ -988,20 +988,25 @@ int main() {
 
 ### Writing a background program
 
-Any program can run as a job (`prog &`). Nothing changes in how you write it,
-with one rule that matters a great deal: **T2DOS does not preempt.** The
-foreground program, the shell and every job take turns, and a task gives up
-the processor only when it calls something that waits:
+Any program can run as a job (`prog &`). Nothing changes in how you write it.
+The foreground program, the shell and every job take turns. A task gives up
+the processor when it calls something that waits:
 
 - `getchar`, `kbhit`, `sleep`, `recv`, `accept` (with a timeout),
 - `read` of an empty named pipe, `write` to a full one,
 - `yield()`, which lets another task run and returns 1 if one did, else 0.
 
-A job that loops without ever calling one of these freezes the whole board,
-the keyboard included. There is no way out except cutting the power, so a
-polling loop must call `yield()` (or `sleep`) in every round. Anything else
-the program does, such as reading a file or printing, runs to the end without
-interruption.
+A program that computes without calling any of these is preempted: every
+10 ms a timer interrupt checks whether the processor is in a program's own
+code while another task could run, and if so switches as if the program had
+called `yield()` at that point. So a busy loop slows the other tasks down but
+cannot freeze the board, and `kill` ends it. The kernel itself is never
+preempted: a system call, such as reading a file, printing or a network
+call, runs to the end (or to one of the waits above) before another task
+gets the processor. A polling loop should still call `yield()` or `sleep`,
+so that it does not burn its whole time slice doing nothing.
+[Writing programs for preemption](#writing-programs-for-preemption) lists
+what to watch for.
 
 A job that only waits is cheap. This one prints a line every second:
 
@@ -1026,8 +1031,7 @@ beat 2
 beat 3
 ```
 
-(While `cc` itself runs, the jobs are paused, because the compiler never
-waits. They continue when it ends.) A job reaches the console with `printf`
+A job reaches the console with `printf`
 like any program; with `> file &` its output goes to the file instead.
 
 A server follows three steps, as `userland/demosrv.c` shows:
@@ -1051,6 +1055,53 @@ A server follows three steps, as `userland/demosrv.c` shows:
 number (1 to 4) or a negative `SPAWN_` code (see
 [System calls](#system-calls)). `jobs(buf, max)` fills an array of
 `struct job_t` and `kill(job)` ends a job.
+
+### Writing programs for preemption
+
+Because a program can be switched out at any point in its own code, keep
+these in mind when several programs run at once:
+
+- **Memory is not shared.** Every program has its own data, stack and
+  `malloc`s, so a switch can never change your variables, and no locks are
+  needed for them. Programs exchange data only through named pipes, sockets
+  and files, and that is where the care goes.
+- **One system call is one step.** The kernel is never preempted, so a
+  single call finishes before another task runs. One `printf` prints its whole
+  line without another job's output in the middle; two calls in a row can
+  have another task's output between them. Build a line with `sprintf` and
+  print it with one call when that matters.
+- **A sequence of calls is not one step.** Reading a file, changing it and
+  writing it back takes several calls, and another program can do the same in
+  between. Give each file or pipe one writer, or let one server program own
+  it and send it requests over a pipe.
+- **Two writers on a pipe interleave.** A message ends when its writer closes
+  the pipe; if two programs write to the same pipe at once, the reader gets a
+  mix. Use one pipe per writer, or a reply pipe per client.
+- **Wait with the waiting calls, not with a loop.** A loop that checks
+  `millis()` or `kbhit()` until something happens burns its 10 ms slices and
+  slows everyone else. Use `sleep`, a blocking `read`, `accept` with a
+  timeout, or call `yield()` in the loop.
+- **Times are not exact.** With busy jobs running, `sleep(100)` can return a
+  few milliseconds late (one slice per busy task in the worst case), and a
+  computation takes longer in wall time than when it runs alone. Measure
+  durations with `millis()` instead of counting loops.
+- **Long system calls hold everybody up.** A big `read`, `write` or network
+  transfer is not interrupted. When other programs must stay responsive, move
+  data in chunks of a few KB.
+- **A job can be killed anywhere.** `kill` stops a job between any two
+  instructions of its own code. The kernel closes its files, sockets and pipes
+  and frees its memory, but a file it was writing stays as far as it got.
+  Write to a temporary file and `rename` it into place when a half-written
+  file would cause trouble.
+- **Ctrl-C does not stop a busy foreground program.** Keys reach a program
+  only through `getchar` and `kbhit`, so a long foreground computation that
+  should be stoppable checks `kbhit()` now and then. A busy background job can
+  always be ended with `kill`.
+- **Floats are safe.** The switch saves the floating-point registers too, so
+  float code needs nothing special.
+
+`sysinfo(INFO_PREEMPTS)` returns how many times the timer has switched a
+program out since boot, which shows whether a program waits or computes.
 
 ### Named pipes
 
@@ -2072,10 +2123,13 @@ instructions inside IT blocks, and macros (`.macro`, `.rept`).
   is in `r0`.
 - The current directory lives in the kernel and is shared by all programs.
 - Background jobs: up to 4 programs run beside the foreground program, each
-  with its own code, data, stack and kernel stack. Tasks switch cooperatively,
-  only in the calls listed under
-  [Writing a background program](#writing-a-background-program), and never in
-  the middle of a file, flash or WiFi operation. A job inherits the current
+  with its own code, data, stack and kernel stack. Tasks switch in the calls
+  listed under [Writing a background program](#writing-a-background-program),
+  and a TIMER1 alarm every 10 ms preempts a program that is running its own
+  code (not a system call) when another task can run. The preempted task
+  goes through the same `yield()` path, so only one task is ever inside the
+  kernel and nothing switches in the middle of a file, flash or WiFi
+  operation. `sysinfo(INFO_PREEMPTS)` counts the preemptions since boot. A job inherits the current
   directory when it starts. Memory a job allocates is freed when it ends.
   A program that starts another with `exec` inside a job should keep the
   nesting shallow: each job has only an 8 KB kernel stack.
@@ -2255,7 +2309,8 @@ features that the previous `cc` already supports.
 - The shell, redirection, scripts, line editing and history; the file and
   system commands; PSRAM is fully returned after every program.
 - Background jobs: `&`, `jobs`, `kill`, the exit reports, the limit of 4,
-  output to a file, and cooperative switching between the shell and jobs.
+  output to a file, switching between the shell and jobs, and preemption of
+  programs that never make a system call (Challenger 2350).
   Named pipes between jobs and the shell, `demosrv` in pipe mode, and
   Ctrl-C ending a wait on a pipe. `tools/check_jobs.py --board` runs these.
 - `edit` through `screen`, including cut, copy, paste and the mark.

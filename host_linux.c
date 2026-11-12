@@ -151,7 +151,7 @@ int sys(int num, int n, int *argv) {
     case SYS_exec: return run_bin((char *)A(0), A(1), (char **)A(2));
     case SYS_millis: return millis_();
     case SYS_sleep: usleep(A(0) * 1000); return 0;
-    case SYS_sysinfo: return A(0) == INFO_CONSOLE ? 80 | 24 << 16 : 8 << 20;
+    case SYS_sysinfo: return A(0) == INFO_CONSOLE ? 80 | 24 << 16 : A(0) == INFO_PREEMPTS ? 0 : 8 << 20;
     case SYS_spawn: return SPAWN_UNSUPPORTED;   // background jobs are a board feature
     case SYS_yield: return 0;                   // one task on the host: nothing else to run
     case SYS_jobs: return 0;                    // no background jobs

@@ -37,7 +37,8 @@ enum { OPEN_READ = 0, OPEN_WRITE = 1, OPEN_APPEND = 2 };
 // seek() whence
 enum { SEEK_BEGIN = 0, SEEK_CURRENT = 1, SEEK_FINISH = 2 };
 // sysinfo() kinds
-enum { INFO_SRAM_FREE = 0, INFO_PSRAM_TOTAL = 1, INFO_PSRAM_FREE = 2, INFO_DISK_TOTAL_KB = 3, INFO_DISK_USED_KB = 4, INFO_CONSOLE = 5 };
+enum { INFO_SRAM_FREE = 0, INFO_PSRAM_TOTAL = 1, INFO_PSRAM_FREE = 2, INFO_DISK_TOTAL_KB = 3, INFO_DISK_USED_KB = 4, INFO_CONSOLE = 5,
+       INFO_PREEMPTS = 6 };   // INFO_PREEMPTS: how often the tick has preempted a program since boot
 // conctl() commands
 enum { CON_CLEAR = 0, CON_GOTO = 1, CON_COLOR = 2, CON_SIZE = 3 };
 // gpio_mode()
