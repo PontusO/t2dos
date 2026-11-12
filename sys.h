@@ -22,6 +22,7 @@ enum {
   // network. Socket fds are 100+ and also work with read()/write()/close().
   SYS_net_join = 80, SYS_net_status = 81, SYS_net_ip = 82,
   SYS_connect = 83, SYS_send = 84, SYS_recv = 85, SYS_listen = 86, SYS_accept = 87, SYS_sock_avail = 88,
+  SYS_wifi_save = 89, SYS_wifi_saved = 90,
   // board
   SYS_gpio_mode = 96, SYS_gpio_write = 97, SYS_gpio_read = 98, SYS_analog_read = 99, SYS_pwm_write = 100,
   SYS_i2c_write = 101, SYS_i2c_read = 102, SYS_spi_transfer = 103, SYS_delay_us = 104,
@@ -58,6 +59,10 @@ enum { SPAWN_NOTFOUND = -1, SPAWN_BADPROG = -2, SPAWN_NOMEM = -3, SPAWN_FULL = -
 // reboot(mode): closes every open file and restarts the board; mode 1 restarts into the USB
 // bootloader (the RP2350 drive) instead.  Returns -1 only where it is not supported (host_linux)
 // mkpipe(name): name is WITHOUT the /pipe/ prefix (mkpipe("x") creates /pipe/x), owned by the caller; name is at most 31 chars with no '/'; returns 0, or -1 if it exists, the table is full or the name is invalid
+// wifi_save(ssid, password): saves the network, encrypted with a key only this board has, in
+// /etc/wifi; the kernel joins it at boot.  wifi_save(0, 0) forgets it.  0, or -1 on error (also
+// where there is no key store: host_linux).  wifi_saved(buf, max): copies the saved SSID; 1 if one
+// is saved, 0 if none, -1 if /etc/wifi cannot be opened (saved on another board, or damaged)
 // recv(fd, buf, n, timeout_ms): >0 bytes, 0 timeout, -1 closed.  timeout -1 = wait forever
 // listen(port): 0, or -1 if another running job owns the listener or the port can't be bound (in use, e.g.
 // for a while after this board closed a connection on that port, which then sits in TCP TIME_WAIT)

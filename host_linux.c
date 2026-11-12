@@ -236,6 +236,8 @@ int sys(int num, int n, int *argv) {
     case SYS_strchr: return (int)strchr((char *)A(0), A(1));
     case SYS_net_join: return 0;
     case SYS_net_status: return NET_UP;
+    case SYS_wifi_save: return A(0) ? -1 : 0;   // no key store on the host; nothing to forget
+    case SYS_wifi_saved: return 0;
     case SYS_net_ip: return (int)ipbuf;
     case SYS_connect: return sock_connect((char *)A(0), A(1));
     case SYS_send: { int r = write(A(0), (void *)A(1), A(2)); return r > 0 ? r : -1; }

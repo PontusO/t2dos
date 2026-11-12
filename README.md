@@ -580,7 +580,8 @@ reboot [-b]
 Closes every open file and restarts the board. With `-b` it restarts into
 the USB bootloader instead, so the `RP2350` drive appears and a new kernel
 `.uf2` can be copied onto it. The files on the board are kept either way.
-After a restart, join WiFi again.
+After a restart, join WiFi again, unless the network was saved with
+`wifi ... -k`.
 
 ```
 /> reboot -b
@@ -666,25 +667,44 @@ The network tools use the board's WiFi and a small file server on the PC.
 #### wifi
 
 ```
-wifi ssid password [-s host[:port]]
+wifi ssid password [-k] [-s host[:port]]
+wifi -f
 wifi -s host[:port]
 wifi
 ```
 
 Joins a network (15 s timeout), or shows the status. `-s` saves the default
 file server (see below) in `/etc/remote`, so `rls`, `get`, `send` and `rcd`
-can be used without a host. The port defaults to 7777. The WiFi password is
-not saved: after a reset, join again.
+can be used without a host. The port defaults to 7777.
+
+`-k` also saves the network, once the join worked, in `/etc/wifi`. The kernel
+then joins it by itself at every boot, without waiting for it (`wifi` shows
+`connecting` until it is up). `-f` forgets it.
 
 ```
-/> wifi homenet secret123 -s 192.168.1.10
+/> wifi homenet secret123 -k -s 192.168.1.10
 server 192.168.1.10
 joining homenet...
+saved homenet, joined at boot
 connected, ip 192.168.1.42
 /> wifi
 connected, ip 192.168.1.42
 server 192.168.1.10 /
+saved network homenet
 ```
+
+The saved password is encrypted (AES-128-GCM) with a random key that the
+kernel makes the first time `-k` is used and writes into the RP2350's OTP
+memory (page 60, permanently). At boot the kernel reads the key and then
+locks that OTP page until the next reset, so programs cannot read it there.
+`/etc/wifi` is useless on another board or on a PC, and a damaged file is
+refused instead of giving a wrong password. Only the kernel decrypts the
+file; programs can learn the SSID but not the password. This keeps the
+password off the card in plain text. It is not strong security: the key is
+in kernel memory while the board runs, T2DOS has no memory protection, and a
+debug probe attached at reset can read OTP. A board that needs real
+protection should keep the key in a secure element (such as an ATECC608);
+`kernel/vault.cpp` is the only code that knows where the key lives.
 
 #### The PC file server
 
@@ -922,7 +942,7 @@ pointers, except for the maths functions, which take and return `float`
 | Directories | `opendir(path)`, `readdir(d, &entry)` (1 while there are entries), `closedir(d)` |
 | Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
-| Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)` |
+| Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)`, `wifi_save(ssid, password)` (encrypted, joined at boot; `wifi_save(0, 0)` forgets it), `wifi_saved(buf, max)` (the saved SSID: 1, 0 if none, -1 if it cannot be opened) |
 | Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)` |
 | Maths | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `pow(x, y)`, `sqrt`, `fabs`, `floor`, `ceil`, `fmod(x, y)` |
 
@@ -2129,6 +2149,9 @@ write.
 
 - **Program (`.bin`):** a 20-byte header (`T2CC`, code size, data size, 0,
   entry offset, all 32-bit little endian), then the code, then the data.
+- **Saved network (`/etc/wifi`):** `T2W1`, a 12-byte nonce, the encrypted
+  `ssid\0password\0`, then a 16-byte AES-GCM tag (`T2W1` is also the
+  authenticated data). Written and read only by the kernel.
 - **Object (`.o`, `T2OB`) and library (`.a`, `T2AR`):** defined in
   `lib/t2obj.h`. An object holds code, data, symbols, relocations and a
   string table; a library holds a symbol index and the member objects.

@@ -15,6 +15,7 @@
 #include <setjmp.h>
 #include <math.h>
 #include "sys.h"
+#include "vault.h"
 
 // The ESPHost copy bundled with arduino-pico 6.2.0 waits on other interrupts inside the
 // handshake GPIO IRQ and hangs the board once WiFi is up; third_party/ESPHost has the fixes.
@@ -180,6 +181,42 @@ static const char *resolve(const char *in, char *out, int outsz) {
 }
 
 static bool is_dir(const char *path) { File f = fsys->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
+
+// The saved WiFi network: /etc/wifi is "T2W1" and a vault-sealed "ssid\0password\0".  Only the
+// kernel opens it, to join at boot; programs can learn the SSID (wifi_saved) but never the password.
+#define WIFI_FILE "/etc/wifi"
+#define WIFI_AAD "T2W1"
+static int wifi_store(const char *ssid, const char *pass) {
+  if (!ssid) return fsys->exists(WIFI_FILE) && !fsys->remove(WIFI_FILE) ? -1 : 0;
+  int ls = strlen(ssid), lp = strlen(pass);
+  if (ls < 1 || ls > 32 || lp > 63) return -1;
+  uint8_t plain[98], sealed[4 + 98 + VAULT_OVERHEAD];
+  memcpy(plain, ssid, ls + 1); memcpy(plain + ls + 1, pass, lp + 1);
+  memcpy(sealed, WIFI_AAD, 4);
+  int n = vault_seal(plain, ls + lp + 2, WIFI_AAD, sealed + 4);
+  memset(plain, 0, sizeof plain);
+  if (n < 0) return -1;
+  if (!is_dir("/etc")) fsys->mkdir("/etc");
+  File f = fsys->open(WIFI_FILE, "w"); if (!f) return -1;
+  bool ok = (int)f.write(sealed, n + 4) == n + 4; f.close();
+  return ok ? 0 : -1;
+}
+// fills ssid (33 bytes) and pass (64 bytes, may be null): 1 if a network is saved, 0 if none,
+// -1 if the file cannot be opened (sealed on another board, or damaged)
+static int wifi_load(char *ssid, char *pass) {
+  File f = fsys->open(WIFI_FILE, "r"); if (!f) return 0;
+  uint8_t sealed[4 + 98 + VAULT_OVERHEAD], plain[98];
+  int n = f.read(sealed, sizeof sealed); f.close();
+  if (n < 4 + VAULT_OVERHEAD + 2 || memcmp(sealed, WIFI_AAD, 4)) return -1;
+  int m = vault_open(sealed + 4, n - 4, WIFI_AAD, plain);
+  if (m < 2 || plain[m - 1]) { memset(plain, 0, sizeof plain); return -1; }
+  int ls = strlen((char *)plain);
+  if (ls > 32 || ls + 1 >= m) { memset(plain, 0, sizeof plain); return -1; }
+  strcpy(ssid, (char *)plain);
+  if (pass) strlcpy(pass, (char *)plain + ls + 1, 64);
+  memset(plain, 0, sizeof plain);
+  return 1;
+}
 
 // ============================================================ named pipes
 static bool is_pipe_fd(int fd) { return fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS; }
@@ -494,6 +531,8 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_net_join: WiFi.mode(WIFI_STA); WiFi.begin((const char *)A(0), (const char *)A(1)); {
       uint32_t t0 = millis(); while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(50); }
       return WiFi.status() == WL_CONNECTED ? 0 : -1;
+    case SYS_wifi_save: return wifi_store((const char *)A(0), (const char *)A(1));
+    case SYS_wifi_saved: { char s[33]; int r = wifi_load(s, nullptr); if (r == 1) strlcpy((char *)A(0), s, A(1)); return r; }
     case SYS_net_status: { int st = WiFi.status(); return st == WL_CONNECTED ? NET_UP : st == WL_IDLE_STATUS ? NET_CONNECTING : NET_DOWN; }
     case SYS_net_ip: strlcpy(ipbuf, WiFi.localIP().toString().c_str(), sizeof ipbuf); return (int)ipbuf;
     case SYS_connect: { int i = sock_alloc(); if (i < 0) return -1;
@@ -856,6 +895,12 @@ void setup() {
   Serial.printf("T2DOS kernel  psram %d  sram free %d  fs %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), fsname);
 #endif
   if (mounted && !is_dir("/bin")) fsys->mkdir("/bin");
+  vault_boot();
+  char ssid[33], pass[64];          // join the saved network, without waiting for it
+  int saved = mounted ? wifi_load(ssid, pass) : 0;
+  if (saved == 1) { Serial.printf("wifi: joining %s\r\n", ssid); WiFi.mode(WIFI_STA); WiFi.begin(ssid, pass); }
+  else if (saved < 0) Serial.println("wifi: /etc/wifi cannot be opened (saved on another board, or damaged)");
+  memset(pass, 0, sizeof pass);
 }
 
 void loop() {
