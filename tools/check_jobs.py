@@ -2,7 +2,7 @@
 """Check background jobs on the board: spawn, yield, jobs, kill and cooperative switching.
 
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
-exectick (`exectick DIR`: chdir DIR, print "exectick cwd DIR", then exec `tick 0 1000`),
+exectick (`exectick DIR`: chdir DIR, print "exectick cwd DIR", then exec `tick 0 600000`, which never ticks during the test),
 hog (getchar() forever), spin (`spin N [WANT]`: N rounds of integer and float work with no
 syscalls, 0 = forever; exit 1 if the result is WANT, else 2), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
