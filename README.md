@@ -1922,6 +1922,29 @@ programs built with `-O`:
   time is writing the 880 KB assembly file: the board's flash file system
   writes about 56 KB/s, so compiling itself takes about 2 s of it.
 
+`tests/bench/` holds benchmarks for the generated code: small C programs that
+each stress one kind of code (loops on locals, calls, byte arrays, struct
+pointers, globals and a `switch`, calls through function pointers, floats,
+shifts). Each prints `check` lines, which must equal the same program built
+natively with gcc, and its time in ms. `python3 tools/bench.py --pc` checks
+them under qemu; `--board` runs them on the board and prints a table (`--only
+NAME` for one, `--opt "FLAGS"` to compare other flags). On the board:
+
+| benchmark | plain ms | `-O` ms | speedup |
+|---|---|---|---|
+| crc | 519 | 209 | 2.48x |
+| dispatch | 511 | 289 | 1.77x |
+| fib | 450 | 312 | 1.44x |
+| interp | 1107 | 685 | 1.62x |
+| list | 923 | 594 | 1.55x |
+| loop | 743 | 248 | 3.00x |
+| mandel | 479 | 472 | 1.01x |
+| matmul | 465 | 222 | 2.09x |
+| sieve | 968 | 355 | 2.73x |
+| sort | 548 | 242 | 2.26x |
+| strings | 475 | 191 | 2.49x |
+| total | 7188 | 3819 | 1.88x |
+
 `make OPT=-O` builds every program with `-O`. A `cc` built with `-O` gives
 the same output as the plain one, and `cc -O` on the board writes the same
 `cc.bin` as `cc -O` on the PC.
