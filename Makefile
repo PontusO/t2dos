@@ -8,10 +8,11 @@ all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.b
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
-# CCBIN source flags: one C file to $@
+# CCBIN source flags: one C file to $@. OPT=-O builds with the peephole optimizer.
+OPT =
 define CCBIN
 	@mkdir -p root/bin
-	./$(CC_HOST) $(2) -o $@ $(1)
+	./$(CC_HOST) $(OPT) $(2) -o $@ $(1)
 endef
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): compiler/cc.c sys.h

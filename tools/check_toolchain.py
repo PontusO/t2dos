@@ -228,7 +228,7 @@ def check_driver_pc():
             return fail('driver %s: exit %d, output %r, want exit %d, %r' % (' '.join(cmd), code, out, status, want))
         return True
 
-    usage = ('usage: cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] '
+    usage = ('usage: cc [-o out] [-S|-c] [-O] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] '
              'file.c|file.s|file.o|file.a...\n')
     ok = expect(['cc'], usage, 1) and ok
     ok = expect(['cc', 'notes.txt'], 'cc: notes.txt: unknown file type\n', 1) and ok

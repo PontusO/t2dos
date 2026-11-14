@@ -221,7 +221,7 @@ int sys(int num, int n, int *argv) {
       if (find_pipe(nm) >= 0) return -1;
       for (int i = 0; i < MAX_PIPES; i++) if (!pipes[i].used) { memset(&pipes[i], 0, sizeof pipes[i]); pipes[i].used = 1; pipe_gen[i]++; strcpy(pipes[i].name, nm); pipes[i].owner = nest; return 0; }
       return -1; }
-    case SYS_malloc: return (int)malloc(A(0));
+    case SYS_malloc: return (int)calloc(1, A(0));   // zeroed, as the kernel does (cc and basic rely on it)
     case SYS_free: free((void *)A(0)); return 0;
     case SYS_memset: return (int)memset((void *)A(0), A(1), A(2));
     case SYS_memcmp: return memcmp((void *)A(0), (void *)A(1), A(2));

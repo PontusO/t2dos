@@ -11,7 +11,7 @@ message uppercased; "quit" answers "BYE" and exits 3) and pclient (`pclient CASE
 the pipe driver, same output style; `start` spawns pecho, `finish` makes it quit).
 
   check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
-                          compiler/cc (PC only, no board)
+                          compiler/cc (PC only, no board); OPT=-O in the environment adds -O
   check_jobs.py --board   --build, upload the programs to /src/jobs/ and sh.bin to /bin/,
                           record `free`, run every case, then `free` must show the same
                           free PSRAM as before the first case
@@ -121,7 +121,7 @@ def build():
     os.makedirs(WORK, exist_ok=True)
     jobs = [(os.path.join(WORK, p + '.bin'), SRCS.get(p, os.path.join(JOBS, p + '.c'))) for p in PROGS]
     for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'userland', 'sh.c'))]:
-        r = subprocess.run([CC, '-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
+        r = subprocess.run([CC] + os.environ.get('OPT', '').split() + ['-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
         if r.returncode != 0 or r.stdout or r.stderr:
             return fail('cc %s: exit %d, %r' % (os.path.relpath(src, ROOT), r.returncode, r.stdout + r.stderr))
     print('ok: built %s and root/bin/sh.bin' % ', '.join(p + '.bin' for p in PROGS))

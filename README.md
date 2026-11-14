@@ -1861,7 +1861,7 @@ error. Every tool is silent when it succeeds.
 ### cc
 
 ```
-cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file...
+cc [-o out] [-S|-c] [-O] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] file...
 ```
 
 | Option | Meaning |
@@ -1869,6 +1869,7 @@ cc [-o out] [-S|-c] [-mshort-data] [-I dir] [-D name[=v]] [-L dir] [-l name] fil
 | `-o out` | the output name (default `a.bin`) |
 | `-c` | stop at object files: `file.o` for each input |
 | `-S` | stop at assembly: `file.s` for each `.c` input |
+| `-O` | optimize: shorter, faster code (see [Optimization](#optimization)) |
 | `-I dir` | another directory for `#include "..."` |
 | `-D name[=v]` | define a macro (value 1 by default) |
 | `-L dir` | another directory to search for libraries |
@@ -1892,6 +1893,29 @@ Examples:
 /src> cc -S sq.c                               look at the generated assembly: sq.s
 /src> cc -D DEBUG -o dbg.bin prog.c            with a macro defined
 ```
+
+#### Optimization
+
+`-O` runs a peephole pass over each function's assembly before it is
+written. It rewrites fixed patterns of the plain code into shorter ones: a
+local variable is loaded and stored straight from its frame slot, a value no
+longer goes through the stack for a binary operator when the other operand is
+simple, a small constant becomes an immediate (`cmp r0, #10`), a comparison
+feeds the branch directly instead of making 0 or 1 first, and jumps to the
+next line or to another jump are removed. A rewrite that changes what is left
+in a register or in the flags only happens when nothing reads the old value
+afterwards. It does not keep variables in registers.
+
+Without `-O` the output is exactly what it always was. On the board, with all
+programs built with `-O`:
+
+- `examples/basic/bench.bas`: 250,000 statements per second instead of 185,500
+- the programs in `/bin` are about 20% smaller (533 KB instead of 672 KB)
+- `cc` compiling `cc.c` takes 25.4 s instead of 26.3 s
+
+`make OPT=-O` builds every program with `-O`. A `cc` built with `-O` gives
+the same output as the plain one, and `cc -O` on the board writes the same
+`cc.bin` as `cc -O` on the PC.
 
 ### Programs in several files
 
