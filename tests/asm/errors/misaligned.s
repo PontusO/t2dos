@@ -1,4 +1,4 @@
-@ a word load needs an offset that is a multiple of 4
+@ vldr/vstr have only the imm8 * 4 form, so a misaligned offset cannot be encoded
         .text
-        ldr     r0, [r1, #4]
-        ldr     r0, [r1, #3]
+        vldr    s0, [r1, #4]
+        vldr    s0, [r1, #6]

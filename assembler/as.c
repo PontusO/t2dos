@@ -827,18 +827,18 @@ int do_mem(int id) {
   }
   v = 0;
   if (ohas[1]) v = opconst(1);
-  if (v % scale) fail("misaligned offset");
+  // only the 16-bit forms scale their offset; a misaligned one takes the 32-bit form, as in GNU as
   if (oneg[1] && v == 0) { notnarrow(); return emit32(tb | rn, rt << 12); }   // [rn, #-0]: wide, as GNU as
   if (rn == 15) {                      // literal loads: ldr T1 (narrow), else imm12 with the U bit (bit 7) for the sign
-    if (wid != 4 && k == 4 && lo(rt) && v >= 0 && v <= 1020) return emit16(0x4800 | rt << 8 | v >> 2);
+    if (wid != 4 && k == 4 && lo(rt) && v >= 0 && v <= 1020 && !(v & 3)) return emit16(0x4800 | rt << 8 | v >> 2);
     notnarrow();
     if (v >= 0 && v <= 4095) return emit32(tb | 15, rt << 12 | v);
     if (v < 0 && v >= -4095) return emit32((tb - 0x80) | 15, rt << 12 | -v);
     return fail("offset out of range");
   }
   if (wid != 4) {
-    if (rn == 13 && (k == 0 || k == 4) && lo(rt) && v >= 0 && v <= 1020) return emit16((k == 4 ? 0x9800 : 0x9000) | rt << 8 | v >> 2);
-    if (nb && lo(rt) && lo(rn) && v >= 0 && v <= 31 * scale) return emit16(nb | (v / scale) << 6 | rn << 3 | rt);
+    if (rn == 13 && (k == 0 || k == 4) && lo(rt) && v >= 0 && v <= 1020 && !(v & 3)) return emit16((k == 4 ? 0x9800 : 0x9000) | rt << 8 | v >> 2);
+    if (nb && lo(rt) && lo(rn) && v >= 0 && v <= 31 * scale && !(v % scale)) return emit16(nb | (v / scale) << 6 | rn << 3 | rt);
   }
   notnarrow();
   if (v >= 0 && v <= 4095) return emit32(tb | rn, rt << 12 | v);

@@ -300,16 +300,14 @@ char *ldstname(int s, int sz, int l) {
 }
 
 int dec_ldst(int h1, int h2) {
-  int s; int sz; int l; int rn; int rt; int v; int puw; int scale; char *nm;
+  int s; int sz; int l; int rn; int rt; int v; int puw; char *nm;
   s = (h1 >> 8) & 1; sz = (h1 >> 5) & 3; l = (h1 >> 4) & 1; rn = h1 & 15; rt = (h2 >> 12) & 15;
   if (sz == 3 || (s && (!l || sz == 2))) return 0;
   if (l && rt == 15 && (sz == 0 || (sz == 1 && !s))) return 0;   // pld pli pldw
   nm = ldstname(s, sz, l);
-  scale = 1 << sz;                                      // as: offsets are multiples of the size
   if (rn == 15) {                                       // literal: imm12 with U in bit 7
     if (!l) return 0;
     v = h2 & 0xFFF;
-    if (v % scale) return 0;
     if (!(h1 & 0x80)) {
       if (v == 0 || (v & 0xF00) == 0xE00) return 0;   // GNU: ldrt and the like
       v = -v;
@@ -320,13 +318,12 @@ int dec_ldst(int h1, int h2) {
     return 1;
   }
   if (h1 & 0x80) {
-    if ((h2 & 0xFFF) % scale) return 0;
     m32(nm, 0, 1); return memop(rt, rn, h2 & 0xFFF, 1);
   }
   if (h2 & 0x800) {
     puw = (h2 >> 8) & 7; v = h2 & 255;
     if (puw == 4) {                                     // [rn, #-imm8]
-      if (v == 0 || v % scale) return 0;
+      if (v == 0) return 0;
       m32(nm, 0, 1); return memop(rt, rn, -v, 1);
     }
     if (puw == 5 && !l && sz == 2 && rn == 13 && v == 4 && rt != 13 && rt != 15) {   // push.w {rt}
