@@ -21,6 +21,7 @@ arg two
 file /tmp/sh/cmp.sh
 file /tmp/sh/inner.sh
 file /tmp/sh/script.sh
+file /tmp/sh/text.sh
 file /tmp/sh/unclosed.sh
 literal /tmp/sh/nomatch*
 script exists

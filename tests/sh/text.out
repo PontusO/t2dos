@@ -1,0 +1,36 @@
+T2DOS shell, type help
+/> sh /tmp/sh/text.sh
+plain 1
+/tmp/sh/t1.txt:2:Beta two
+/tmp/sh/t2.txt:1:beta again
+4
+inverted 1
+Beta two
+none 1
+grep: /tmp/sh/nosuch.txt: not found
+missing 2
+usage: grep [-i] [-v] [-n] [-c] pattern file...
+usage 2
+ 4  7 37 /tmp/sh/t1.txt
+ 4 /tmp/sh/t1.txt
+ 1 /tmp/sh/t2.txt
+ 5 total
+wc: /tmp/sh/nosuch.txt: not found
+wcmissing 1
+alpha one
+Beta two
+==> /tmp/sh/t1.txt <==
+alpha one
+
+==> /tmp/sh/t2.txt <==
+beta again
+gamma three
+delta
+==> /tmp/sh/t1.txt <==
+delta
+
+==> /tmp/sh/t2.txt <==
+beta again
+tail: /tmp/sh: is a directory
+taildir 1
+/> 

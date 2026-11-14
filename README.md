@@ -563,6 +563,70 @@ f=hello.c; (printf 'put /src/hello.c %d\n' $(stat -c%s $f); cat $f) > /dev/ttyAC
 
 The same `put` works at the recovery prompt.
 
+### Text
+
+These read files only (there are no shell pipes yet): to search a program's
+output, redirect it to a file first, `ls /bin > /tmp/l` then `grep cc /tmp/l`.
+Lines end at `\n`.
+
+#### grep
+
+```
+grep [-i] [-v] [-n] [-c] pattern file...
+```
+
+Prints the lines that match `pattern`. The pattern is a small regular
+expression: a character matches itself, `.` matches any character, `x*` any
+number of `x` (so `.*` matches anything), `^` the start and `$` the end of the
+line. There are no `[...]`, `+` or `\` escapes. Quote a pattern with spaces.
+`-i` ignores case, `-v` prints the lines that do not match, `-n` puts the line
+number in front and `-c` prints only how many lines were selected. With several
+files each line starts with the file name. `\r` characters are left out
+(so DOS line ends work), and only the first 1023 characters of a line are searched. The exit code is 0 when a line was selected, 1 when none was
+and 2 when a file cannot be read.
+
+```
+/src> grep -n "^int main" hello.c
+3:int main() {
+/src> grep -c printf *.c
+blink.c:2
+hello.c:1
+/src> grep -iv todo notes.txt
+```
+
+#### wc
+
+```
+wc [-l] [-w] [-c] file...
+```
+
+Counts lines, words and bytes, in that order, or only the ones asked for. With
+several files a `total` line follows. The output is the same as GNU wc.
+
+```
+/src> wc cc.c
+  2207  19065 101045 cc.c
+/src> wc -l *.c
+  2207 cc.c
+    12 hello.c
+  2219 total
+```
+
+#### head, tail
+
+```
+head [-n N | -N] file...
+tail [-n N | -N] file...
+```
+
+Print the first or the last `N` lines of each file (default 10). With several
+files each one starts with `==> name <==`, as on Linux.
+
+```
+/src> head -3 hello.c
+/src> tail -n 20 /tmp/build.log
+```
+
 ### System
 
 #### free
