@@ -1904,14 +1904,23 @@ simple, a small constant becomes an immediate (`cmp r0, #10`), a comparison
 feeds the branch directly instead of making 0 or 1 first, and jumps to the
 next line or to another jump are removed. A rewrite that changes what is left
 in a register or in the flags only happens when nothing reads the old value
-afterwards. It does not keep variables in registers.
+afterwards.
+
+`-O` also keeps up to five word-sized locals and parameters of each function
+in registers (r4, r5, r6, r10 and r11), the most used first, a use inside a
+loop counting more. Only variables that are always read and written as a
+whole word qualify: never one whose address is taken, and never part of an
+array or struct. The function saves the registers it uses with `push {r4, ...,
+r7, lr}`.
 
 Without `-O` the output is exactly what it always was. On the board, with all
 programs built with `-O`:
 
-- `examples/basic/bench.bas`: 250,000 statements per second instead of 185,500
-- the programs in `/bin` are about 20% smaller (533 KB instead of 672 KB)
-- `cc` compiling `cc.c` takes 25.4 s instead of 26.3 s
+- `examples/basic/bench.bas`: 275,000 statements per second instead of 185,500
+- the programs in `/bin` are about 27% smaller (501 KB instead of 689 KB)
+- `cc` compiling `cc.c` takes about as long as before (27 s). Most of that
+  time is writing the 880 KB assembly file: the board's flash file system
+  writes about 56 KB/s, so compiling itself takes about 2 s of it.
 
 `make OPT=-O` builds every program with `-O`. A `cc` built with `-O` gives
 the same output as the plain one, and `cc -O` on the board writes the same

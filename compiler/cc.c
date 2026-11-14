@@ -52,6 +52,7 @@ char *p;                 // source position
 int tk, ival, line;
 struct Sym *id;          // current identifier
 struct Sym *syms; int nsyms;
+int *hhead; int *hnext;  // hash chains: hhead[hash & 4095] is the newest symbol of a bucket, + 1 (0 none)
 struct Mem *mems; int nmems;
 int *stsize; int *stfirst; int nstructs;
 int *starr; int *stcnt;  // array rows (int[4] in int m[3][4]) are struct-like types: element type, length; -1 for structs
@@ -404,6 +405,7 @@ int setcc(int cond) { ins("cmp\tr1, r0"); return itcc(cond); }
 // Offsets folded into loads and stores stay multiples of the access size (as wants that).
 int *labline;            // labline[n]: the line of label .Ln in the function being optimized
 int pchg;                // a rewrite happened in this round
+int oppw;                // opinfo(): the written register is only written, not also read
 int oprd; int opmask; int opkind; int opn;   // opinfo(): register written (-1 none), registers read
                                              // (bit n: rn), kind (0 plain, 1 call, 2 return, 3 it
                                              // with opn instructions), 4 unknown
@@ -446,7 +448,7 @@ int opinfo(int i) {
   char *t; char *w; int n; int r; int first; int nops; int purew; int b;
   t = lpool + ltext[i];
   n = 0; while (t[n] && t[n] != 9) { opmn[n] = t[n]; n = n + 1; } opmn[n] = 0;
-  oprd = -1; opmask = 0; opkind = 0; opn = 0;
+  oprd = -1; opmask = 0; opkind = 0; opn = 0; oppw = 0;
   if (t[n] == 9) t = t + n + 1; else t = t + n;
   if (opmn[0] == 'i' && opmn[1] == 't') { opkind = 3; opn = n - 1; return 0; }
   if (mnis("bl")) { opkind = 1; return 0; }
@@ -485,6 +487,7 @@ int opinfo(int i) {
     || (strlen(opmn) == 5 && !strncmp(opmn, "mov", 3));    // mov<cond> in an it block
   if (mnis("ldr") || mnis("ldrb") || mnis("ldrh") || mnis("ldrsb.w") || mnis("ldrsh.w")) purew = 1;
   if (oprd >= 0 && !purew) opmask = opmask | (1 << oprd);
+  oppw = purew;
   if (opmn[0] == 'v' && !mnis("vmov")) opkind = 4;           // other VFP forms: not tracked
   return 0;
 }
@@ -667,7 +670,8 @@ int peep_tor1(int a) {
   b = nx(a);
   if (isins(b, "mov\tr1, r0")) rd = "r1"; else if (isins(b, "mov\tr2, r0")) rd = "r2"; else return 0;
   v = pnum(nx(b), "movw\tr0, #");          // leave mov r1, r0 ; movw r0, #N ; cmp r1, r0 to peep_mov
-  if (v >= 0 && v <= 255 && rd[1] == '1') return 0;
+  if (v >= 0 && v <= 255 && rd[1] == '1' && (isins(nx(nx(b)), "cmp\tr1, r0") || isins(nx(nx(b)), "adds\tr0, r1, r0")
+    || isins(nx(nx(b)), "subs\tr0, r1, r0"))) return 0;
   if (!(ldform(a, &sz) || preins(a, "ldr\tr0, [") || preins(a, "ldrb\tr0, [") || preins(a, "ldrh\tr0, [")
     || preins(a, "ldrsb.w\tr0, [") || preins(a, "ldrsh.w\tr0, [") || preins(a, "movw\tr0, #") || preins(a, "subw\tr0, ")
     || preins(a, "addw\tr0, ") || preins(a, "add.w\tr0, r") || preins(a, "adds\tr0, r") || preins(a, "subs\tr0, r"))) return 0;
@@ -814,6 +818,276 @@ int peep_ld(int a) {                        // address then load -> one load
   }
   return 0;
 }
+// ------------------------------------------------------------------ locals in registers (-O)
+// After peep(), promote() moves up to 5 word-sized locals and parameters into r4-r6, r10 and
+// r11: the ones only ever accessed as "ldr/str rX, [r7, #off]" (never their address, never as
+// part of an array or struct), most used first, a use inside a loop counting 8 times per loop
+// level. The prologue saves those registers with r7 and lr ("push {r4, r5, r7, lr}"), so the
+// parameters move up by 4 bytes per register; a promoted parameter is loaded once, into one of
+// the 5 empty lines parse_global() leaves after the prologue. peep() then runs again, and
+// peep_hsrc()/peep_tohi() use the registers directly instead of copies in r0-r3.
+int *slotk;              // slotk[off / 4 + 256]: 1 when the frame word at off is part of an array or struct
+int *slotw;              // promote(): use weight of each frame word; -1 not promotable, -2 - k in register k
+int *pdep;               // promote(): loop depth of each line
+int npro;                // registers promote() gave out in the function being compiled
+int phold;               // the first of the empty lines after the prologue, -1 if none
+int rfoff; int rfplain;  // r7ref(): the frame offset; 1 for a plain ldr/str of r0-r3
+
+int slotix(int off) { off = (off & -4) / 4 + 256; if (off < 0 || off >= 512) return -1; return off; }
+int markbad(int from, int to) {             // frame bytes [from, to) belong to an array or struct
+  int k;
+  while (from < to) { k = slotix(from); if (k >= 0) slotk[k] = 1; from = from + 4; }
+  return 0;
+}
+char *regnm(int k) {
+  if (k == 0) return "r4";
+  if (k == 1) return "r5";
+  if (k == 2) return "r6";
+  if (k == 3) return "r10";
+  return "r11";
+}
+int ispro(int r) { return r == 4 || r == 5 || r == 6 || r == 10 || r == 11; }
+// line i's use of r7: 0 none (or the prologue and epilogue), 1 "..r7, #off.." (rfoff, rfplain),
+// 2 a use promote() does not know
+int r7ref(int i) {
+  char *t; char *u; int v; int neg;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i]; u = t;
+  while (*u) {
+    if (u[0] == 'r' && u[1] == '7' && !idchar(u[2]) && (u == t || !idchar(*(u - 1)))) break;
+    u = u + 1;
+  }
+  if (!*u) return 0;
+  if (!strcmp(t, "push\t{r7, lr}") || !strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7") || !strcmp(t, "pop\t{r7, pc}")) return 0;
+  if (strncmp(u, "r7, #", 5)) return 2;
+  u = u + 5; neg = 0;
+  if (*u == '-') { neg = 1; u = u + 1; }
+  if (*u < '0' || *u > '9') return 2;
+  v = 0;
+  while (*u >= '0' && *u <= '9') { if (v > 100000) return 2; v = v * 10 + *u - '0'; u = u + 1; }
+  if (neg) v = -v;
+  if (!strncmp(t, "subw\t", 5)) v = -v;      // subw rX, r7, #N: the address r7 - N
+  rfoff = v; rfplain = 0;
+  if (*u == ']' && !u[1] && (!strncmp(t, "ldr\tr", 5) || !strncmp(t, "str\tr", 5)) && t[5] >= '0' && t[5] <= '3'
+    && !strncmp(t + 6, ", [r7, #", 8)) rfplain = 1;
+  return 1;
+}
+int r7shift(int i, int off) {               // line i with its r7 offset (rfoff, positive) now off
+  char *t;
+  t = lpool + ltext[i]; pset(i);
+  while (strncmp(t, "r7, #", 5)) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+  ls("r7, #"); ls(dec(off)); t = t + 5;
+  while (*t >= '0' && *t <= '9') t = t + 1;
+  ls(t); lend();
+  return 0;
+}
+int reglist(char *mn, char *last) {        // "mn\t{r4, .., r7, last}" with the promoted registers
+  int k;
+  ls(mn); ls("\t{");
+  k = 0; while (k < npro && k < 3) { ls(regnm(k)); ls(", "); k = k + 1; }
+  ls("r7, ");
+  while (k < npro) { ls(regnm(k)); ls(", "); k = k + 1; }
+  ls(last); ls("}"); lend();
+  return 0;
+}
+int promote() {
+  int i; int k; int n; int w; int d; int best; int bw; int sh; char *t; char *rn;
+  if (!slotw) { slotw = malloc(512 * 4); pdep = malloc(16400 * 4); }
+  npro = 0;
+  if (phold < 0) return 0;
+  i = 0; while (i < 512) { if (slotk[i]) slotw[i] = -1; else slotw[i] = 0; i = i + 1; }
+  i = 0; while (i <= nlines) { pdep[i] = 0; i = i + 1; }
+  i = 0;
+  while (i < nlines) {                      // a branch back to label t makes lines t..i a loop
+    if (lkind[i] == L_BR) { k = labat(llab[i]); if (k >= 0 && k < i) { pdep[k] = pdep[k] + 1; pdep[i + 1] = pdep[i + 1] - 1; } }
+    i = i + 1;
+  }
+  i = 1; while (i < nlines) { pdep[i] = pdep[i] + pdep[i - 1]; i = i + 1; }
+  i = 0;
+  while (i < nlines) {
+    k = r7ref(i);
+    if (k == 2) return 0;
+    if (k == 1) {
+      n = slotix(rfoff);
+      if (n >= 0 && slotw[n] >= 0) {
+        if (!rfplain || (rfoff & 3) || rfoff == 0 || rfoff == 4) slotw[n] = -1;
+        else {
+          w = 1; d = pdep[i];
+          while (d > 0 && w < 100000) { w = w * 8; d = d - 1; }
+          slotw[n] = slotw[n] + w;
+        }
+      }
+    }
+    i = i + 1;
+  }
+  while (npro < 5) {
+    best = -1; bw = 0; i = 0;
+    while (i < 512) {
+      w = slotw[i];
+      if (i >= 258 && w > 0) w = w - 1;     // a parameter costs a load in the prologue
+      if (w > bw) { bw = w; best = i; }
+      i = i + 1;
+    }
+    if (best < 0) break;
+    slotw[best] = -2 - npro; npro = npro + 1;
+  }
+  if (!npro) return 0;
+  sh = 4 * npro;
+  i = 0;
+  while (i < nlines) {
+    k = r7ref(i);
+    if (k == 1) {
+      n = slotix(rfoff);
+      if (n >= 0 && slotw[n] <= -2) {
+        t = lpool + ltext[i]; rn = regnm(-2 - slotw[n]);
+        pset(i); ls("mov\t");
+        if (t[0] == 'l') { lpool[lppos] = 'r'; lpool[lppos + 1] = t[5]; lppos = lppos + 2; ls(", "); ls(rn); }
+        else { ls(rn); ls(", r"); lpool[lppos] = t[5]; lppos = lppos + 1; }
+        lend();
+      }
+      else if (rfoff > 4) r7shift(i, rfoff + sh);
+    }
+    else if (isins(i, "push\t{r7, lr}")) { pset(i); reglist("push", "lr"); }
+    else if (isins(i, "pop\t{r7, pc}")) { pset(i); reglist("pop", "pc"); }
+    i = i + 1;
+  }
+  n = phold; i = 258;
+  while (i < 512) {                         // promoted parameters: load them once
+    if (slotw[i] <= -2) {
+      pset(n); ls("ldr\t"); ls(regnm(-2 - slotw[i])); ls(", [r7, #"); ls(dec((i - 256) * 4 + sh)); ls("]"); lend();
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+// the instructions that take r4-r6, r10, r11 in any register operand (the wide encodings)
+int hiok() {
+  return mnis("ldr") || mnis("ldrb") || mnis("ldrh") || mnis("ldrsb.w") || mnis("ldrsh.w") || mnis("str") || mnis("strb")
+    || mnis("strh") || mnis("cmp") || mnis("mov") || mnis("movw") || mnis("addw") || mnis("subw") || mnis("add.w")
+    || mnis("adds") || mnis("subs");
+}
+// line i with register rf (r0-r3) spelled to, the first operand left alone if skip
+int renreg(int i, int rf, char *to, int skip) {
+  char *t; int prev;
+  t = lpool + ltext[i]; pset(i); prev = 0;
+  while (*t && *t != 9) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+  if (*t) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+  if (skip) { lpool[lppos] = t[0]; lpool[lppos + 1] = t[1]; lppos = lppos + 2; prev = t[1]; t = t + 2; }
+  while (*t) {
+    if (*t == '#') { while (*t && *t != ',' && *t != ']') { lpool[lppos] = *t; lppos = lppos + 1; prev = *t; t = t + 1; } }
+    else if (t[0] == 'r' && t[1] == '0' + rf && !idchar(t[2]) && !idchar(prev)) { ls(to); t = t + 2; prev = '0'; }
+    else { lpool[lppos] = *t; lppos = lppos + 1; prev = *t; t = t + 1; }
+  }
+  lend();
+  return 0;
+}
+// mov rA, rP ; X -> X reading rP in place of rA (rP a promoted register, rA r0-r3 not read after X)
+int peep_hsrc(int a) {
+  int j; int ra; int w; char *t;
+  t = lpool + ltext[a];
+  if (t[5] < '0' || t[5] > '3' || t[6] != ',' || t[7] != ' ') return 0;
+  ra = t[5] - '0'; w = regword(t + 8, strlen(t + 8));
+  if (!ispro(w)) return 0;
+  j = nx(a); if (j >= nlines || lkind[j] != L_INS) return 0;
+  opinfo(j);
+  if (opkind != 0 || !hiok() || !(opmask & (1 << ra))) return 0;
+  if (oprd == ra) { if (!oppw) return 0; renreg(j, ra, t + 8, 1); }
+  else { if (!dead(ra, nx(j), 0)) return 0; renreg(j, ra, t + 8, 0); }
+  pdel(a);
+  return 1;
+}
+// X rA, ... ; mov rP, rA -> X rP, ... (rP a promoted register, rA r0-r3 not read afterwards)
+int peep_tohi(int a) {
+  int b; int rp; int ra; char *u; char *c;
+  b = nx(a); if (b >= nlines || lkind[b] != L_INS) return 0;
+  u = lpool + ltext[b];
+  if (strncmp(u, "mov\tr", 5)) return 0;
+  c = strchr(u, ','); if (!c || c[1] != ' ') return 0;
+  rp = regword(u + 4, c - u - 4); ra = regword(c + 2, strlen(c + 2));
+  if (!ispro(rp) || ra < 0 || ra > 3) return 0;
+  opinfo(a);
+  if (opkind != 0 || oprd != ra || !oppw || !hiok()) return 0;
+  if (!dead(ra, nx(b), 0)) return 0;
+  if (rp >= 10) rp = rp - 7; else rp = rp - 4;   // r4 r5 r6 r10 r11 -> 0..4
+  redest(a, regnm(rp)); pdel(b);
+  return 1;
+}
+// subw/addw r0, r7, #N ; push {r0} ; X ; pop {r1} ; ST r0, [r1] -> X ; ST r0, [r7, #off]
+// (an assignment to a local whose right side uses r1 and r2). X must leave the pushed word alone:
+// stack references only to words it pushed itself, a syscall's argv only over its own args.
+int peep_astore(int a) {
+  int off; int b; int j; int dep; int n; int k; int sz; char *mn; char *t;
+  off = froff(a); b = nx(a);
+  if (off == 1 || !isins(b, "push\t{r0}")) return 0;
+  if (!dead(0, nx(b), 0)) return 0;          // X does not read the address
+  j = nx(b); dep = 0; n = 0;
+  while (j < nlines && !(dep == 0 && isins(j, "pop\t{r1}"))) {
+    if (lkind[j] != L_INS) return 0;
+    n = n + 1; if (n > 200) return 0;
+    t = lpool + ltext[j];
+    if (!strcmp(t, "push\t{r0}")) dep = dep + 1;
+    else if (!strcmp(t, "pop\t{r1}")) dep = dep - 1;
+    else if (!strncmp(t, "add\tsp, #", 9)) { dep = dep - pnum(j, "add\tsp, #") / 4; if (dep < 0) return 0; }
+    else if (!strncmp(t, "ldr\tr1, [sp, #", 14)) { if (atoi(t + 14) >= 4 * dep) return 0; }   // a call's function address
+    else if (!strcmp(t, "mov\tr2, sp")) {   // a syscall: its args are the top movs r1, #n words
+      k = 0; while (k < 8 && !preins(j, "movs\tr1, #")) { j = nx(j); k = k + 1; }
+      if (k >= 8 || pnum(j, "movs\tr1, #") > dep) return 0;
+      while (j < nlines && !isins(j, "pop\t{r4}")) { if (lkind[j] != L_INS) return 0; j = nx(j); }
+      if (j >= nlines) return 0;
+    }
+    else {
+      opinfo(j);
+      if (opkind == 4 || opkind == 2 || oprd == 13 || (opmask & 8192) || mnis("push") || mnis("pop")) return 0;
+    }
+    j = nx(j);
+  }
+  if (j >= nlines) return 0;
+  k = nx(j); mn = 0;
+  if (isins(k, "str\tr0, [r1]")) { mn = "str"; sz = 4; }
+  if (isins(k, "strb\tr0, [r1]")) { mn = "strb"; sz = 1; }
+  if (isins(k, "strh\tr0, [r1]")) { mn = "strh"; sz = 2; }
+  if (!mn || !offok(off, sz) || !dead(1, nx(k), 0)) return 0;
+  pset(k); lsoff(mn, "r0", off);
+  pdel(a); pdel(b); pdel(j);
+  return 1;
+}
+// add.w rA, r9, rA ; (up to 3 lines without rA) ; LD/ST rX, [rA] -> ... ; LD/ST rX, [r9, rA]
+int peep_gidx(int a) {
+  int j; int n; int ra; char *t; char *u; char *v;
+  if (isins(a, "add.w\tr1, r9, r1")) ra = 1; else if (isins(a, "add.w\tr2, r9, r2")) ra = 2; else return 0;
+  j = nx(a); n = 0;
+  while (j < nlines && lkind[j] == L_INS && n < 4) {
+    t = lpool + ltext[j]; u = t + strlen(t);
+    if (u - t > 6 && *(u - 4) == '[' && *(u - 3) == 'r' && *(u - 2) == '0' + ra && *(u - 1) == ']'
+      && (preins(j, "ldr\t") || preins(j, "ldrb\t") || preins(j, "ldrh\t") || preins(j, "ldrsb.w\t") || preins(j, "ldrsh.w\t")
+        || preins(j, "str\t") || preins(j, "strb\t") || preins(j, "strh\t"))) {
+      opinfo(j);
+      if (oprd == ra) { if (!(oppw)) return 0; }    // ldr r1, [r1]: fine, the load replaces the address
+      else if (!dead(ra, nx(j), 0)) return 0;
+      v = strchr(t, 9);                     // str r1, [r1] stores the address itself
+      if (preins(j, "st") && v[1] == 'r' && v[2] == '0' + ra && v[3] == ',') return 0;
+      pset(j);
+      while (t < u - 3) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+      ls("r9, r"); ls(dec(ra)); ls("]"); lend();
+      pdel(a);
+      return 1;
+    }
+    opinfo(j);
+    if (opkind != 0 || oprd == ra || (opmask & (1 << ra))) return 0;
+    j = nx(j); n = n + 1;
+  }
+  return 0;
+}
+// push {r0} ; ldr r1, [sp, #0] ; blx r1 ; add sp, #4 -> blx r0 (a call through a pointer, no args)
+int peep_icall(int a) {
+  int b; int c; int d;
+  b = nx(a); c = nx(b); d = nx(c);
+  if (!isins(b, "ldr\tr1, [sp, #0]") || !isins(c, "blx\tr1") || !isins(d, "add\tsp, #4")) return 0;
+  pset(c); ls("blx\tr0"); lend();
+  pdel(a); pdel(b); pdel(d);
+  return 1;
+}
 int peep() {
   int i; int round; int k;
   if (!labline) { labline = malloc(65536 * 4); opmn = malloc(64); }
@@ -825,11 +1099,14 @@ int peep() {
       k = lkind[i];
       if (k == L_BR) peep_br(i);
       else if (k == L_INS) {
-        if (isins(i, "push\t{r0}")) peep_push(i);
+        if (npro && preins(i, "mov\tr") && peep_hsrc(i)) ;
+        else if (npro && peep_tohi(i)) ;
+        else if (isins(i, "push\t{r0}")) { if (!peep_icall(i)) peep_push(i); }
         else if (isins(i, "mov\tr1, r0")) peep_mov(i);
         else if (preins(i, "ite\t")) peep_ite(i);
-        else if (froff(i) != 1) { if (!peep_store(i)) { if (!peep_ld(i)) peep_tor1(i); } }
+        else if (froff(i) != 1) { if (!peep_astore(i) && !peep_store(i)) { if (!peep_ld(i)) peep_tor1(i); } }
         else if (preins(i, "add.w\tr0, r9, r")) { if (!peep_ld(i)) peep_tor1(i); }
+        else if (preins(i, "add.w\tr1, r9, r") || preins(i, "add.w\tr2, r9, r")) peep_gidx(i);
         else if (preins(i, "subw\tr1, r7, #") || preins(i, "addw\tr1, r7, #")) peep_r1fr(i);
         else if (isins(i, "adds\tr0, r1, r0") || isins(i, "adds\tr0, r2, r0")) { if (!peep_idx(i)) peep_tor1(i); }
         else if (preins(i, "str\tr0, [r7, #")) peep_reload(i);
@@ -845,10 +1122,10 @@ int peep() {
 // ------------------------------------------------------------------ lexer
 int lookup(char *s, int len, int hash) {
   int i;
-  i = 0;
-  while (i < nsyms) {
+  i = hhead[hash & 4095] - 1;
+  while (i >= 0) {
     if (syms[i].hash == hash && syms[i].len == len && !memcmp(syms[i].name, s, len)) return i;
-    i = i + 1;
+    i = hnext[i] - 1;
   }
   return -1;
 }
@@ -867,6 +1144,7 @@ int intern(char *s, int n) {
     i = nsyms; nsyms = nsyms + 1;
     syms[i].name = s; syms[i].len = n; syms[i].hash = hash; syms[i].tk = Id;
     syms[i].class = 0;
+    hnext[i] = hhead[hash & 4095]; hhead[hash & 4095] = i + 1;
   }
   return i;
 }
@@ -2104,6 +2382,10 @@ int newlocal(struct Sym *s, int t, int size) {
   loc = loc + ((size + 3) & -4);
   if (loc > maxloc) maxloc = loc;
   s->class = CLoc; s->type = t; s->val = -loc;
+  if (optim) {                              // for promote(): words of arrays and structs
+    if (t >= PTR && !(t & ARR) && size > 4) markbad(-loc + 4, -loc + size);   // array: its pointer word, then the storage
+    else if (size != 4 || (t & ARR) || (t < PTR && t != TINT && t != TUINT && t != TFLOAT)) markbad(-loc, -loc + size);
+  }
   return 0;
 }
 
@@ -2259,6 +2541,7 @@ int parse_global() {
       s->type = t; next();
       // prototype or definition? parse params either way
       n = 0; loc = 0; maxloc = 0;
+      if (optim) { if (!slotk) slotk = malloc(512 * 4); i = 0; while (i < 512) { slotk[i] = 0; i = i + 1; } }
       if (!s->ptypes) s->ptypes = malloc(32 * 4);
       while (tk != ')') {
         bt = declarator(parse_type());
@@ -2289,6 +2572,8 @@ int parse_global() {
       ins("mov\tr7, sp");
       frame_at = nlines; imm2(1, 0);            // movw+movt r1,#frame (filled in below)
       ins("sub.w\tsp, sp, r1");
+      phold = -1;
+      if (optim) { phold = nlines; i = 0; while (i < 5) { lnew(L_DEL); i = i + 1; } }   // promote()'s parameter loads
       ret_fix = -1;
       stmt();
       chain_here(ret_fix);
@@ -2296,7 +2581,9 @@ int parse_global() {
       ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
       i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
+      if (optim) { peep(); promote(); }
       flush();
+      npro = 0; phold = -1;
       // restore shadowed symbols
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
       return 0;
@@ -2376,6 +2663,8 @@ int compile(char *src, char *out) {
   fdepth = 0; ifdepth = 0; pp_if = 0; tdepth = 0; nsrcbuf = 0;
   srcname = src; outname = out; ofd = -1;
   syms = malloc(8192 * sizeof(struct Sym)); nsyms = 0;
+  hhead = malloc(4096 * 4); hnext = malloc(8192 * 4);
+  i = 0; while (i < 4096) { hhead[i] = 0; i = i + 1; }
   mems = malloc(2048 * sizeof(struct Mem)); nmems = 0;
   stsize = malloc(256 * 4); stfirst = malloc(256 * 4); nstructs = 0;
   starr = malloc(256 * 4); stcnt = malloc(256 * 4); dims = malloc(8 * 4);
@@ -2434,7 +2723,7 @@ int compile(char *src, char *out) {
   i = 0; while (i < nsyms) { if (syms[i].ptypes) free(syms[i].ptypes); i = i + 1; }
   i = 0; while (i < nfn) { if (fnparams[i]) free(fnparams[i]); i = i + 1; }
   i = 0; while (i < nsrcbuf) { free(srcbuf[i]); i = i + 1; }
-  free(srcbuf); free(syms); free(mems); free(stsize); free(stfirst); free(starr); free(stcnt); free(dims); free(data);
+  free(srcbuf); free(syms); free(hhead); free(hnext); free(mems); free(stsize); free(stfirst); free(starr); free(stcnt); free(dims); free(data);
   free(fstack_p); free(fstack_line); free(fstack_mac); free(sv_fp); free(sv_fl); free(sv_fm); free(mbuf);
   free(tstack); free(bn); free(fnret); free(fnparams); free(fnnp); free(lpool);
   free(lkind); free(ltext); free(llab); free(lcond); free(lnext); free(obuf); free(ibuf); free(numbuf); free(ccbuf);

@@ -230,15 +230,20 @@ int spin(int n) {
 // two spin jobs and the foreground compute at once: a foreground sleep(100) returns on
 // time, every result equals the one computed alone, the tick preempted
 int case_preempt() {
-  int want; int t0; int t1; int dt; int got; int p0; int n; int i; int good; int ids[2];
+  int want; int t0; int t1; int dt; int got; int p0; int n; int i; int good; int ids[2]; int sn;
   char nbuf[16]; char wbuf[16];
   p0 = sysinfo(INFO_PREEMPTS);
-  t0 = millis();
-  want = spin(SPIN_N);
-  t1 = millis() - t0;
-  sprintf(msg, "spin %d alone: %d ms", SPIN_N, t1);
+  sn = SPIN_N;
+  while (1) {                     // enough rounds for 300 ms alone, however fast the build is
+    t0 = millis();
+    want = spin(sn);
+    t1 = millis() - t0;
+    if (t1 >= 300 || sn > 100000000) break;
+    sn = sn * 2;
+  }
+  sprintf(msg, "spin %d alone: %d ms", sn, t1);
   check(t1 >= 300);
-  sprintf(nbuf, "%d", SPIN_N); sprintf(wbuf, "%d", want);
+  sprintf(nbuf, "%d", sn); sprintf(wbuf, "%d", want);
   av[0] = "spin"; av[1] = nbuf; av[2] = wbuf; av[3] = 0;
   ids[0] = spawn(SPIN, 3, av);
   ids[1] = spawn(SPIN, 3, av);
@@ -249,7 +254,7 @@ int case_preempt() {
   dt = millis() - t0;
   sprintf(msg, "sleep(100) next to two spinning jobs took %d ms (want < 300)", dt);
   check(dt < 300);
-  got = spin(SPIN_N);
+  got = spin(sn);
   sprintf(msg, "foreground spin while preempted = %d (want %d)", got, want);
   check(got == want);
   n = 0; i = 0;
