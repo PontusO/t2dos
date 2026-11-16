@@ -8,11 +8,36 @@ build/s/netfs/srv. Sends raw session requests and checks the replies, then runs
 the board tools under qemu-arm with host_linux against it.
 Exit status 0 when every check passes.
 """
-import os, random, shutil, socket, subprocess, sys, time
+import os, random, re, shutil, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'netfs')
 SRV = os.path.join(WORK, 'srv')
+BOARD = os.path.join(WORK, 'board')
+BIG = bytes((i * 7 + i // 300) & 255 for i in range(10000))   # crosses blocks, not a block multiple
+
+# Tool steps under qemu: (command, expected output, expected exit status[, stdin]).  A command
+# is a string split at spaces or a list (names with spaces); "@" is 127.0.0.1:PORT.  The
+# expected output is a string (all of it) or a regex that must match all of it.
+STEPS = [
+    ('mount', 'nothing mounted\n', 1),
+    ('mount @', '@ /\n', 0),
+    ('mount', '@ /\n', 0),
+    ('mount 127.0.0.1:1', 'mount: cannot reach 127.0.0.1:1\n', 1),
+    ('mount @ nothere', 'mount: nothere: not a directory\n', 1),
+    ('ls /mnt/fs', '   10000  big.bin\nECHO  echo.bin\n   <dir>  projects/\n   <dir>  sp/\n       4  top.txt\n3 files, ALL bytes\n', 0),
+    ('ls /', re.compile(r'(?s).*   <dir>  mnt/\n.*'), 0),
+    ('cat /mnt/fs/top.txt', 'top\n', 0),
+    ('cp /mnt/fs/big.bin b.bin', '', 0),
+    ('sh', re.compile(r'(?s).*> pwd\n/mnt/fs/projects\n.*> cat game/a.txt\nhello\n.*> pwd\n/mnt\n.*> cd /mnt/fs\n/mnt/fs> exit\n'), 0,
+     'cd /mnt/fs/projects\npwd\ncat game/a.txt\ncd ..\ncd ..\npwd\ncd /mnt/fs\nexit\n'),
+    ('/mnt/fs/echo.bin hi', 'hi\n', 0),
+    (['cat', '/mnt/fs/sp/my file.txt'], 'S\n', 0),
+    ('ls /mnt/fs/sp', '       2  my file.txt\n1 files, 2 bytes\n', 0),
+    ('umount', '', 0),
+    ('mount', 'nothing mounted\n', 1),
+]
+FILES = {'b.bin': BIG}
 
 bad = 0
 
@@ -119,6 +144,33 @@ def check_server(port):
     if r != b'OK 4\ntop\n': fail('GET top.txt: %r' % r)
 
 
+def run_steps(port):
+    hp = '127.0.0.1:%d' % port
+    echo = os.path.getsize(os.path.join(SRV, 'echo.bin'))
+    for step in STEPS:
+        cmd, want, status = step[:3]
+        stdin = step[3].encode() if len(step) > 3 else b''
+        args = cmd.replace('@', hp).split() if isinstance(cmd, str) else cmd
+        prog = args[0] if args[0].startswith('/') else '/bin/%s.bin' % args[0]
+        try:
+            r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, prog] + args[1:],
+                               input=stdin, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            fail('%s: timed out' % cmd); continue
+        out = r.stdout.decode(errors='replace').replace(hp, '@')
+        if isinstance(want, str):
+            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(4 + 10000 + echo))
+            ok = out == want
+        else:
+            ok = want.fullmatch(out)
+        if r.returncode != status or not ok:
+            fail('%s: exit %d (want %d)\n%s' % (cmd, r.returncode, status, out))
+    for name, data in FILES.items():
+        try: got = open(os.path.join(BOARD, name), 'rb').read()
+        except OSError: got = None
+        if got != data: fail('board file %s' % name)
+
+
 def main(argv):
     if '--pc' not in argv:
         print(__doc__); return 2
@@ -126,6 +178,8 @@ def main(argv):
     os.makedirs(os.path.join(SRV, 'projects', 'game'))
     open(os.path.join(SRV, 'top.txt'), 'w').write('top\n')
     open(os.path.join(SRV, 'projects', 'game', 'a.txt'), 'w').write('hello\n')
+    os.makedirs(os.path.join(BOARD, 'tmp'))
+    shutil.copytree(os.path.join(ROOT, 'root', 'bin'), os.path.join(BOARD, 'bin'))
     port = random.randint(20000, 29999)
     server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -134,10 +188,17 @@ def main(argv):
             try: socket.create_connection(('127.0.0.1', port), 0.2).close(); break
             except OSError: time.sleep(0.1)
         check_server(port)
+        for n in os.listdir(SRV):                 # the tool steps start from a known server root
+            p = os.path.join(SRV, n)
+            if n not in ('top.txt', 'projects'): shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        open(os.path.join(SRV, 'big.bin'), 'wb').write(BIG)
+        shutil.copy(os.path.join(ROOT, 'root', 'bin', 'echo.bin'), os.path.join(SRV, 'echo.bin'))
+        os.makedirs(os.path.join(SRV, 'sp')); open(os.path.join(SRV, 'sp', 'my file.txt'), 'w').write('S\n')
+        run_steps(port)
     finally:
         server.kill()
     if bad: print('%d failed' % bad); return 1
-    print('ok: server session requests')
+    print('ok: server session requests, %d tool steps' % len(STEPS))
     return 0
 
 

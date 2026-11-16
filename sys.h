@@ -14,7 +14,7 @@ enum {
   SYS_open = 32, SYS_close = 33, SYS_read = 34, SYS_write = 35, SYS_seek = 36, SYS_stat = 37,
   SYS_unlink = 38, SYS_rename = 39, SYS_mkdir = 40, SYS_rmdir = 41,
   SYS_opendir = 42, SYS_readdir = 43, SYS_closedir = 44, SYS_chdir = 45, SYS_getcwd = 46,
-  SYS_mkpipe = 47,
+  SYS_mkpipe = 47, SYS_mount = 48,
   // memory and string helpers (done in the kernel: fast, saves code in every program)
   SYS_malloc = 64, SYS_free = 65, SYS_memset = 66, SYS_memcmp = 67, SYS_memcpy = 68,
   SYS_strlen = 69, SYS_strcmp = 70, SYS_strcpy = 71, SYS_printf = 72, SYS_sprintf = 73,
@@ -32,6 +32,9 @@ enum {
   SYS_sqrt = 126, SYS_fabs = 127, SYS_floor = 128, SYS_ceil = 129, SYS_fmod = 130
 };
 
+// mount(host, port, dir): show dir of fileserver.py on host:port at /mnt/fs; host "" unmounts.
+// 0, MOUNT_UNREACHABLE, MOUNT_NOTDIR, or MOUNT_BUSY (files under /mnt/fs are open)
+enum { MOUNT_UNREACHABLE = -1, MOUNT_NOTDIR = -2, MOUNT_BUSY = -3 };
 // open() flags
 enum { OPEN_READ = 0, OPEN_WRITE = 1, OPEN_APPEND = 2 };
 // seek() whence

@@ -88,6 +88,7 @@ static int k_format(char *out, int max, const char *fmt, int *argv, int n, int f
 }
 
 static int run_bin(const char *name, int argc, char **argv);
+static char *netfs_loadbuf;          // a program read from /mnt/fs, while run_bin loads it
 static int millis_() { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec * 1000 + tv.tv_usec / 1000; }
 static int kbhit() { struct pollfd p = { 0, POLLIN, 0 }; return poll(&p, 1, 0) > 0 && (p.revents & POLLIN); }   // not at the end of piped input
 static int listen_fd = -1; static char ipbuf[20] = "127.0.0.1";
@@ -146,8 +147,56 @@ static int pipe_write(int e, const char *buf, int n) {
   pipes[i].count += n; pipes[i].total_written += n; pfd[e].wrote = 1;
   return n;
 }
+// ---- the network filesystem (/mnt/fs): kernel/netfs.c over POSIX sockets
+#define NFS_FD 300                     // fds NFS_FD.. are netfs handles; directory handles 4..7
+#define NFS_NFD 16
+static int nfs_fd(int fd) { return fd >= NFS_FD && fd < NFS_FD + NFS_NFD ? fd - NFS_FD : -1; }
+int nt_connect(const char *host, int port, int timeout_ms) {
+  struct addrinfo hints = {0}, *ai; char ps[12]; int fd, e = 0; socklen_t el = sizeof e;
+  hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; sprintf(ps, "%d", port);
+  if (getaddrinfo(host, ps, &hints, &ai)) return -1;
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) { freeaddrinfo(ai); return -1; }
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  int r = connect(fd, ai->ai_addr, ai->ai_addrlen); freeaddrinfo(ai);
+  if (r < 0) {
+    struct pollfd p = { fd, POLLOUT, 0 };
+    if (poll(&p, 1, timeout_ms) != 1 || getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) || e) { close(fd); return -1; }
+  }
+  fcntl(fd, F_SETFL, 0);
+  return fd;
+}
+int nt_send(int h, const void *b, int n) {
+  int done = 0; while (done < n) { int r = send(h, (const char *)b + done, n - done, MSG_NOSIGNAL); if (r <= 0) return -1; done += r; }
+  return n;
+}
+int nt_recv(int h, void *b, int n, int timeout_ms) {
+  struct pollfd p = { h, POLLIN, 0 };
+  if (poll(&p, 1, timeout_ms) != 1) return -1;
+  int r = recv(h, b, n, 0); return r > 0 ? r : -1;
+}
+void nt_close(int h) { close(h); }
+unsigned nt_millis(void) { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec * 1000 + tv.tv_usec / 1000; }
+void nt_sleep(int ms) { usleep(ms * 1000); }
+void *nt_alloc(int n) { return malloc(n); }
+void nt_free(void *p) { free(p); }
+#include "kernel/netfs.c"
+static int nfs_mode(int fl) { return fl == OPEN_APPEND ? NFS_APPEND : (fl & 1) ? NFS_WRITE : NFS_READ; }
+// reads /etc/mount (host[:port], then the remote dir) and mounts without asking the server
+static void nfs_boot(void) {
+  char p[300], buf[300], host[64]; int port = 7777; snprintf(p, sizeof p, "%s/etc/mount", root);
+  FILE *f = fopen(p, "r"); if (!f) return;
+  int n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n > 0 ? n : 0] = 0;
+  char *nl = strchr(buf, '\n'); if (!nl) return; *nl = 0;
+  char *dir = nl + 1; char *e = strchr(dir, '\n'); if (e) *e = 0;
+  if (strlen(buf) >= sizeof host) return;
+  strcpy(host, buf); char *c = strchr(host, ':'); if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
+  nfs_mount(host, port, *dir ? dir : "/", 0);
+}
+
 static int k_write(int fd, const char *buf, int n) {
   if (fd == 1) fd = stdout_fd;
+  if (nfs_fd(fd) >= 0) return nfs_write(nfs_fd(fd), buf, n);
   if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) return pipe_write(pfd_find(fd), buf, n);
   return write(fd, buf, n);
 }
@@ -177,6 +226,7 @@ int sys(int num, int n, int *argv) {
     case SYS_open: { const char *in = (const char *)A(0); int fl = A(1);
       { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
         return pfd_alloc(i, fl == OPEN_READ ? 0 : 1); } }
+      { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) { int h = nfs_open(r, nfs_mode(fl)); return h < 0 ? -1 : NFS_FD + h; } }
       int f = fl == OPEN_WRITE ? O_WRONLY | O_CREAT | O_TRUNC : fl == OPEN_APPEND ? O_WRONLY | O_CREAT | O_APPEND : (fl & 1) ? O_WRONLY | O_CREAT | O_TRUNC : O_RDONLY;
       return open(hostpath((char *)A(0), p1), f, 0644); }
     case SYS_close: { int fd = A(0);
@@ -188,6 +238,7 @@ int sys(int num, int n, int *argv) {
             if (pipes[i].nbounds == 8) return -1;     // one task: nobody could drain it
             pipes[i].bounds[pipes[i].nbounds++] = pipes[i].total_written; } }
         return 0; }
+      if (nfs_fd(fd) >= 0) return nfs_close(nfs_fd(fd));
       return close(fd); }
     case SYS_read: { int fd = A(0), cnt = A(2); char *buf = (char *)A(1);
       if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) { int e = pfd_find(fd);
@@ -203,13 +254,18 @@ int sys(int num, int n, int *argv) {
         pipes[i].head = (pipes[i].head + cnt) % PIPE_SIZE; pipes[i].count -= cnt;
         pipes[i].total_read += cnt;
         return cnt; }
+      if (nfs_fd(fd) >= 0) return nfs_read(nfs_fd(fd), buf, cnt);
       return read(fd, buf, cnt); }
     case SYS_write: { int fd = A(0), cnt = A(2); const char *buf = (const char *)A(1);
       return k_write(fd, buf, cnt); }
-    case SYS_seek: return lseek(A(0), A(1), A(2));
+    case SYS_seek: { int h = nfs_fd(A(0));
+      if (h >= 0) return nfs_seek(h, A(2) == SEEK_BEGIN ? A(1) : A(2) == SEEK_CURRENT ? nfs_tell(h) + A(1) : nfs_size(h) + A(1));
+      return lseek(A(0), A(1), A(2)); }
     case SYS_stat: { const char *in = (const char *)A(0);
       { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
         struct stat_t *o = (struct stat_t *)A(1); o->size = pipes[i].count; o->isdir = 0; o->mtime = pipes[i].nbounds; /* pipes have no time: mtime = complete messages queued */ return 0; } }
+      { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) { int sz, d; if (nfs_stat(r, &sz, &d)) return -1;
+        struct stat_t *o = (struct stat_t *)A(1); o->size = sz; o->isdir = d; o->mtime = 0; return 0; } }
       struct stat st; if (stat(hostpath((char *)A(0), p1), &st)) return -1;
       struct stat_t *o = (struct stat_t *)A(1); o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = st.st_mtime; return 0; }
     case SYS_unlink: { const char *in = (char *)A(0);
@@ -218,16 +274,26 @@ int sys(int num, int n, int *argv) {
     case SYS_rename: return rename(hostpath((char *)A(0), p1), hostpath((char *)A(1), p2));
     case SYS_mkdir: return mkdir(hostpath((char *)A(0), p1), 0755);
     case SYS_rmdir: return rmdir(hostpath((char *)A(0), p1));
-    case SYS_opendir: for (int i = 0; i < 4; i++) if (!dirs[i]) { dirs[i] = opendir(hostpath((char *)A(0), dirpaths[i])); return dirs[i] ? i : -1; } return -1;
-    case SYS_readdir: { int d = A(0); if (d < 0 || d > 3 || !dirs[d]) return 0; struct dirent *e;
+    case SYS_opendir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) { int d = nfs_opendir(r); return d < 0 ? -1 : 4 + d; } }
+      for (int i = 0; i < 4; i++) if (!dirs[i]) { dirs[i] = opendir(hostpath((char *)A(0), dirpaths[i])); return dirs[i] ? i : -1; } return -1;
+    case SYS_readdir: { int d = A(0);
+      if (d >= 4 && d < 8) { struct dirent_t *o = (struct dirent_t *)A(1); int sz, isd;
+        if (!nfs_readdir(d - 4, o->name, sizeof o->name, &sz, &isd)) return 0; o->size = sz; o->isdir = isd; return 1; }
+      if (d < 0 || d > 3 || !dirs[d]) return 0; struct dirent *e;
       while ((e = readdir(dirs[d])) && (e->d_name[0] == '.')) {}
       if (!e) return 0;
       struct dirent_t *o = (struct dirent_t *)A(1); strncpy(o->name, e->d_name, 63); o->name[63] = 0;
       char full[600]; struct stat st; snprintf(full, sizeof full, "%s/%s", dirpaths[d], e->d_name); stat(full, &st);
       o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); return 1; }
-    case SYS_closedir: { int d = A(0); if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
-    case SYS_chdir: { struct stat st; if (stat(hostpath((char *)A(0), p1), &st) || !S_ISDIR(st.st_mode)) return -1; resolve((char *)A(0), cwd, sizeof cwd); return 0; }
+    case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
+    case SYS_chdir: { char r[160]; resolve((char *)A(0), r, sizeof r);
+      if (nfs_path(r)) { int sz, d; if (nfs_stat(r, &sz, &d) || !d) return -1; strcpy(cwd, r); return 0; } }
+      { struct stat st; if (stat(hostpath((char *)A(0), p1), &st) || !S_ISDIR(st.st_mode)) return -1; resolve((char *)A(0), cwd, sizeof cwd); return 0; }
     case SYS_getcwd: strncpy((char *)A(0), cwd, A(1)); return A(0);
+    case SYS_mount: { const char *h = (const char *)A(0);
+      int r = nfs_mount(h, A(1), (const char *)A(2), 1);
+      if (r == 0 && *h) { snprintf(p1, sizeof p1, "%s/mnt", root); mkdir(p1, 0755); strcat(p1, "/fs"); mkdir(p1, 0755); }
+      return r; }
     case SYS_mkpipe: { const char *nm = (const char *)A(0);   // the part after /pipe/
       if (!nm[0] || strlen(nm) > 31 || strchr(nm, '/')) return -1;
       if (find_pipe(nm) >= 0) return -1;
@@ -306,11 +372,22 @@ int run(void *entry, void *sys, void *data, void *stacktop, int argc, char **arg
 
 static int run_bin(const char *name, int argc, char **argv) {
   if (nest + 1 >= MAX_NEST) return -1;
-  char p[300]; FILE *f = fopen(hostpath(name, p), "rb"); if (!f) return -1;
-  int hdr[5]; if (fread(hdr, 4, 5, f) != 5 || hdr[0] != 0x43433254) { fclose(f); return -2; }
+  char p[300]; FILE *f;
+  { char r[160]; resolve(name, r, sizeof r);
+    if (nfs_path(r)) {                 // a program on /mnt/fs: read it whole, then load it from memory
+      int h = nfs_open(r, NFS_READ); if (h < 0 || nfs_isdir(h)) { if (h >= 0) nfs_close(h); return -1; }
+      int sz = nfs_size(h); char *b = malloc(sz + 1); int got = nfs_read(h, b, sz); nfs_close(h);
+      if (got != sz) { free(b); return -1; }
+      f = fmemopen(b, sz, "rb"); if (!f) { free(b); return -1; }
+      // the buffer lives as long as the FILE: freed after fclose below
+      netfs_loadbuf = b;
+    } else f = fopen(hostpath(name, p), "rb"); }
+  if (!f) return -1;
+  int hdr[5]; if (fread(hdr, 4, 5, f) != 5 || hdr[0] != 0x43433254) { fclose(f); free(netfs_loadbuf); netfs_loadbuf = 0; return -2; }
   char *code = mmap(0, hdr[1] + 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   char *data = malloc(hdr[2] + hdr[3] + 16);
   fread(code, 1, hdr[1], f); fread(data, 1, hdr[2], f); fclose(f);
+  free(netfs_loadbuf); netfs_loadbuf = 0;
   memset(data + hdr[2], 0, hdr[3]);
   char *stack = malloc(1 << 20);
   nest++;
@@ -328,6 +405,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < MAX_PIPE_FDS; i++) pfd[i].pipe = -1;
   if (argc < 2) { fprintf(stderr, "usage: host_linux [-r rootdir] prog.bin [args]\n"); return 1; }
   if (!strcmp(argv[1], "-r")) { strcpy(root, argv[2]); argv += 2; argc -= 2; }
+  nfs_boot();
   if (isatty(0)) { struct termios t; tcgetattr(0, &t); t.c_lflag &= ~(ICANON | ECHO); tcsetattr(0, TCSANOW, &t); }
   int r = run_bin(argv[1], argc - 1, argv + 1);
   fflush(stdout);
