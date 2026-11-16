@@ -25,7 +25,8 @@ STEPS = [
     ('mount', '@ /\n', 0),
     ('mount 127.0.0.1:1', 'mount: cannot reach 127.0.0.1:1\n', 1),
     ('mount @ nothere', 'mount: nothere: not a directory\n', 1),
-    ('ls /mnt/fs', '   10000  big.bin\nECHO  echo.bin\n   <dir>  projects/\n   <dir>  sp/\n       4  top.txt\n3 files, ALL bytes\n', 0),
+    ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\nECHO  echo.bin\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
+     '       1  s2.txt\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n7 files, ALL bytes\n', 0),
     ('ls /', re.compile(r'(?s).*   <dir>  mnt/\n.*'), 0),
     ('cat /mnt/fs/top.txt', 'top\n', 0),
     ('cp /mnt/fs/big.bin b.bin', '', 0),
@@ -34,10 +35,37 @@ STEPS = [
     ('/mnt/fs/echo.bin hi', 'hi\n', 0),
     (['cat', '/mnt/fs/sp/my file.txt'], 'S\n', 0),
     ('ls /mnt/fs/sp', '       2  my file.txt\n1 files, 2 bytes\n', 0),
+    # writing (Task 3)
+    ('cp s.txt /mnt/fs/s.txt', '', 0),
+    ('sh', re.compile(r'(?s).*'), 0, 'echo more >> /mnt/fs/s.txt\nexit\n'),
+    ('cp short.txt /mnt/fs/o.txt', '', 0),
+    ('cp b.bin /mnt/fs/big2.bin', '', 0),
+    ('cmp /mnt/fs/big2.bin b.bin', '', 0),
+    ('mkdir /mnt/fs/nd', '', 0),
+    ('ls /mnt/fs/nd', '0 files, 0 bytes\n', 0),
+    ('rmdir /mnt/fs/nd', '', 0),
+    ('rmdir /mnt/fs/projects', 'rmdir: /mnt/fs/projects failed (not empty?)\n', 1),
+    ('rm /mnt/fs/s2.txt', '', 0),
+    ('mv /mnt/fs/m1.txt /mnt/fs/m2.txt', '', 0),
+    ('mv /mnt/fs/m2.txt local.txt', '', 0),
+    ('mv local.txt /mnt/fs/m3.txt', '', 0),
+    ('twice', 'reader: old\nclose 0\nreader again: old\nnew open: new\n', 0),
+    ('noclose', '', 0),
+    ('cp s.txt /mnt/fs/LONGL', '', 0),           # /mnt/fs/ + 151: a 159-byte path
+    ('cat /mnt/fs/LONGL', 'sent\n', 0),
+    ('mount @ LONGD', '@ /LONGD\n', 0),
+    ('wr /mnt/fs/LONGN hi', 'close -1\n', 0),   # fits, but its temp name does not
+    ('mount @', '@ /\n', 0),
+    ('full', 'wrote 8192\nclose 0\n', 0, '', {'T2_NETFS_CACHE': '8300'}),
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
 ]
-FILES = {'b.bin': BIG}
+LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135}
+FILES = {'b.bin': BIG, 'local.txt': None}
+SERVER_FILES = {'s.txt': b'sent\nmore\n', 'o.txt': b'x\n', 'big2.bin': BIG, 's2.txt': None, 'm1.txt': None,
+                'm2.txt': None, 'm3.txt': b'move\n', 't.txt': b'new\n', 'nc.txt': b'data\n', 'L' * 151: b'sent\n',
+                'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192}
+TEST_PROGS = ['twice', 'noclose', 'wr', 'full']
 
 bad = 0
 
@@ -150,16 +178,19 @@ def run_steps(port):
     for step in STEPS:
         cmd, want, status = step[:3]
         stdin = step[3].encode() if len(step) > 3 else b''
+        env = dict(os.environ, **step[4]) if len(step) > 4 else None
+        for k, v in LONG.items(): cmd = cmd.replace(k, v) if isinstance(cmd, str) else cmd
         args = cmd.replace('@', hp).split() if isinstance(cmd, str) else cmd
         prog = args[0] if args[0].startswith('/') else '/bin/%s.bin' % args[0]
         try:
             r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, prog] + args[1:],
-                               input=stdin, capture_output=True, timeout=60)
+                               input=stdin, capture_output=True, timeout=60, env=env)
         except subprocess.TimeoutExpired:
             fail('%s: timed out' % cmd); continue
         out = r.stdout.decode(errors='replace').replace(hp, '@')
+        for k, v in LONG.items(): out = out.replace(v, k)
         if isinstance(want, str):
-            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(4 + 10000 + echo))
+            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4))
             ok = out == want
         else:
             ok = want.fullmatch(out)
@@ -169,6 +200,16 @@ def run_steps(port):
         try: got = open(os.path.join(BOARD, name), 'rb').read()
         except OSError: got = None
         if got != data: fail('board file %s' % name)
+    for name, data in SERVER_FILES.items():
+        if srv_file(name) != data: fail('server file %s: %r' % (name[:40], srv_file(name)))
+    for d, _, names in os.walk(SRV):
+        for n in names:
+            if n.endswith('.t2tmp'): fail('temp file left: %s' % n)
+    log = open(os.path.join(WORK, 'srv.log')).read()
+    if not re.search(r'TRUNC /\.s\.txt\.t2tmp 0\n.*WRITE /\.s\.txt\.t2tmp 0 5\n.*RENAME /\.s\.txt\.t2tmp /s\.txt\n', log, re.S):
+        fail('cp to /mnt/fs did not save through a temp file')
+    if not re.search(r'WRITE /s\.txt 0 10\n', log) or 'TRUNC /s.txt' in log:
+        fail('the append did not write in place')
 
 
 def main(argv):
@@ -181,8 +222,9 @@ def main(argv):
     os.makedirs(os.path.join(BOARD, 'tmp'))
     shutil.copytree(os.path.join(ROOT, 'root', 'bin'), os.path.join(BOARD, 'bin'))
     port = random.randint(20000, 29999)
-    server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.makedirs(WORK, exist_ok=True)
+    server = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
+                              stdout=open(os.path.join(WORK, 'srv.log'), 'w'), stderr=subprocess.STDOUT)
     try:
         for _ in range(50):
             try: socket.create_connection(('127.0.0.1', port), 0.2).close(); break
@@ -194,6 +236,14 @@ def main(argv):
         open(os.path.join(SRV, 'big.bin'), 'wb').write(BIG)
         shutil.copy(os.path.join(ROOT, 'root', 'bin', 'echo.bin'), os.path.join(SRV, 'echo.bin'))
         os.makedirs(os.path.join(SRV, 'sp')); open(os.path.join(SRV, 'sp', 'my file.txt'), 'w').write('S\n')
+        for n, t in [('o.txt', 'a longer old content\n'), ('s2.txt', 'x'), ('m1.txt', 'move\n'), ('t.txt', 'old\n')]:
+            open(os.path.join(SRV, n), 'w').write(t)
+        os.makedirs(os.path.join(SRV, 'D' * 60))
+        open(os.path.join(BOARD, 's.txt'), 'w').write('sent\n')
+        open(os.path.join(BOARD, 'short.txt'), 'w').write('x\n')
+        for t in TEST_PROGS:
+            subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+                            os.path.join(BOARD, 'bin', t + '.bin'), os.path.join(ROOT, 'tests', 'netfs', t + '.c')], check=True)
         run_steps(port)
     finally:
         server.kill()

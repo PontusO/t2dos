@@ -31,6 +31,7 @@ struct nfile {
   int used, mode, isdir;
   char abs[160], name[NAME];
   int size, pos, rsize;    // rsize: the size on the server when opened (blocks below it are read from there)
+  int existed;             // NFS_APPEND: the file was there when opened
   int nblk, cap;           // blocks in use, room in the arrays
   unsigned char **blk;     // block i, or 0 when not cached
   unsigned char *dirty;
@@ -227,10 +228,56 @@ static void file_drop(struct nfile *f) {
   if (f->dirty) nt_free(f->dirty);
   f->blk = 0; f->dirty = 0; f->nblk = f->cap = 0;
 }
-// sends f's changes to the server: 0 or -1
-static int file_save(struct nfile *f) {
-  (void)f;
+// one try at saving f, without retries of its own: 0, -2 (the server refused) or -1
+static int save_once(struct nfile *f, const char *tmp) {
+  static unsigned char zero[BLK];
+  char req[NAME + 32], to[NAME + 2]; struct op o; int i, r, n;
+  const char *dst = f->mode == NFS_WRITE ? tmp : f->name;
+  memset(&o, 0, sizeof o); o.req = req;
+  if (f->mode == NFS_WRITE || !f->existed) {
+    snprintf(req, sizeof req, "TRUNC 0 %s\n", dst);
+    if ((r = attempt(&o))) return r;
+  }
+  for (i = 0; i * BLK < f->size; i++) {
+    if (f->mode == NFS_APPEND && (i >= f->nblk || !f->dirty[i])) continue;
+    n = f->size - i * BLK; if (n > BLK) n = BLK;
+    snprintf(req, sizeof req, "WRITE %d %d %s\n", i * BLK, n, dst);
+    o.data = i < f->nblk && f->blk[i] ? f->blk[i] : zero; o.dlen = n;
+    if ((r = attempt(&o))) return r;
+  }
+  if (f->mode == NFS_WRITE) {
+    snprintf(req, sizeof req, "RENAME %s\n", tmp);
+    snprintf(to, sizeof to, "%s\n", f->name);
+    o.data = to; o.dlen = strlen(to);
+    if ((r = attempt(&o))) return r;
+  }
   return 0;
+}
+// Saves f's changes.  A file opened with NFS_WRITE goes to ".NAME.t2tmp" in the same directory
+// and is then renamed over NAME, so a broken save leaves the old file; an appended file gets
+// its changed blocks written in place.  The whole save is tried up to TRIES times, each on a
+// new connection.  0, or -1 (the mount is down after TRIES failures).
+static int file_save(struct nfile *f) {
+  char tmp[NAME]; const char *b; int k, r, tries = TRIES;
+  if (f->mode == NFS_READ || f->isdir) return 0;
+  if (f->mode == NFS_WRITE) {                  // dir/.base.t2tmp
+    b = strrchr(f->name, '/'); b = b ? b + 1 : f->name;
+    if (strlen(f->name) + 8 > NAME) return -1;
+    memcpy(tmp, f->name, b - f->name); tmp[b - f->name] = 0;
+    strcat(tmp, "."); strcat(tmp, b); strcat(tmp, ".t2tmp");
+  }
+  if (down) {
+    if (nt_millis() - down_at < DOWN_MS) return -1;
+    tries = 1;
+  }
+  for (k = 0; k < tries; k++) {
+    if (k) { drop_conn(); nt_sleep(PAUSE); }
+    r = save_once(f, tmp);
+    if (r == 0) { down = 0; return 0; }
+    if (r == -2) return -1;                    // the server refused: trying again will not help
+  }
+  down = 1; down_at = nt_millis();
+  return -1;
 }
 
 // ---------------------------------------------------------------- files
@@ -244,9 +291,21 @@ int nfs_open(const char *abs, int mode) {
   memset(f, 0, sizeof *f);
   if (rname(abs, f->name) < 0) return -1;
   strcpy(f->abs, abs);
-  if (mode != NFS_READ) return -1;
-  if (nfs_stat(abs, &size, &isdir) < 0) return -1;
-  f->isdir = isdir; f->size = f->rsize = size; f->mode = mode;
+  f->mode = mode;
+  if (mode == NFS_READ) {
+    if (nfs_stat(abs, &size, &isdir) < 0) return -1;
+    f->isdir = isdir; f->size = f->rsize = size;
+  } else {                                     // a file (not a directory) in an existing directory
+    char parent[160]; char *sl;
+    if (!strcmp(abs, NFS_ROOT)) return -1;
+    if (nfs_stat(abs, &size, &isdir) == 0) {
+      if (isdir) return -1;
+      if (mode == NFS_APPEND) { f->existed = 1; f->size = f->rsize = f->pos = size; }
+    } else {
+      strcpy(parent, abs); sl = strrchr(parent, '/'); *sl = 0;
+      if (nfs_stat(parent, &size, &isdir) < 0 || !isdir) return -1;
+    }
+  }
   f->used = 1;
   return h;
 }
@@ -263,7 +322,22 @@ int nfs_read(int h, void *b, int n) {
   }
   return done;
 }
-int nfs_write(int h, const void *b, int n) { (void)h; (void)b; (void)n; return -1; }
+int nfs_write(int h, const void *b, int n) {
+  struct nfile *f = fh(h); int done = 0, k, i; unsigned char *p;
+  if (!f || f->mode == NFS_READ) return -1;
+  if (f->mode == NFS_APPEND) f->pos = f->size;
+  while (done < n) {
+    i = f->pos / BLK;
+    p = blk_get(f, i);                         // an appended file's last block is read first
+    if (!p) break;                             // no room: a short count, like /tmp
+    k = BLK - f->pos % BLK; if (k > n - done) k = n - done;
+    memcpy(p + f->pos % BLK, (const char *)b + done, k);
+    f->dirty[i] = 1;
+    f->pos += k; done += k;
+    if (f->pos > f->size) f->size = f->pos;
+  }
+  return done;
+}
 int nfs_seek(int h, int pos) {
   struct nfile *f = fh(h);
   if (!f || pos < 0 || pos > f->size) return -1;
@@ -283,10 +357,21 @@ int nfs_close(int h) {
   return r;
 }
 
-int nfs_remove(const char *abs) { (void)abs; return -1; }
-int nfs_mkdir(const char *abs) { (void)abs; return -1; }
-int nfs_rmdir(const char *abs) { (void)abs; return -1; }
-int nfs_rename(const char *a, const char *b) { (void)a; (void)b; return -1; }
+static int verb(const char *v, const char *abs) {
+  char req[NAME + 8];
+  if (!strcmp(abs, NFS_ROOT) || req1(req, sizeof req, v, abs) < 0) return -1;
+  return simple(req, 0) ? -1 : 0;
+}
+int nfs_remove(const char *abs) { return verb("RM", abs); }
+int nfs_mkdir(const char *abs) { return verb("MKDIR", abs); }
+int nfs_rmdir(const char *abs) { return verb("RMDIR", abs); }
+int nfs_rename(const char *a, const char *b) {
+  char req[NAME + 10], to[NAME + 2]; struct op o;
+  if (!strcmp(a, NFS_ROOT) || req1(req, sizeof req, "RENAME", a) < 0 || rname(b, to) < 0) return -1;
+  strcat(to, "\n");
+  memset(&o, 0, sizeof o); o.req = req; o.data = to; o.dlen = strlen(to);
+  return request(&o, 1) ? -1 : 0;              // not repeated once sent: it may have happened
+}
 
 // ---------------------------------------------------------------- directories
 int nfs_opendir(const char *abs) {

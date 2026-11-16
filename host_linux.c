@@ -178,9 +178,34 @@ int nt_recv(int h, void *b, int n, int timeout_ms) {
 void nt_close(int h) { close(h); }
 unsigned nt_millis(void) { struct timeval tv; gettimeofday(&tv, 0); return tv.tv_sec * 1000 + tv.tv_usec / 1000; }
 void nt_sleep(int ms) { usleep(ms * 1000); }
-void *nt_alloc(int n) { return malloc(n); }
-void nt_free(void *p) { free(p); }
+// T2_NETFS_CACHE (bytes) caps the cache, so tests can fill it
+static long nt_cap = -1, nt_used;
+void *nt_alloc(int n) {
+  if (nt_cap < 0) { const char *e = getenv("T2_NETFS_CACHE"); nt_cap = e ? atol(e) : 0; }
+  if (nt_cap && nt_used + n > nt_cap) return 0;
+  char *p = malloc(n + 8); if (!p) return 0;
+  *(int *)p = n; nt_used += n; return p + 8;
+}
+void nt_free(void *p) { if (p) { nt_used -= *(int *)((char *)p - 8); free((char *)p - 8); } }
 #include "kernel/netfs.c"
+static int nfs_owner[NFS_NFD] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+static int nfs_dir_owner[4] = { -1, -1, -1, -1 };
+// a rename with exactly one side under /mnt/fs: copy, then remove the old one (like k_rename)
+static int nfs_cross_rename(const char *ra, const char *rb) {
+  char pa[300], pb[300], buf[4096]; int na = nfs_path(ra), nb = nfs_path(rb), in, out, k, ok = 1; struct stat st;
+  if (na) { in = nfs_open(ra, NFS_READ); if (in >= 0 && nfs_isdir(in)) { nfs_close(in); return -1; } }
+  else { if (stat(hostpath(ra, pa), &st) || S_ISDIR(st.st_mode)) return -1; in = open(pa, O_RDONLY); }
+  if (in < 0) return -1;
+  out = nb ? nfs_open(rb, NFS_WRITE) : open(hostpath(rb, pb), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (out < 0) { if (na) nfs_close(in); else close(in); return -1; }
+  while ((k = na ? nfs_read(in, buf, sizeof buf) : read(in, buf, sizeof buf)) > 0)
+    if ((nb ? nfs_write(out, buf, k) : write(out, buf, k)) != k) { ok = 0; break; }
+  if (k < 0) ok = 0;
+  if (na) nfs_close(in); else close(in);
+  if ((nb ? nfs_close(out) : close(out)) < 0) ok = 0;
+  if (!ok) { if (!nb) unlink(pb); return -1; }
+  return na ? nfs_remove(ra) : unlink(pa);
+}
 static int nfs_mode(int fl) { return fl == OPEN_APPEND ? NFS_APPEND : (fl & 1) ? NFS_WRITE : NFS_READ; }
 // reads /etc/mount (host[:port], then the remote dir) and mounts without asking the server
 static void nfs_boot(void) {
@@ -226,7 +251,7 @@ int sys(int num, int n, int *argv) {
     case SYS_open: { const char *in = (const char *)A(0); int fl = A(1);
       { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;
         return pfd_alloc(i, fl == OPEN_READ ? 0 : 1); } }
-      { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) { int h = nfs_open(r, nfs_mode(fl)); return h < 0 ? -1 : NFS_FD + h; } }
+      { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) { int h = nfs_open(r, nfs_mode(fl)); if (h < 0) return -1; nfs_owner[h] = nest; return NFS_FD + h; } }
       int f = fl == OPEN_WRITE ? O_WRONLY | O_CREAT | O_TRUNC : fl == OPEN_APPEND ? O_WRONLY | O_CREAT | O_APPEND : (fl & 1) ? O_WRONLY | O_CREAT | O_TRUNC : O_RDONLY;
       return open(hostpath((char *)A(0), p1), f, 0644); }
     case SYS_close: { int fd = A(0);
@@ -238,7 +263,7 @@ int sys(int num, int n, int *argv) {
             if (pipes[i].nbounds == 8) return -1;     // one task: nobody could drain it
             pipes[i].bounds[pipes[i].nbounds++] = pipes[i].total_written; } }
         return 0; }
-      if (nfs_fd(fd) >= 0) return nfs_close(nfs_fd(fd));
+      if (nfs_fd(fd) >= 0) { nfs_owner[nfs_fd(fd)] = -1; return nfs_close(nfs_fd(fd)); }
       return close(fd); }
     case SYS_read: { int fd = A(0), cnt = A(2); char *buf = (char *)A(1);
       if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) { int e = pfd_find(fd);
@@ -270,11 +295,17 @@ int sys(int num, int n, int *argv) {
       struct stat_t *o = (struct stat_t *)A(1); o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = st.st_mtime; return 0; }
     case SYS_unlink: { const char *in = (char *)A(0);
       { char rp[300]; if (pipe_path(in, rp, sizeof rp)) return -1; }   // only the owner's exit removes a pipe
+      { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) return nfs_remove(r); }
       return unlink(hostpath((char *)A(0), p1)); }
-    case SYS_rename: return rename(hostpath((char *)A(0), p1), hostpath((char *)A(1), p2));
-    case SYS_mkdir: return mkdir(hostpath((char *)A(0), p1), 0755);
-    case SYS_rmdir: return rmdir(hostpath((char *)A(0), p1));
-    case SYS_opendir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) { int d = nfs_opendir(r); return d < 0 ? -1 : 4 + d; } }
+    case SYS_rename: { char ra[160], rb[160]; resolve((char *)A(0), ra, sizeof ra); resolve((char *)A(1), rb, sizeof rb);
+      if (nfs_path(ra) && nfs_path(rb)) return nfs_rename(ra, rb);
+      if (nfs_path(ra) || nfs_path(rb)) return nfs_cross_rename(ra, rb);
+      return rename(hostpath((char *)A(0), p1), hostpath((char *)A(1), p2)); }
+    case SYS_mkdir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) return nfs_mkdir(r); }
+      return mkdir(hostpath((char *)A(0), p1), 0755);
+    case SYS_rmdir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) return nfs_rmdir(r); }
+      return rmdir(hostpath((char *)A(0), p1));
+    case SYS_opendir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) { int d = nfs_opendir(r); if (d < 0) return -1; nfs_dir_owner[d] = nest; return 4 + d; } }
       for (int i = 0; i < 4; i++) if (!dirs[i]) { dirs[i] = opendir(hostpath((char *)A(0), dirpaths[i])); return dirs[i] ? i : -1; } return -1;
     case SYS_readdir: { int d = A(0);
       if (d >= 4 && d < 8) { struct dirent_t *o = (struct dirent_t *)A(1); int sz, isd;
@@ -285,7 +316,7 @@ int sys(int num, int n, int *argv) {
       struct dirent_t *o = (struct dirent_t *)A(1); strncpy(o->name, e->d_name, 63); o->name[63] = 0;
       char full[600]; struct stat st; snprintf(full, sizeof full, "%s/%s", dirpaths[d], e->d_name); stat(full, &st);
       o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); return 1; }
-    case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
+    case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_dir_owner[d - 4] = -1; nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
     case SYS_chdir: { char r[160]; resolve((char *)A(0), r, sizeof r);
       if (nfs_path(r)) { int sz, d; if (nfs_stat(r, &sz, &d) || !d) return -1; strcpy(cwd, r); return 0; } }
       { struct stat st; if (stat(hostpath((char *)A(0), p1), &st) || !S_ISDIR(st.st_mode)) return -1; resolve((char *)A(0), cwd, sizeof cwd); return 0; }
@@ -396,6 +427,8 @@ static int run_bin(const char *name, int argc, char **argv) {
   else ret = exit_codes[nest];
   owner_pipes_remove(nest);          // this task's pipes end with it; its pipe fds die too
   for (int i = 0; i < MAX_PIPE_FDS; i++) if (pfd[i].owner == nest) pfd[i].pipe = -1;   // fds opened by this level
+  for (int i = 0; i < NFS_NFD; i++) if (nfs_owner[i] == nest) { nfs_owner[i] = -1; nfs_close(i); }   // saves what it wrote
+  for (int i = 0; i < 4; i++) if (nfs_dir_owner[i] == nest) { nfs_dir_owner[i] = -1; nfs_closedir(i); }
   stdout_fd = saved_stdout; nest--;
   munmap(code, hdr[1] + 4096); free(data); free(stack);
   return ret;
