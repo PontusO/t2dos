@@ -22,7 +22,7 @@ int mt_load() {
     *nl = 0;
     e = strchr(nl + 1, '\n'); if (e) *e = 0;
     if (strlen(mt_buf) > 250 || strlen(nl + 1) > 250) { mt_buf[0] = 0; return 0; }
-    strcpy(mt_a, mt_buf); strcpy(mt_b, nl + 1);
+    mt_copy(mt_a, mt_buf, '\n', 300); mt_copy(mt_b, nl + 1, '\n', 300);
     if (mt_b[0] == 0) strcpy(mt_b, "/");
     sprintf(mt_buf, "fs %s %s\n", mt_a, mt_b);
   }
@@ -33,7 +33,10 @@ int mt_load() {
 int mt_copy(char *out, char *s, int stop, int max) {
   int n; int k;
   n = 0; k = 0;
-  while (s[n] && s[n] != stop && s[n] != '\n') { if (k < max - 1) { out[k] = s[n]; k = k + 1; } n = n + 1; }
+  while (s[n] && s[n] != stop && s[n] != '\n') {
+    if (k < max - 1 && s[n] != '\r') { out[k] = s[n]; k = k + 1; }   // a CR from a file edited on Windows
+    n = n + 1;
+  }
   out[k] = 0;
   return n;
 }
@@ -60,7 +63,10 @@ int mt_put(char *name, char *line) {
   found = 0; at = 0; mt_out[0] = 0;
   while ((next = mt_get(at, nm, host, dir)) >= 0) {
     if (strcmp(nm, name) == 0) {
-      if (line && !found) strcpy(mt_out + strlen(mt_out), line);
+      if (line && !found) {
+        if (strlen(mt_out) + strlen(line) >= 2047) return -1;
+        strcpy(mt_out + strlen(mt_out), line);
+      }
       found = 1;
     } else if (strlen(mt_out) + next - at < 2047) {
       n = strlen(mt_out);
@@ -69,7 +75,10 @@ int mt_put(char *name, char *line) {
     }
     at = next;
   }
-  if (line && !found) strcpy(mt_out + strlen(mt_out), line);
+  if (line && !found) {
+    if (strlen(mt_out) + strlen(line) >= 2047) return -1;   // no room: /etc/mount is left as it was
+    strcpy(mt_out + strlen(mt_out), line);
+  }
   strcpy(mt_buf, mt_out);
   if (mt_out[0] == 0) { unlink("/etc/mount"); return found; }
   mkdir("/etc");

@@ -228,15 +228,23 @@ static void boot_one(const char *name, char *host, char *dir) {
   if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
   nfs_mountat(name, host, port, *dir ? dir : "/", 0);
 }
+// ends the line at s (at its \n, without a CR before it from a file edited on Windows); the
+// newline it replaced, or 0 at the end of the text
+static char *cut_line(char *s) {
+  char *nl = strchr(s, '\n'); int k;
+  if (nl) *nl = 0;
+  k = strlen(s); if (k && s[k - 1] == '\r') s[k - 1] = 0;
+  return nl;
+}
 void nfs_boot_text(char *t) {
-  char *nl = strchr(t, '\n'), *sp = strchr(t, ' '), *e, *host, *dir;
+  char *nl = strchr(t, '\n'), *sp = strchr(t, ' '), *host, *dir;
   if (nl && (!sp || sp > nl)) {                // the old format: host[:port], then dir
-    *nl = 0; e = strchr(nl + 1, '\n'); if (e) *e = 0;
+    nl = cut_line(t); cut_line(nl + 1);
     boot_one("fs", t, nl + 1);
     return;
   }
   while (*t) {                                 // name host[:port] dir
-    nl = strchr(t, '\n'); if (nl) *nl = 0;
+    nl = cut_line(t);
     host = strchr(t, ' ');
     if (host) {
       *host++ = 0;

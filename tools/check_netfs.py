@@ -116,6 +116,11 @@ STEPS = [
     ('cat /mnt/fs/top2.txt', 'top\n', 0),
     ('cat /mnt/c/top2.txt', 'top\n', 0),
     ('ls /mnt/d', 'ls: /mnt/d: not found\n', 0),
+    ('ETC', 'fs @ /projects\r\n', None),      # written on Windows: the CR is not part of dir
+    ('cat /mnt/fs/game/a.txt', 'hello\n', 0),
+    ('ETC', ''.join('n%d @ /%s\n' % (i, 'L' * 269) for i in range(7)), None),   # stale lines: 2030 bytes, a new line does not fit
+    ('mount @ / nn', 'mount: cannot write /etc/mount\n', 1),   # no room left: refused, not overflowed
+    ('umount nn', 'umount: nn is not mounted\n', 1),
     ('ETC', '@\n/projects\n', None),          # the old format: host, then dir
     ('cat /mnt/fs/game/a.txt', 'hello\n', 0),
     ('mount', '@ /projects /mnt/fs\n', 0),
