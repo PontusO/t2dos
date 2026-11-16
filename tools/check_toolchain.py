@@ -14,7 +14,10 @@ the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
   check_toolchain.py --board     --pc, then upload cc.bin, as.bin, ld.bin, ar.bin and the
                                  sources, build every case with cc ON THE BOARD, run it, compare
                                  with NAME.expected and the board .bin with the PC one; the error
-                                 cases on the board
+                                 cases on the board; then /tmp, which the kernel keeps in
+                                 PSRAM: files and directories there, mv between /tmp and the
+                                 flash (or SD) filesystem both ways, a program run from /tmp,
+                                 and PSRAM fully returned when the files are gone
   check_toolchain.py --selfhost  on the board, cc.bin rebuilds cc, as, ld, ar, nm and objdump
                                  from source with plain cc; each must equal root/bin/X.bin. Then
                                  the board-built cc compiles compiler/tests/test4..12 on the
@@ -419,6 +422,59 @@ def check_board():
     left = r.tmp_files() - before
     if left:
         ok = fail('temporary files left in /tmp on the board: %r' % sorted(left))
+    return check_ramtmp(r) and ok
+
+
+FREE_RE = re.compile(r'^psram\s+\d+ bytes, (\d+) free$')
+
+
+def check_ramtmp(r):
+    """/tmp in PSRAM (kernel/ramfs.cpp): the file operations, mv across filesystems both ways"""
+    def psram_free():
+        out, _ = r.run('free', 10.0)
+        return [int(m.group(1)) for m in map(FREE_RE.match, out) if m][0]
+
+    def step(cmd, want_out, want_code=0):
+        out, code = r.run(cmd, 20.0)
+        if out != want_out or code != want_code:
+            return fail('/tmp: %s: exit %d, %r; want exit %d, %r' % (cmd, code, out, want_code, want_out))
+        return True
+
+    name = CASES[0][0]
+    binp = os.path.join(WORK, name, name + '.bin')
+    want = open(os.path.join(TESTS, name + '.expected')).read().rstrip('\n').split('\n')
+    text = os.path.join(TESTS, CASES[0][1][0])
+    data = open(text, 'rb').read()
+    r.wipe('/tmp/rt')
+    r.run('rm /src/rt_moved.txt', 10.0)
+    free0 = psram_free()
+    ok = step('mkdir /tmp/rt', [])
+    r.put(text, '/tmp/rt/a.txt')
+    r.put(binp, '/tmp/rt/prog.bin')
+    ok = step('cd /tmp/rt', []) and ok
+    ok = step('ls', ['%8d  a.txt' % len(data), '%8d  prog.bin' % os.path.getsize(binp),
+                     '2 files, %d bytes' % (len(data) + os.path.getsize(binp))]) and ok
+    out, code = r.run('prog.bin', 20.0)
+    if out + ['exit %d' % code] != want:
+        ok = fail('/tmp: prog.bin printed %r, want %r' % (out + ['exit %d' % code], want))
+    ok = step('cd /', []) and ok
+    ok = step('mv /tmp/rt/a.txt /src/rt_moved.txt', []) and ok          # RAM -> flash
+    if r.fetch('/src/rt_moved.txt') != data:
+        ok = fail('/tmp: /src/rt_moved.txt differs after mv from /tmp')
+    ok = step('mv /src/rt_moved.txt /tmp/rt/b.txt', []) and ok          # flash -> RAM
+    if r.fetch('/tmp/rt/b.txt') != data:
+        ok = fail('/tmp: /tmp/rt/b.txt differs after mv from /src')
+    ok = step('ls /src/rt_moved.txt', ['ls: /src/rt_moved.txt: not found']) and ok   # moved away
+    ok = step('mv /tmp/rt/b.txt /tmp/rt/c.txt', []) and ok              # within RAM
+    ok = step('mkdir /tmp/rt/sub', []) and ok
+    ok = step('mv /tmp/rt/c.txt /tmp/rt/sub/c.txt', []) and ok
+    ok = step('rmdir /tmp/rt/sub', ['rmdir: /tmp/rt/sub failed (not empty?)'], 1) and ok
+    ok = step('rm /tmp/rt/sub/c.txt /tmp/rt/prog.bin', []) and ok
+    ok = step('rmdir /tmp/rt/sub /tmp/rt', []) and ok
+    free1 = psram_free()
+    if free1 != free0:
+        ok = fail('/tmp: free PSRAM %d before, %d after' % (free0, free1))
+    print('%s /tmp in PSRAM' % ('ok' if ok else 'FAIL'))
     return ok
 
 

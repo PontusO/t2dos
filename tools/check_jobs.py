@@ -16,7 +16,8 @@ the pipe driver, same output style; `start` spawns pecho, `finish` makes it quit
                           (spin and fexec always get -O)
   check_jobs.py --board   --build, upload the programs to /src/jobs/ and sh.bin to /bin/,
                           record `free`, run every case, then `free` must show the same
-                          free PSRAM as before the first case
+                          free PSRAM as before the first case (the files the cases
+                          leave in /tmp, which is in PSRAM, are removed for both readings)
 
 Cases (spawner CASE on the board):
   spawn_basic         spawn `tick 3 100`, sleep 1000: jobs() has one entry, done, exit 7,
@@ -708,6 +709,15 @@ CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('ctrl_c_pipe', case_ctrl_c_pipe)]   # last: on a kernel without it the board stays blocked
 
 
+# files the cases write to /tmp; /tmp is in PSRAM, so they go before each free PSRAM reading
+TMP_FILES = ['/tmp/r.txt', '/tmp/t.txt', '/tmp/h.bin', '/tmp/e.txt']
+
+
+def rm_tmp(r):
+    for f in TMP_FILES:
+        r.run('rm ' + f, 10.0)
+
+
 def check_board():
     from check_toolchain import Remote
     r = Remote()
@@ -717,6 +727,7 @@ def check_board():
         r.put(os.path.join(WORK, p + '.bin'), '%s/%s.bin' % (REMOTE, p))
     r.put(b'not a T2CC program\n', REMOTE + '/notprog.txt')
     r.put(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), '/bin/sh.bin')
+    rm_tmp(r)
     before = psram_free(r)
     print('free PSRAM before: %d' % before)
     ok = True
@@ -729,6 +740,7 @@ def check_board():
             return False
         print('%s %s' % ('PASS' if good else 'FAIL', name))
         ok = ok and good
+    rm_tmp(r)
     after = psram_free(r)
     if after != before:
         ok = fail('free PSRAM %d after the cases, %d before' % (after, before))

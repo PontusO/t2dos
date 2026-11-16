@@ -16,6 +16,7 @@
 #include <math.h>
 #include "sys.h"
 #include "vault.h"
+#include "ramfs.h"
 #include <hardware/irq.h>
 #include <hardware/structs/timer.h>
 
@@ -99,6 +100,13 @@ static PipeFd pfds[MAX_PIPE_FDS];
 // The flash FS size comes from the board's flash layout (build with
 // flash=8388608_7340032 on the CPico 2350: 1 MB kernel, 7 MB filesystem).
 static FS *fsys = &SDFS;
+// /tmp lives in PSRAM (ramfs.cpp) when the board has PSRAM: fs_for() picks the filesystem for a
+// resolved path.  A RAM file may use PSRAM down to TMP_MARGIN free, the rest is for programs.
+#define TMP_MARGIN (1024 * 1024)
+static FS *tmpfs;
+static FS *fs_for(const char *path) {
+  return tmpfs && !strncmp(path, "/tmp", 4) && (!path[4] || path[4] == '/') ? tmpfs : fsys;
+}
 
 // ============================================================ console drivers
 struct Console {
@@ -183,7 +191,7 @@ static const char *resolve(const char *in, char *out, int outsz) {
   return out;
 }
 
-static bool is_dir(const char *path) { File f = fsys->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
+static bool is_dir(const char *path) { File f = fs_for(path)->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
 
 // The saved WiFi network: /etc/wifi is "T2W1" and a vault-sealed "ssid\0password\0".  Only the
 // kernel opens it, to join at boot; programs can learn the SSID (wifi_saved) but never the password.
@@ -346,11 +354,24 @@ static void pipes_release(int task, int level) {
   for (int i = 0; i < MAX_PIPES; i++) if (pipes[i].used && pipes[i].owner == task && (level < 0 || pipes[i].level == level)) pipes[i].used = 0;
 }
 
+// rename within one filesystem, or copy and remove between /tmp and the others
+static int k_rename(const char *a, const char *b) {
+  FS *fa = fs_for(a), *fb = fs_for(b);
+  if (fa == fb) return fa->rename(a, b) ? 0 : -1;
+  File in = fa->open(a, "r"); if (!in || in.isDirectory()) return -1;
+  File out = fb->open(b, "w"); if (!out) { in.close(); return -1; }
+  uint8_t buf[512]; int k; bool ok = true;       // SRAM: PSRAM is never read while flash is written
+  while ((k = in.read(buf, sizeof buf)) > 0) if ((int)out.write(buf, k) != k) { ok = false; break; }
+  in.close(); out.close();
+  if (!ok || k < 0) { fb->remove(b); return -1; }
+  return fa->remove(a) ? 0 : -1;
+}
+
 static int k_open(const char *name, int flags) {
   char path[160]; resolve(name, path, sizeof path);
   if (const char *pn = pipe_name(path)) { int i = find_pipe(pn); return i < 0 ? -1 : pipe_open(i, flags == OPEN_READ ? 0 : 1); }
   for (int i = 2; i < MAX_FD; i++) if (!fds[i]) {
-    fds[i] = fsys->open(path, flags == OPEN_WRITE ? "w" : flags == OPEN_APPEND ? "a" : (flags & 1) ? "w" : "r");
+    fds[i] = fs_for(path)->open(path, flags == OPEN_WRITE ? "w" : flags == OPEN_APPEND ? "a" : (flags & 1) ? "w" : "r");
     fd_owner[i] = cur_id();
     return fds[i] ? i : -1;
   }
@@ -509,16 +530,16 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_stat: { char path[160]; resolve((const char *)A(0), path, sizeof path);
       if (const char *pn = pipe_name(path)) { int i = find_pipe(pn); if (i < 0) return -1;
         stat_t *st = (stat_t *)A(1); st->size = pipes[i].count; st->isdir = 0; st->mtime = pipes[i].nbounds; /* pipes have no time: mtime = complete messages queued */ return 0; }
-      File f = fsys->open(path, "r"); if (!f) return -1;
+      File f = fs_for(path)->open(path, "r"); if (!f) return -1;
       stat_t *st = (stat_t *)A(1); st->size = f.size(); st->isdir = f.isDirectory(); st->mtime = f.getLastWrite(); f.close(); return 0; }
     case SYS_unlink: { char path[160]; resolve((const char *)A(0), path, sizeof path);
       if (pipe_name(path)) return -1;      // only the owner's end removes a pipe
-      return fsys->remove(path) ? 0 : -1; }
-    case SYS_rename: { char a[160], b[160]; resolve((const char *)A(0), a, sizeof a); resolve((const char *)A(1), b, sizeof b); return fsys->rename(a, b) ? 0 : -1; }
-    case SYS_mkdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fsys->mkdir(path) ? 0 : -1; }
-    case SYS_rmdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fsys->rmdir(path) ? 0 : -1; }
+      return fs_for(path)->remove(path) ? 0 : -1; }
+    case SYS_rename: { char a[160], b[160]; resolve((const char *)A(0), a, sizeof a); resolve((const char *)A(1), b, sizeof b); return k_rename(a, b); }
+    case SYS_mkdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fs_for(path)->mkdir(path) ? 0 : -1; }
+    case SYS_rmdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fs_for(path)->rmdir(path) ? 0 : -1; }
     case SYS_opendir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1;
-      for (int i = 0; i < MAX_DIR; i++) if (!dir_used[i]) { dirs[i] = fsys->openDir(path); dir_used[i] = true; dir_owner[i] = cur_id(); return i; } return -1; }
+      for (int i = 0; i < MAX_DIR; i++) if (!dir_used[i]) { dirs[i] = fs_for(path)->openDir(path); dir_used[i] = true; dir_owner[i] = cur_id(); return i; } return -1; }
     case SYS_readdir: { int d = A(0); if (d < 0 || d >= MAX_DIR || !dir_used[d]) return 0;
       if (!dirs[d].next()) return 0;
       dirent_t *e = (dirent_t *)A(1); strlcpy(e->name, dirs[d].fileName().c_str(), sizeof e->name); e->size = dirs[d].fileSize(); e->isdir = dirs[d].isDirectory(); return 1; }
@@ -657,7 +678,7 @@ __attribute__((naked)) static int run(void *entry, void *sysfn, void *data, void
 // or -3 (out of memory): the SPAWN_ error codes.
 static int load_bin(const char *name, uint8_t **pcode, uint8_t **pdata, uint8_t **pstack, uint32_t *pentry, uint32_t *psize) {
   char path[160]; resolve(name, path, sizeof path);
-  File f = fsys->open(path, "r");
+  File f = fs_for(path)->open(path, "r");
   if (!f) return -1;
   uint32_t hdr[5];
   if (f.read((uint8_t *)hdr, 20) != 20 || hdr[0] != 0x43433254) { f.close(); return -2; }
@@ -965,7 +986,7 @@ static int k_jobs(job_t *jb, int max) {
 // Only enough to get files onto the card when /bin/sh.bin is missing or broken.
 static void recv_file(const char *name, int size) {
   char path[160]; resolve(name, path, sizeof path);
-  File f = fsys->open(path, "w");
+  File f = fs_for(path)->open(path, "w");
   if (!f) { Serial.printf("cannot write %s\r\n", path); return; }
   Serial.printf("receiving %d bytes\r\n", size);
   uint8_t buf[512]; int got = 0; uint32_t last = millis();
@@ -982,9 +1003,9 @@ static void recovery(char *line) {
   for (char *t = strtok(line, " "); t && argc < 8; t = strtok(nullptr, " ")) argv[argc++] = t;
   if (!argc) return;
   if (!strcmp(argv[0], "put") && argc > 2) recv_file(argv[1], atoi(argv[2]));
-  else if (!strcmp(argv[0], "ls")) { Dir d = fsys->openDir(argc > 1 ? argv[1] : "/"); while (d.next()) Serial.printf("%8d  %s\r\n", (int)d.fileSize(), d.fileName().c_str()); }
+  else if (!strcmp(argv[0], "ls")) { const char *p = argc > 1 ? argv[1] : "/"; Dir d = fs_for(p)->openDir(p); while (d.next()) Serial.printf("%8d  %s\r\n", (int)d.fileSize(), d.fileName().c_str()); }
   else if (!strcmp(argv[0], "run") && argc > 1) Serial.printf("[exit %d]\r\n", run_bin(argv[1], argc - 1, argv + 1));
-  else if (!strcmp(argv[0], "mkdir") && argc > 1) fsys->mkdir(argv[1]);
+  else if (!strcmp(argv[0], "mkdir") && argc > 1) fs_for(argv[1])->mkdir(argv[1]);
   else Serial.println("recovery: put name size | ls [dir] | mkdir d | run prog.bin [args]");
 }
 
@@ -1006,6 +1027,8 @@ void setup() {
   Serial.printf("T2DOS kernel  psram %d  sram free %d  fs %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), fsname);
 #endif
   if (mounted && !is_dir("/bin")) fsys->mkdir("/bin");
+  tmpfs = ramfs_begin(TMP_MARGIN);     // nullptr without PSRAM: /tmp stays on fsys
+  if (mounted && tmpfs && !fsys->exists("/tmp")) fsys->mkdir("/tmp");   // so ls / shows it
   preempt_start();
   vault_boot();
   char ssid[33], pass[64];          // join the saved network, without waiting for it

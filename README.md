@@ -635,7 +635,9 @@ files each one starts with `==> name <==`, as on Linux.
 free
 ```
 
-Shows free memory and disk space.
+Shows free memory and disk space. Files in `/tmp` use PSRAM (see
+[Programs and memory](#programs-and-memory)), so they lower the free PSRAM, not
+the disk.
 
 ```
 /> free
@@ -1856,7 +1858,8 @@ Board access (T2DOS extras, so that a blinking LED is a five-line program):
 `as` on every assembly file, then `ld` on all the objects and libraries. You
 normally only type `cc`. The tools are separate programs in `/bin`;
 intermediate files go to `/tmp` and are removed afterwards, also after an
-error. Every tool is silent when it succeeds.
+error. `/tmp` is kept in RAM, so a build writes only its result to the flash
+file system. Every tool is silent when it succeeds.
 
 ### cc
 
@@ -1928,9 +1931,12 @@ programs built with `-O`:
 
 - `examples/basic/bench.bas`: 285,000 statements per second instead of 185,500
 - the programs in `/bin` are about 31% smaller (494 KB instead of 711 KB)
-- `cc` compiling `cc.c` takes about as long as before (27 s). Most of that
-  time is writing the 880 KB assembly file: the board's flash file system
-  writes about 56 KB/s, so compiling itself takes about 2 s of it.
+- `cc` compiling `cc.c` takes about as long as before. Compiling is a small
+  part of a board build; the rest is reading and writing files. With `/tmp`
+  on the flash file system (about 56 KB/s) a plain `cc` built `cc.c` in
+  33 s, of which writing the 880 KB assembly file took most. With `/tmp` in
+  RAM it takes 14 s, and the six tools of the self-hosting check build in
+  34 s instead of 71 s.
 
 `tests/bench/` holds benchmarks for the generated code: small C programs that
 each stress one kind of code (loops on locals, calls, byte arrays, struct
@@ -2288,6 +2294,11 @@ instructions inside IT blocks, and macros (`.macro`, `.rept`).
   it left open are closed. `malloc` returns zeroed memory.
 - Programs can run other programs with `exec`, nested up to 4 deep (the shell
   counts as one).
+- `/tmp` lives in PSRAM, not on the SD card or flash: reading and writing it is
+  as fast as memory, and it is empty after a reset. A file there may grow
+  until 1 MB of PSRAM is left for programs; a write beyond that comes back
+  short. Files and directories work as anywhere else, and `mv` between `/tmp`
+  and the rest copies the file. Without PSRAM, `/tmp` is an ordinary directory.
 - Registers: `r7` is the frame pointer, `r8` the kernel's entry and `r9` the
   data base. Arguments go on the stack, first argument deepest; the result
   is in `r0`.
@@ -2389,6 +2400,7 @@ write.
 ```
 sys.h             the system call ABI, shared by the kernel, the compiler and programs
 kernel/kernel.ino the kernel (arduino-pico; SD card on SPI, LittleFS fallback)
+kernel/ramfs.cpp  /tmp in PSRAM; vault.cpp seals the saved WiFi password
 compiler/cc.c     the compiler and driver; compiler/tests/ has the language tests
 assembler/as.c    the assembler
 linker/ld.c       the linker
@@ -2490,7 +2502,9 @@ features that the previous `cc` already supports.
   registers, a library of which only the needed member is linked, big data
   before and after other files) builds with `cc` on the board, prints what
   it should, and equals the PC build. Errors stop `cc` with the tool's
-  message and leave no files in `/tmp`.
+  message and leave no files in `/tmp`. `/tmp` in PSRAM: files and
+  directories, `mv` to and from the flash, a program run from `/tmp`, and
+  PSRAM fully returned afterwards.
 - Self-hosting: `cc` on the board rebuilds `cc`, `as`, `ld`, `ar`, `nm` and
   `objdump` byte-identical to the PC builds, and that `cc` compiles test4.c
   to test12.c with the same output as gcc.
