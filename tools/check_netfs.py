@@ -29,7 +29,7 @@ STEPS = [
     ('mount 127.0.0.1:1', 'mount: cannot reach 127.0.0.1:1\n', 1),
     ('mount @ nothere', 'mount: nothere: not a directory\n', 1),
     ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\nECHO  echo.bin\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
-     '       1  s2.txt\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n7 files, ALL bytes\n', 0),
+     '       1  s2.txt\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n       5  victim.txt\n8 files, ALL bytes\n', 0),
     ('ls /', re.compile(r'(?s).*   <dir>  mnt/\n.*'), 0),
     ('cat /mnt/fs/top.txt', 'top\n', 0),
     ('cp /mnt/fs/big.bin b.bin', '', 0),
@@ -60,6 +60,7 @@ STEPS = [
     ('wr /mnt/fs/LONGN hi', 'close -1\n', 0),   # fits, but its temp name does not
     ('mount @', '@ /\n', 0),
     ('full', 'wrote 8192\nclose 0\n', 0, '', {'T2_NETFS_CACHE': '8300'}),
+    ('nl', 'stat -1\nopen -1\nmkdir -1\n', 0),       # victim.txt must survive
     # failures (Task 4): PROXY sits in front of the server; ('PROXY', mode, cut) sets it
     ('PROXY', 'flaky', None),                  # every other connection closed at once
     ('mount PROXY', 'PROXY /\n', 0),
@@ -86,8 +87,9 @@ LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135}
 FILES = {'b.bin': BIG, 'local.txt': None, 'f1.txt': b'sent\n'}
 SERVER_FILES = {'s.txt': b'sent\nmore\n', 'o.txt': b'x\n', 'big2.bin': BIG, 's2.txt': None, 'm1.txt': None,
                 'm2.txt': None, 'm3.txt': b'move\n', 't.txt': b'new\n', 'nc.txt': b'data\n', 'L' * 151: b'sent\n',
-                'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192, 'f1.txt': b'sent\n', 'r.txt': b'sent\n'}
-TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down']
+                'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192, 'f1.txt': b'sent\n', 'r.txt': b'sent\n',
+                'victim.txt': b'keep\n'}
+TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down', 'nl']
 
 bad = 0
 
@@ -199,10 +201,10 @@ class Proxy:
     connection closed at once) or 'hole' (accepted, never answered); cut = (prefix, times) closes
     a connection when the client sends a line starting with prefix, times times.  Changing the
     mode closes the open connections."""
-    def __init__(self, port, target):
+    def __init__(self, port, target, host='127.0.0.1'):
         self.target, self.mode, self.cut, self.k, self.conns = target, 'pass', None, 0, []
         self.ls = socket.socket(); self.ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.ls.bind(('127.0.0.1', port)); self.ls.listen(8)
+        self.ls.bind((host, port)); self.ls.listen(8)
         threading.Thread(target=self.run, daemon=True).start()
 
     def set(self, mode, cut):
@@ -293,7 +295,7 @@ def run_steps(port, proxy):
         out = r.stdout.decode(errors='replace').replace(pp, 'PROXY').replace(hp, '@')
         for k, v in LONG.items(): out = out.replace(v, k)
         if isinstance(want, str):
-            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4))
+            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4 + 5))
             ok = out == want
         else:
             ok = want.fullmatch(out)
@@ -323,7 +325,7 @@ BOARD_STEPS = [
     ('umount', []),
     ('mount SERVER', ['SERVER /']),
     ('mount', ['SERVER /']),
-    ('ls /mnt/fs', ['   10000  big.bin', '   <dir>  prog/', '   <dir>  projects/', '       4  top.txt', '2 files, 10004 bytes']),
+    ('ls /mnt/fs', ['   10000  big.bin', 'CPBIN  cp.bin', '   <dir>  prog/', '   <dir>  projects/', '       4  top.txt', 'CPALL']),
     ('ls /', None),                            # checked below: shows mnt/
     ('cat /mnt/fs/top.txt', ['top']),
     ('cp /mnt/fs/big.bin /tmp/b.bin', []),
@@ -349,6 +351,10 @@ BOARD_STEPS = [
     ('cc -o main.bin main.c', []),
     ('main.bin', ['hello from util']),
     ('cd /', []),
+    ('PROXY', None),                           # cp.bin (> 4 KB) loses its second block: no run
+    ('/mnt/fs/cp.bin', None),
+    ('PROXYOFF', None),
+    ('/mnt/fs/cp.bin', ['usage: cp src dst']),
     ('umount', []),
     ('mount', ['nothing mounted']),
 ]
@@ -365,18 +371,30 @@ def board_main(argv):
     open(os.path.join(BSRV, 'big.bin'), 'wb').write(BIG)
     open(os.path.join(BSRV, 'prog', 'main.c'), 'w').write(MAIN_C)
     open(os.path.join(BSRV, 'prog', 'util.h'), 'w').write(UTIL_H)
+    shutil.copy(os.path.join(ROOT, 'root', 'bin', 'cp.bin'), os.path.join(BSRV, 'cp.bin'))
     srv = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), BSRV, str(port)],
                            stdout=open(os.path.join(WORK, 'bsrv.log'), 'w'), stderr=subprocess.STDOUT)
     times = {}
     try:
         time.sleep(1)
         b = board.Board()
+        pport = port + 1
+        proxy = Proxy(pport, port, '0.0.0.0')
+        pc = server.rsplit(':', 1)[0]
         for cmd, want in BOARD_STEPS:
+            if cmd == 'PROXY':                 # mount through the proxy, which cuts READ 4096 3 times
+                proxy.set('pass', ('READ 4096', 3))
+                b.run('mount %s:%d' % (pc, pport), 30); continue
+            if cmd == 'PROXYOFF':
+                b.run('mount ' + server, 30); continue
             t0 = time.time()
             got = b.run(cmd.replace('SERVER', server), 120.0)
             times.setdefault(cmd, []).append(time.time() - t0)
             if cmd == 'ls /' and '   <dir>  mnt/' not in got: fail('ls / has no mnt/: %r' % got)
-            if want is not None and got != [w.replace('SERVER', server) for w in want]:
+            if cmd == '/mnt/fs/cp.bin' and want is None and any('usage' in l for l in got): fail('ran a half-loaded cp.bin')
+            cpb = os.path.getsize(os.path.join(BSRV, 'cp.bin'))
+            want = want and [w.replace('SERVER', server).replace('CPBIN', '%8d' % cpb).replace('CPALL', '3 files, %d bytes' % (10004 + cpb)) for w in want]
+            if want is not None and got != want:
                 fail('%s: %r' % (cmd, got))
     finally:
         srv.kill()
@@ -417,7 +435,7 @@ def main(argv):
         open(os.path.join(SRV, 'big.bin'), 'wb').write(BIG)
         shutil.copy(os.path.join(ROOT, 'root', 'bin', 'echo.bin'), os.path.join(SRV, 'echo.bin'))
         os.makedirs(os.path.join(SRV, 'sp')); open(os.path.join(SRV, 'sp', 'my file.txt'), 'w').write('S\n')
-        for n, t in [('o.txt', 'a longer old content\n'), ('s2.txt', 'x'), ('m1.txt', 'move\n'), ('t.txt', 'old\n')]:
+        for n, t in [('victim.txt', 'keep\n'), ('o.txt', 'a longer old content\n'), ('s2.txt', 'x'), ('m1.txt', 'move\n'), ('t.txt', 'old\n')]:
             open(os.path.join(SRV, n), 'w').write(t)
         os.makedirs(os.path.join(SRV, 'D' * 60))
         open(os.path.join(BOARD, 's.txt'), 'w').write('sent\n')

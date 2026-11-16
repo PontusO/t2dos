@@ -762,7 +762,9 @@ static int load_bin(const char *name, uint8_t **pcode, uint8_t **pdata, uint8_t 
   uint8_t *data = (uint8_t *)big_alloc(hdr[2] + hdr[3] + 16);
   uint8_t *stack = (uint8_t *)big_alloc(STACK_SIZE);
   if (!code || !data || !stack) { f.close(); free(code); free(data); free(stack); Serial.println("kernel: out of memory"); return -3; }
-  f.read(code, hdr[1]); f.read(data, hdr[2]); f.close();
+  // a short read (a /mnt/fs file whose connection broke) must not run a half-loaded program
+  bool whole = f.read(code, hdr[1]) == (int)hdr[1] && f.read(data, hdr[2]) == (int)hdr[2]; f.close();
+  if (!whole) { free(code); free(data); free(stack); return -1; }
   memset(data + hdr[2], 0, hdr[3]);
   asm volatile("dsb\n isb");
   *pcode = code; *pdata = data; *pstack = stack; *pentry = hdr[4]; *psize = hdr[1];

@@ -131,10 +131,11 @@ static int simple(const char *req, int once) {
 // ---------------------------------------------------------------- names
 int nfs_mounted(void) { return m_on; }
 int nfs_path(const char *abs) { return m_on && !strncmp(abs, NFS_ROOT, 7) && (!abs[7] || abs[7] == '/'); }
-// the remote name for a resolved path under /mnt/fs; -1 if it is too long
+// the remote name for a resolved path under /mnt/fs; -1 if it is too long or holds a line
+// break, which would end the request line and start another one on the server
 static int rname(const char *abs, char *out) {
   const char *rest = abs + 7;                  // "" or "/x/y"
-  if (strlen(m_dir) + strlen(rest) + 1 > NAME) return -1;
+  if (strlen(m_dir) + strlen(rest) + 1 > NAME || strpbrk(rest, "\r\n")) return -1;
   if (!strcmp(m_dir, "/") && *rest) strcpy(out, rest);
   else { strcpy(out, m_dir); strcat(out, rest); }
   return 0;
