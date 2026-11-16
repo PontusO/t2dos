@@ -2,7 +2,6 @@
 // The remote side is :path (the saved server), host:path or host:port:path.
 #include "sys.h"
 #include "net.c"
-char buf[1024];
 char rpath[200];
 char lpath[200];
 int nfiles;
@@ -17,9 +16,9 @@ char *base(char *s) {
 // remote file -> local file; the byte count, or -1
 int get_file(char *remote, char *local) {
   char req[220]; int sock; int out; int size; int n;
-  sock = net_open(net_host); if (sock < 0) return -1;
   sprintf(req, "GET %s\n", remote);
-  size = net_request(sock, req); if (size < 0) { close(sock); return -1; }
+  sock = net_ask(req, -1, 0); if (sock < 0) return -1;
+  size = net_size;
   out = open(local, OPEN_WRITE); if (out < 0) { printf("rcp: cannot write %s\n", local); close(sock); return -1; }
   n = net_recv_to(sock, out, size);
   if (n < 0) { if (n == -2) printf("cannot write %s\n", local); close(out); close(sock); return -1; }
@@ -30,16 +29,13 @@ int get_file(char *remote, char *local) {
 
 // local file -> remote file; the byte count, or -1
 int put_file(char *local, char *remote) {
-  char req[220]; int sock; int in; int n; struct stat_t st;
+  char req[220]; int sock; int in; struct stat_t st;
   if (stat(local, &st) < 0) { printf("rcp: %s: not found\n", local); return -1; }
   in = open(local, OPEN_READ); if (in < 0) { printf("rcp: cannot read %s\n", local); return -1; }
-  sock = net_open(net_host); if (sock < 0) { close(in); return -1; }
   sprintf(req, "PUT %s %d\n", remote, st.size);
-  send(sock, req, strlen(req));
-  while ((n = read(in, buf, 1024)) > 0)
-    if (send(sock, buf, n) < 0) { printf("connection lost\n"); close(in); close(sock); return -1; }
+  sock = net_ask(req, in, st.size);
   close(in);
-  if (net_readline(sock, net_line, 128) < 0 || strncmp(net_line, "OK", 2)) { printf("server: %s\n", net_line); close(sock); return -1; }
+  if (sock < 0) return -1;
   close(sock);
   printf("%s: %d bytes\n", remote, st.size);
   return st.size;
@@ -76,9 +72,9 @@ int get_tree(char *remote, char *local) {
   char req[220]; char r2[200]; char l2[200]; char *list; char *line; char *nl; char *name;
   int sock; int size; int dir; int k; int ok;
   if (mkdir_ok(local) < 0) return -1;
-  sock = net_open(net_host); if (sock < 0) return -1;
   sprintf(req, "LS %s\n", remote);
-  size = net_request(sock, req); if (size < 0) { close(sock); return -1; }
+  sock = net_ask(req, -1, 0); if (sock < 0) return -1;
+  size = net_size;
   list = malloc(size + 1);
   if (!list) { printf("rcp: out of memory\n"); close(sock); return -1; }
   k = 0;                                        // the whole listing first: one request per connection

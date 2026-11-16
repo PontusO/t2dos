@@ -25,25 +25,78 @@ int net_readline(int fd, char *buf, int max) {
   return n;
 }
 
-// "host:port" -> connects, default port 7777
-int net_open(char *hostport) {
+#define NET_TRIES 3   // attempts per request, see net_call()
+#define NET_PAUSE 10  // ms between attempts, to let the ESP32's network stack settle
+int net_size;         // the size in net_call()'s "OK size" reply (0 for a bare "OK")
+
+// "host:port" -> a socket, default port 7777; -1 if it fails (with a message if say)
+int net_connect(char *hostport, int say) {
   char host[64]; char *colon; int port; int fd;
   strcpy(host, hostport);
   port = 7777;
   colon = strchr(host, ':');
   if (colon) { *colon = 0; if (colon[1]) port = atoi(colon + 1); }
-  if (net_status() != NET_UP) { printf("network is down, use: wifi ssid password\n"); return -1; }
   fd = connect(host, port);
-  if (fd < 0) printf("cannot connect to %s:%d\n", host, port);
+  if (fd < 0 && say) printf("cannot connect to %s:%d\n", host, port);
   return fd;
 }
 
-// send request, expect "OK size" or "OK"; returns size (0 for bare OK), -1 on error
-int net_request(int fd, char *req) {
-  send(fd, req, strlen(req));
-  if (net_readline(fd, net_line, 128) < 0) { printf("no reply\n"); return -1; }
-  if (strncmp(net_line, "OK", 2)) { printf("server: %s\n", net_line); return -1; }
-  return net_line[2] == ' ' ? atoi(net_line + 3) : 0;
+// one attempt of net_call(): the socket, -1 if the connect failed, -2 for an ERR reply (left
+// in net_line), -3 if the connection broke or closed without a reply
+int net_try(char *req, int in, int size, int last) {
+  char buf[512]; int sock; int n;
+  sock = net_connect(net_host, last); if (sock < 0) return -1;
+  if (send(sock, req, strlen(req)) < 0) { close(sock); return -3; }
+  if (in >= 0) {
+    seek(in, 0, SEEK_BEGIN);
+    while (size > 0 && (n = read(in, buf, size > 512 ? 512 : size)) > 0) {
+      if (send(sock, buf, n) < 0) { close(sock); return -3; }
+      size = size - n;
+    }
+  }
+  if (net_readline(sock, net_line, 128) < 0) { close(sock); return -3; }
+  if (strncmp(net_line, "OK", 2)) { close(sock); return -2; }
+  net_size = net_line[2] == ' ' ? atoi(net_line + 3) : 0;
+  return sock;
+}
+
+// sends req to net_host and reads the reply line.  With in >= 0, size bytes of the file in
+// follow req (PUT; read from the start on every attempt).  Returns the socket, with net_size
+// set; -2 for an ERR reply (in net_line, not printed); -1 with a message otherwise.
+// A failed connect, or a connection that breaks or closes before the reply, is tried again
+// on a new connection, up to NET_TRIES times NET_PAUSE ms apart: on the board an ESP-Hosted
+// connection now and then closes before the reply arrives.  Every request is safe to repeat.
+int net_call(char *req, int in, int size) {
+  int k; int r;
+  if (net_status() != NET_UP) { printf("network is down, use: wifi ssid password\n"); return -1; }
+  k = 0; r = -1;
+  while (k < NET_TRIES) {
+    if (k) sleep(NET_PAUSE);
+    r = net_try(req, in, size, k == NET_TRIES - 1);
+    if (r >= 0 || r == -2) return r;
+    k++;
+  }
+  if (r == -3) printf("no reply\n");
+  return -1;
+}
+
+// net_call() that also prints an ERR reply: the socket, or -1
+int net_ask(char *req, int in, int size) {
+  int r;
+  r = net_call(req, in, size);
+  if (r == -2) { printf("server: %s\n", net_line); return -1; }
+  return r;
+}
+
+// reads and drops size bytes (a listing that is not needed)
+int net_drain(int sock, int size) {
+  char buf[256]; int r;
+  while (size > 0) {
+    r = recv(sock, buf, size > 256 ? 256 : size, 10000);
+    if (r <= 0) return -1;
+    size = size - r;
+  }
+  return 0;
 }
 
 // receive exactly size bytes into fd (a file fd or 1 for the console); the size, -1 if the
@@ -191,28 +244,21 @@ int net_remote(char *arg) {
 
 // 1 if path is a directory on net_host (LS answers OK), 0 if not, -1 if the server is unreachable
 int net_isdir(char *path) {
-  char req[220]; char buf[256]; int sock; int size; int r;
-  sock = net_open(net_host); if (sock < 0) return -1;
+  char req[220]; int sock;
   sprintf(req, "LS %s\n", path);
-  send(sock, req, strlen(req));
-  if (net_readline(sock, net_line, 128) < 0) { printf("no reply\n"); close(sock); return -1; }
-  if (strncmp(net_line, "OK", 2)) { close(sock); return 0; }
-  size = net_line[2] == ' ' ? atoi(net_line + 3) : 0;
-  while (size > 0) {                            // the listing is not needed: drain it
-    r = recv(sock, buf, size > 256 ? 256 : size, 10000);
-    if (r <= 0) break;
-    size = size - r;
-  }
+  sock = net_call(req, -1, 0);
+  if (sock == -2) return 0;
+  if (sock < 0) return -1;
+  net_drain(sock, net_size);
   close(sock);
   return 1;
 }
 
 // creates directory path on net_host (no error if it exists); 0, or -1 with a message
 int net_mkdir(char *path) {
-  char req[220]; int sock; int r;
-  sock = net_open(net_host); if (sock < 0) return -1;
+  char req[220]; int sock;
   sprintf(req, "MKDIR %s\n", path);
-  r = net_request(sock, req);
+  sock = net_ask(req, -1, 0); if (sock < 0) return -1;
   close(sock);
-  return r < 0 ? -1 : 0;
+  return 0;
 }

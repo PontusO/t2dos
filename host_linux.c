@@ -252,7 +252,7 @@ int sys(int num, int n, int *argv) {
     case SYS_wifi_saved: return 0;
     case SYS_net_ip: return (int)ipbuf;
     case SYS_connect: return sock_connect((char *)A(0), A(1));
-    case SYS_send: { int r = write(A(0), (void *)A(1), A(2)); return r > 0 ? r : -1; }
+    case SYS_send: { int r = send(A(0), (void *)A(1), A(2), MSG_NOSIGNAL); return r > 0 ? r : -1; }  // a closed peer: -1, not SIGPIPE
     case SYS_recv: return sock_recv(A(0), (char *)A(1), A(2), A(3));
     case SYS_listen: { if (listen_fd >= 0) close(listen_fd); listen_fd = socket(AF_INET, SOCK_STREAM, 0); int one = 1; setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
       struct sockaddr_in a = {0}; a.sin_family = AF_INET; a.sin_port = htons(A(0)); a.sin_addr.s_addr = INADDR_ANY;

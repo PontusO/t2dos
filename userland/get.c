@@ -10,9 +10,9 @@ int main(int argc, char **argv) {
   b = local; while (strchr(b, '/')) b = strchr(b, '/') + 1;     // basename for the default
   if (argc <= a + 2) local = b;
   if (net_resolve(argv[a + 1]) < 0) return 1;
-  sock = net_open(net_host); if (sock < 0) return 1;
   sprintf(req, "GET %s\n", net_path);
-  size = net_request(sock, req); if (size < 0) { close(sock); return 1; }
+  sock = net_ask(req, -1, 0); if (sock < 0) return 1;
+  size = net_size;
   out = open(local, OPEN_WRITE); if (out < 0) { printf("cannot write %s\n", local); close(sock); return 1; }
   t0 = millis();
   r = net_recv_to(sock, out, size);

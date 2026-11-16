@@ -5,11 +5,13 @@ Runs the root/bin/*.bin tools under qemu-arm with host_linux (whose sockets are 
 against tools/fileserver.py on a random local port. The board side's root and the server's
 directory are fresh folders under build/s/net/. Each step's output (the port shown as PORT)
 and exit status must match. Also sends raw requests that try to leave the server's root.
+FLAKY is a proxy in front of the server that closes every other connection without a reply,
+so the tools must retry; DEAD closes every connection, so they must give up.
 
   check_net.py --pc    (needs `make` and `make host`)
 Exit status 0 when every step passes.
 """
-import os, random, re, shutil, socket, subprocess, sys, time
+import os, random, re, shutil, socket, subprocess, sys, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'net')
@@ -62,20 +64,58 @@ STEPS = [
     ('rcp -r :sp sp1', None, 0),               # a name with a space, both ways
     ('rcp -r sp1 :sp2', None, 0),
     ('rcp :top.txt full', 'cannot write full\n', 1),   # full -> /dev/full: the write fails
+    ('get FLAKY top.txt f1.txt', None, 0),    # every request is dropped once: the tools retry
+    ('rls FLAKY', '   <dir>  projects/\n   <dir>  sp/\n   <dir>  sp2/\n       4  top.txt\n   <dir>  tree/\n       5  up.txt\n   <dir>  up1/\n', 0),
+    ('send FLAKY s.txt f2.txt', None, 0),
+    ('rcp FLAKY:top.txt f3.txt', 'f3.txt: 4 bytes\n', 0),
+    ('rcp s.txt FLAKY:f4.txt', '/f4.txt: 5 bytes\n', 0),
+    ('rcp -r FLAKY:tree f5', 'f5/a.txt: 2 bytes\nf5/sub/b.txt: 2 bytes\n2 files, 4 bytes\n', 0),
+    ('rcp -r t1/sub FLAKY:f6', None, 0),
+    ('rls DEAD', 'no reply\n', 1),
+    ('rcp DEAD:top.txt x', 'no reply\n', 1),
     ('ping -c 2 127.0.0.1', re.compile(r'127\.0\.0\.1: \d+ ms\n127\.0\.0\.1: \d+ ms\n2 sent, 2 received\n'), 0),
     ('ping nosuchhost.invalid', 'ping: cannot resolve nosuchhost.invalid\n', 1),
     ('ping', 'usage: ping host [-c count]\n', 1),
 ]
 FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n', 'r1.txt': b'top\n', 'r2.txt': b'top\n',
          't1/a.txt': b'A\n', 't1/sub/b.txt': b'B\n', 't1/tree/a.txt': b'A\n', 't1/tree/sub/b.txt': b'B\n',
-         'sp1/my file.txt': b'S\n'}
+         'sp1/my file.txt': b'S\n', 'f1.txt': b'top\n', 'f3.txt': b'top\n', 'f5/sub/b.txt': b'B\n'}
 SERVER_FILES = {'projects/s.txt': b'sent\n', 'up.txt': b'sent\n', 'projects/game/s.txt': b'sent\n',
                 'projects/game/s2.txt': b'sent\n', 'up1/a.txt': b'A\n', 'up1/sub/b.txt': b'B\n',
                 'up1/tree/a.txt': b'A\n', 'projects/sub/b.txt': b'B\n',
-                'sp2/my file.txt': b'S\n'}
+                'sp2/my file.txt': b'S\n', 'f2.txt': b'sent\n', 'f4.txt': b'sent\n', 'f6/b.txt': b'B\n'}
 BOARD_DIRS = ['t1/empty', 't1/tree/empty']
 SERVER_DIRS = ['up1/empty', 'up1/tree/empty']
 ESCAPES = ['GET ../srv2/secret', 'GET /../srv2/secret', 'LS ..', 'PUT ../srv2/x 1', 'MKDIR ../srv2/d']
+
+
+def proxy(port, target, drop):
+    """Listen on port; connection number k (from 0) is closed at once without a reply when
+    drop(k), else passed through to target."""
+    ls = socket.socket(); ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    ls.bind(('127.0.0.1', port)); ls.listen(8)
+    def pipe(a, b):
+        try:
+            while True:
+                d = a.recv(4096)
+                if not d: break
+                b.sendall(d)
+        except OSError: pass
+        finally:
+            for x in (a, b):
+                try: x.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+    def run():
+        k = 0
+        while True:
+            c, _ = ls.accept()
+            if drop(k): c.close()
+            else:
+                t = socket.create_connection(('127.0.0.1', target))
+                threading.Thread(target=pipe, args=(c, t), daemon=True).start()
+                threading.Thread(target=pipe, args=(t, c), daemon=True).start()
+            k += 1
+    threading.Thread(target=run, daemon=True).start()
 
 
 def content(path):
@@ -104,16 +144,21 @@ def main(argv):
     server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     hp = '127.0.0.1:%d' % port
+    proxy(port + 1, port, lambda k: k % 2 == 0)
+    proxy(port + 2, port, lambda k: True)
+    names = [('FLAKY', '127.0.0.1:%d' % (port + 1)), ('DEAD', '127.0.0.1:%d' % (port + 2)), ('@', hp)]
     bad = 0
     try:
         for _ in range(50):                    # wait until the server listens
             try: socket.create_connection(('127.0.0.1', port), 0.2).close(); break
             except OSError: time.sleep(0.1)
         for cmd, want, status in STEPS:
-            args = cmd.replace('@', hp).replace('PORT', str(port)).split()
+            for k, v in names: cmd = cmd.replace(k, v)
+            args = cmd.replace('PORT', str(port)).split()
             r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, '/bin/%s.bin' % args[0]] + args[1:],
                                capture_output=True, timeout=30)
-            out = r.stdout.decode(errors='replace').replace(hp, '@')
+            out = r.stdout.decode(errors='replace')
+            for k, v in names: out = out.replace(v, k)
             ok = want is None or (want.fullmatch(out) if isinstance(want, re.Pattern) else out == want)
             if r.returncode != status or not ok:
                 bad += 1
