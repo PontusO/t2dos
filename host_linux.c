@@ -190,7 +190,8 @@ void nt_free(void *p) { if (p) { nt_used -= *(int *)((char *)p - 8); free((char 
 #include "kernel/netfs.c"
 static int nfs_owner[NFS_NFD] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 static int nfs_dir_owner[4] = { -1, -1, -1, -1 };
-// a rename with exactly one side under /mnt/fs: copy, then remove the old one (like k_rename)
+// a rename that is not inside one mount (SD and a mount, or two mounts): copy, then remove the
+// old one (like k_rename)
 static int nfs_cross_rename(const char *ra, const char *rb) {
   char pa[300], pb[300], buf[4096]; int na = nfs_path(ra), nb = nfs_path(rb), in, out, k, ok = 1; struct stat st;
   if (na) { in = nfs_open(ra, NFS_READ); if (in >= 0 && nfs_isdir(in)) { nfs_close(in); return -1; } }
@@ -205,6 +206,11 @@ static int nfs_cross_rename(const char *ra, const char *rb) {
   if ((nb ? nfs_close(out) : close(out)) < 0) ok = 0;
   if (!ok) { if (!nb) unlink(pb); return -1; }
   return na ? nfs_remove(ra) : unlink(pa);
+}
+// /mnt/name on the root, so ls /mnt shows the mounts
+static void mnt_dir(const char *name) {
+  char p[300]; snprintf(p, sizeof p, "%s/mnt", root); mkdir(p, 0755);
+  snprintf(p, sizeof p, "%s/mnt/%s", root, name); mkdir(p, 0755);
 }
 static int nfs_mode(int fl) { return fl == OPEN_APPEND ? NFS_APPEND : (fl & 1) ? NFS_WRITE : NFS_READ; }
 // reads /etc/mount (host[:port], then the remote dir) and mounts without asking the server
@@ -298,7 +304,7 @@ int sys(int num, int n, int *argv) {
       { char r[160]; resolve(in, r, sizeof r); if (nfs_path(r)) return nfs_remove(r); }
       return unlink(hostpath((char *)A(0), p1)); }
     case SYS_rename: { char ra[160], rb[160]; resolve((char *)A(0), ra, sizeof ra); resolve((char *)A(1), rb, sizeof rb);
-      if (nfs_path(ra) && nfs_path(rb)) return nfs_rename(ra, rb);
+      if (nfs_same(ra, rb)) return nfs_rename(ra, rb);
       if (nfs_path(ra) || nfs_path(rb)) return nfs_cross_rename(ra, rb);
       return rename(hostpath((char *)A(0), p1), hostpath((char *)A(1), p2)); }
     case SYS_mkdir: { char r[160]; resolve((char *)A(0), r, sizeof r); if (nfs_path(r)) return nfs_mkdir(r); }
@@ -323,7 +329,11 @@ int sys(int num, int n, int *argv) {
     case SYS_getcwd: strncpy((char *)A(0), cwd, A(1)); return A(0);
     case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
-      if (r == 0 && *h) { snprintf(p1, sizeof p1, "%s/mnt", root); mkdir(p1, 0755); strcat(p1, "/fs"); mkdir(p1, 0755); }
+      if (r == 0 && *h) mnt_dir("fs");
+      return r; }
+    case SYS_mountat: { const char *nm = A(0) ? (const char *)A(0) : "", *h = A(1) ? (const char *)A(1) : "";
+      int r = nfs_mountat(nm, h, A(2), (const char *)A(3), 1);
+      if (r == 0 && *h) mnt_dir(nm);
       return r; }
     case SYS_mkpipe: { const char *nm = (const char *)A(0);   // the part after /pipe/
       if (!nm[0] || strlen(nm) > 31 || strchr(nm, '/')) return -1;

@@ -16,6 +16,7 @@ import os, random, re, shutil, socket, subprocess, sys, threading, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'netfs')
 SRV = os.path.join(WORK, 'srv')
+SRV2 = os.path.join(WORK, 'srv2')     # the second server's root
 BOARD = os.path.join(WORK, 'board')
 BIG = bytes((i * 7 + i // 300) & 255 for i in range(10000))   # crosses blocks, not a block multiple
 
@@ -87,6 +88,7 @@ STEPS = [
     ('DOWN', None, None),                      # the down state: see check_down()
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
+    ('TWO', None, None),                       # several mounts at once: see check_two()
 ]
 LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135, 'DEEP': ('d' * 40 + '/') * 3 + 'd' * 10}
 FILES = {'b.bin': BIG, 'local.txt': None, 'f1.txt': b'sent\n'}
@@ -94,7 +96,7 @@ SERVER_FILES = {'s.txt': b'sent\nmore\n', 'o.txt': b'x\n', 'big2.bin': BIG, 's2.
                 'm2.txt': None, 'm3.txt': b'move\n', 't.txt': b'new\n', 'nc.txt': b'data\n', 'L' * 151: b'sent\n',
                 'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192, 'f1.txt': b'sent\n', 'r.txt': b'sent\n',
                 'victim.txt': b'keep\n'}
-TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down', 'nl', 'shrink', 'mnull']
+TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down', 'nl', 'shrink', 'mnull', 'two']
 
 bad = 0
 
@@ -294,6 +296,38 @@ def check_down(proxy):
     if got != ['ok fast', 'fail slow', 'fail fast', 'ok fast']: fail('down state: %r' % got)
 
 
+TWO_OUT = '''a 0
+b 0
+w 0 0
+mv 0
+mvdir -1
+reb 0
+r two
+busy -3
+c 0
+d 0
+full -4
+bad -5 -5 -5
+ax -1
+um 0
+um2 -5
+r2 two
+fs 0 0
+'''
+
+
+def check_two(port):
+    """two.bin: mounts a (first server) and b (second server, port + 2) in one program."""
+    r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, '/bin/two.bin', str(port), str(port + 2)],
+                       capture_output=True, timeout=60)
+    out = r.stdout.decode(errors='replace')
+    if r.returncode or out != TWO_OUT: fail('two.bin: exit %d\n%s' % (r.returncode, out))
+    for path, data in [(os.path.join(SRV2, 'x.txt'), b'one\n'), (os.path.join(SRV2, 'y.txt'), b'two\n'), (os.path.join(SRV, 'x.txt'), None)]:
+        try: got = open(path, 'rb').read()
+        except OSError: got = None
+        if got != data: fail('two.bin: %s is %r' % (path, got))
+
+
 def run_steps(port, proxy):
     hp = '127.0.0.1:%d' % port
     pp = '127.0.0.1:%d' % (port + 1)
@@ -302,6 +336,7 @@ def run_steps(port, proxy):
         cmd, want, status = step[:3]
         if cmd == 'PROXY': proxy.set(want, status); continue
         if cmd == 'DOWN': check_down(proxy); continue
+        if cmd == 'TWO': check_two(port); continue
         stdin = step[3] if len(step) > 3 else ''
         for k, v in LONG.items(): stdin = stdin.replace(k, v)
         stdin = stdin.encode()
@@ -446,10 +481,14 @@ def main(argv):
     os.makedirs(WORK, exist_ok=True)
     server = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
                               stdout=open(os.path.join(WORK, 'srv.log'), 'w'), stderr=subprocess.STDOUT)
+    os.makedirs(SRV2)
+    server2 = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV2, str(port + 2)],
+                               stdout=open(os.path.join(WORK, 'srv2.log'), 'w'), stderr=subprocess.STDOUT)
     try:
-        for _ in range(50):
-            try: socket.create_connection(('127.0.0.1', port), 0.2).close(); break
-            except OSError: time.sleep(0.1)
+        for pt in (port, port + 2):
+            for _ in range(50):
+                try: socket.create_connection(('127.0.0.1', pt), 0.2).close(); break
+                except OSError: time.sleep(0.1)
         check_server(port)
         for n in os.listdir(SRV):                 # the tool steps start from a known server root
             p = os.path.join(SRV, n)
@@ -473,7 +512,7 @@ def main(argv):
         open(os.path.join(BOARD, 'h.c'), 'w').write('int main() { return 0; }\n')
         run_steps(port, Proxy(port + 1, port))
     finally:
-        server.kill()
+        server.kill(); server2.kill()
     if bad: print('%d failed' % bad); return 1
     print('ok: server session requests, %d tool steps' % len(STEPS))
     return 0

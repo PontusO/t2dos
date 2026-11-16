@@ -1,5 +1,5 @@
-// netfs.c - the network filesystem: /mnt/fs shows a directory that tools/fileserver.py serves
-// from the PC.  One long-lived connection in session mode (README, network protocol) carries
+// netfs.c - the network filesystem: /mnt/NAME shows a directory that tools/fileserver.py serves
+// from the PC (up to NFS_MOUNTS of them).  One long-lived connection per mount in session mode (README, network protocol) carries
 // STAT, READ, WRITE, TRUNC, LS, MKDIR, RM, RMDIR and RENAME requests.  Open files keep the 4 KB
 // blocks they have read or written in a cache (memory from nt_alloc: PSRAM on the board); the
 // block functions below (blk_*, file_save, file_drop) are the cache's whole policy, so a new
@@ -11,7 +11,7 @@
 #include "netfs.h"
 
 #define BLK 4096           // a cache block, also the most one READ or WRITE moves
-#define NAME 200           // a remote name: the mounted directory plus the path below /mnt/fs
+#define NAME 200           // a remote name: the mounted directory plus the path below /mnt/NAME
 #define NFILES 16
 #define NDIRS 4
 #define TRIES 3            // attempts per request (and per save)
@@ -20,15 +20,22 @@
 #define REPLY_MS 5000
 #define DOWN_MS 10000      // while down, one reconnect attempt at most this often
 
-static char m_host[64], m_dir[NAME];
-static int m_port, m_on;
-static int nf_conn = -1;      // the session connection, -1 when closed
-static int down;           // 1 after a request failed all its tries
-static unsigned down_at;
+// One mounted server: /mnt/name shows directory dir of host:port.  Each has its own
+// connection and down state, so one server going away leaves the others working.
+struct mount {
+  int on;
+  char name[16], host[64], dir[NAME];
+  int port;
+  int conn;                // the session connection, -1 when closed
+  int down;                // 1 after a request failed all its tries
+  unsigned down_at;
+};
+static struct mount mounts[NFS_MOUNTS];
 static char nf_line[300];     // the last reply line
 
 struct nfile {
   int used, mode, isdir;
+  struct mount *mt;
   char abs[160], name[NAME];
   int size, pos, rsize;    // rsize: the size on the server when opened (blocks below it are read from there)
   int existed;             // NFS_APPEND: the file was there when opened
@@ -37,31 +44,31 @@ struct nfile {
   unsigned char *dirty;
 };
 static struct nfile nf_files[NFILES];
-struct ndir { int used; char *list, *at; };
+struct ndir { int used; struct mount *mt; char *list, *at; };
 static struct ndir nf_dirs[NDIRS];
 
 // ---------------------------------------------------------------- connection and requests
-static void drop_conn(void) { if (nf_conn >= 0) { nt_close(nf_conn); nf_conn = -1; } }
-static int send_all(const void *b, int n) { return n == 0 || nt_send(nf_conn, b, n) == n ? 0 : -1; }
-static int recv_line(char *buf, int max) {
+static void drop_conn(struct mount *m) { if (m->conn >= 0) { nt_close(m->conn); m->conn = -1; } }
+static int send_all(struct mount *m, const void *b, int n) { return n == 0 || nt_send(m->conn, b, n) == n ? 0 : -1; }
+static int recv_line(struct mount *m, char *buf, int max) {
   int n = 0; char c;
   while (n < max - 1) {
-    if (nt_recv(nf_conn, &c, 1, REPLY_MS) != 1) return -1;
+    if (nt_recv(m->conn, &c, 1, REPLY_MS) != 1) return -1;
     if (c == '\n') break;
     buf[n++] = c;
   }
   buf[n] = 0;
   return n;
 }
-static int recv_all(void *b, int n) {
+static int recv_all(struct mount *m, void *b, int n) {
   int got = 0, r;
-  while (got < n) { r = nt_recv(nf_conn, (char *)b + got, n - got, REPLY_MS); if (r <= 0) return -1; got += r; }
+  while (got < n) { r = nt_recv(m->conn, (char *)b + got, n - got, REPLY_MS); if (r <= 0) return -1; got += r; }
   return 0;
 }
-static int open_conn(void) {
-  nf_conn = nt_connect(m_host, m_port, CONNECT_MS);
-  if (nf_conn < 0) return -1;
-  if (send_all("SESSION\n", 8) < 0 || recv_line(nf_line, sizeof nf_line) < 0 || strcmp(nf_line, "OK")) { drop_conn(); return -1; }
+static int open_conn(struct mount *m) {
+  m->conn = nt_connect(m->host, m->port, CONNECT_MS);
+  if (m->conn < 0) { m->conn = -1; return -1; }
+  if (send_all(m, "SESSION\n", 8) < 0 || recv_line(m, nf_line, sizeof nf_line) < 0 || strcmp(nf_line, "OK")) { drop_conn(m); return -1; }
   return 0;
 }
 
@@ -73,13 +80,13 @@ struct op {
   char *list; int got; int sent;
 };
 // one attempt: 0 for OK, -2 for an ERR reply (in nf_line), -1 if the connection failed (closed)
-static int attempt(struct op *o) {
+static int attempt(struct mount *m, struct op *o) {
   int n;
   o->sent = 0;
-  if (nf_conn < 0 && open_conn() < 0) return -1;
-  if (send_all(o->req, strlen(o->req)) < 0 || send_all(o->data, o->dlen) < 0) goto broken;
+  if (m->conn < 0 && open_conn(m) < 0) return -1;
+  if (send_all(m, o->req, strlen(o->req)) < 0 || send_all(m, o->data, o->dlen) < 0) goto broken;
   o->sent = 1;
-  if (recv_line(nf_line, sizeof nf_line) < 0) goto broken;
+  if (recv_line(m, nf_line, sizeof nf_line) < 0) goto broken;
   if (strncmp(nf_line, "OK", 2)) return -2;
   o->got = 0;
   if (o->in || o->alloc) {
@@ -88,97 +95,141 @@ static int attempt(struct op *o) {
     if (o->alloc) {
       o->list = (char *)nt_alloc(n + 1);
       if (!o->list) goto broken;               // no memory: the listing cannot be skipped cheaply
-      if (recv_all(o->list, n) < 0) { nt_free(o->list); o->list = 0; goto broken; }
+      if (recv_all(m, o->list, n) < 0) { nt_free(o->list); o->list = 0; goto broken; }
       o->list[n] = 0;
     } else {
-      if (n > o->inmax || recv_all(o->in, n) < 0) goto broken;
+      if (n > o->inmax || recv_all(m, o->in, n) < 0) goto broken;
     }
     o->got = n;
   }
   return 0;
 broken:
-  drop_conn();
+  drop_conn(m);
   return -1;
 }
 // attempt() with retries: up to TRIES, PAUSE ms apart; after that the mount is down and requests
 // fail at once, except one attempt every DOWN_MS.  once: no repeat after the request was sent
 // (RENAME is not safe to repeat).  0, -2 (ERR) or -1.
-static int request(struct op *o, int once) {
+static int request(struct mount *m, struct op *o, int once) {
   int k, r;
-  if (!m_on) return -1;
-  if (down) {
-    if (nt_millis() - down_at < DOWN_MS) return -1;
-    r = attempt(o);
-    if (r == -1) { down_at = nt_millis(); return -1; }
-    down = 0;
+  if (!m->on) return -1;
+  if (m->down) {
+    if (nt_millis() - m->down_at < DOWN_MS) return -1;
+    r = attempt(m, o);
+    if (r == -1) { m->down_at = nt_millis(); return -1; }
+    m->down = 0;
     return r;
   }
   for (k = 0; k < TRIES; k++) {
     if (k) nt_sleep(PAUSE);
-    r = attempt(o);
+    r = attempt(m, o);
     if (r != -1) return r;
     if (once && o->sent) return -1;
   }
-  down = 1; down_at = nt_millis();
+  m->down = 1; m->down_at = nt_millis();
   return -1;
 }
 // a request without payload or data: 0, -2 or -1
-static int simple(const char *req, int once) {
+static int simple(struct mount *m, const char *req, int once) {
   struct op o; memset(&o, 0, sizeof o); o.req = req;
-  return request(&o, once);
+  return request(m, &o, once);
 }
 
 // ---------------------------------------------------------------- names
-int nfs_mounted(void) { return m_on; }
-int nfs_path(const char *abs) { return m_on && !strncmp(abs, NFS_ROOT, 7) && (!abs[7] || abs[7] == '/'); }
-// the remote name for a resolved path under /mnt/fs; -1 if it is too long or holds a line
-// break, which would end the request line and start another one on the server
-static int rname(const char *abs, char *out) {
-  const char *rest = abs + 7;                  // "" or "/x/y"
-  if (strlen(m_dir) + strlen(rest) + 1 > NAME || strpbrk(rest, "\r\n")) return -1;
-  if (!strcmp(m_dir, "/") && *rest) strcpy(out, rest);
-  else { strcpy(out, m_dir); strcat(out, rest); }
+// the mount a resolved path is on (/mnt/name or below it), with *rest the part after /mnt/name
+// ("" or "/x/y"); 0 if it is on none
+static struct mount *mnt_of(const char *abs, const char **rest) {
+  const char *n = abs + 5; int k, i;
+  if (strncmp(abs, "/mnt/", 5)) return 0;
+  for (k = 0; n[k] && n[k] != '/'; k++) {}
+  for (i = 0; i < NFS_MOUNTS; i++)
+    if (mounts[i].on && (int)strlen(mounts[i].name) == k && !strncmp(mounts[i].name, n, k)) {
+      if (rest) *rest = n + k;
+      return &mounts[i];
+    }
   return 0;
 }
-// "VERB name\n", or -1 if it does not fit
-static int req1(char *req, int sz, const char *verb, const char *abs) {
-  char n[NAME];
-  if (rname(abs, n) < 0) return -1;
-  return snprintf(req, sz, "%s %s\n", verb, n) < sz ? 0 : -1;
+int nfs_mounted(void) { int i; for (i = 0; i < NFS_MOUNTS; i++) if (mounts[i].on) return 1; return 0; }
+int nfs_path(const char *abs) { return mnt_of(abs, 0) != 0; }
+int nfs_same(const char *a, const char *b) { struct mount *m = mnt_of(a, 0); return m && m == mnt_of(b, 0); }
+// 1 for a mount's own directory (/mnt/name), which cannot be removed, renamed or written
+static int mroot(const char *abs) { const char *r; return mnt_of(abs, &r) && !*r; }
+// the remote name for a resolved path under a mount, and that mount; 0 if it is on none, too
+// long, or holds a line break, which would end the request line and start another one
+static struct mount *rname(const char *abs, char *out) {
+  const char *rest; struct mount *m = mnt_of(abs, &rest);
+  if (!m || strlen(m->dir) + strlen(rest) + 1 > NAME || strpbrk(rest, "\r\n")) return 0;
+  if (!strcmp(m->dir, "/") && *rest) strcpy(out, rest);
+  else { strcpy(out, m->dir); strcat(out, rest); }
+  return m;
+}
+// "VERB name\n" and its mount, or 0 if it does not fit
+static struct mount *req1(char *req, int sz, const char *verb, const char *abs) {
+  char n[NAME]; struct mount *m = rname(abs, n);
+  if (!m) return 0;
+  return snprintf(req, sz, "%s %s\n", verb, n) < sz ? m : 0;
 }
 
 // ---------------------------------------------------------------- mount
-static int busy(void) {
+static int busy(struct mount *m) {
   int i;
-  for (i = 0; i < NFILES; i++) if (nf_files[i].used) return 1;
-  for (i = 0; i < NDIRS; i++) if (nf_dirs[i].used) return 1;
+  for (i = 0; i < NFILES; i++) if (nf_files[i].used && nf_files[i].mt == m) return 1;
+  for (i = 0; i < NDIRS; i++) if (nf_dirs[i].used && nf_dirs[i].mt == m) return 1;
   return 0;
 }
-int nfs_mount(const char *host, int port, const char *dir, int check) {
+static int good_name(const char *n) {
+  int k = strlen(n), i;
+  if (k < 1 || k > 15 || !strcmp(n, ".") || !strcmp(n, "..")) return 0;
+  for (i = 0; i < k; i++) {
+    char c = n[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) return 0;
+  }
+  return 1;
+}
+int nfs_mountat(const char *name, const char *host, int port, const char *dir, int check) {
+  struct mount *m = 0, old; char req[NAME + 8]; int i, r, k, had;
+  if (!name || !good_name(name)) return -5;
   if (!dir) dir = "/";
-  char oh[64], od[NAME], req[NAME + 8]; int oport = m_port, oon = m_on, r, k;
-  if (busy()) return -3;
-  drop_conn(); down = 0;
-  if (!host || !*host) { m_on = 0; return 0; }
-  if (strlen(host) >= sizeof m_host || strlen(dir) + 2 > NAME) return -1;
-  strcpy(oh, m_host); strcpy(od, m_dir);
-  strcpy(m_host, host); m_port = port;
-  if (dir[0] != '/') { m_dir[0] = '/'; strcpy(m_dir + 1, dir); } else strcpy(m_dir, dir);
-  k = strlen(m_dir); while (k > 1 && m_dir[k - 1] == '/') m_dir[--k] = 0;
-  m_on = 1;
+  for (i = 0; i < NFS_MOUNTS; i++) if (mounts[i].on && !strcmp(mounts[i].name, name)) m = &mounts[i];
+  if (!host || !*host) {                       // unmount
+    if (!m) return -5;
+    if (busy(m)) return -3;
+    drop_conn(m); m->on = 0;
+    return 0;
+  }
+  if (strlen(host) >= sizeof m->host || strlen(dir) + 2 > NAME) return -1;
+  had = m != 0;
+  if (m) {
+    if (busy(m)) return -3;
+    drop_conn(m);
+  } else {
+    for (i = 0; i < NFS_MOUNTS && mounts[i].on; i++) {}
+    if (i == NFS_MOUNTS) return -4;
+    m = &mounts[i];
+  }
+  old = *m;
+  memset(m, 0, sizeof *m);
+  strcpy(m->name, name); strcpy(m->host, host); m->port = port; m->conn = -1;
+  if (dir[0] != '/') { m->dir[0] = '/'; strcpy(m->dir + 1, dir); } else strcpy(m->dir, dir);
+  k = strlen(m->dir); while (k > 1 && m->dir[k - 1] == '/') m->dir[--k] = 0;
+  m->on = 1;
   if (!check) return 0;
-  snprintf(req, sizeof req, "STAT %s\n", m_dir);
-  r = simple(req, 0);
+  snprintf(req, sizeof req, "STAT %s\n", m->dir);
+  r = simple(m, req, 0);
   if (r == 0 && !strcmp(nf_line, "OK d")) return 0;
   r = r == -1 ? -1 : -2;                       // unreachable, or not a directory
-  drop_conn(); down = 0;
-  strcpy(m_host, oh); strcpy(m_dir, od); m_port = oport; m_on = oon;
+  drop_conn(m);
+  if (had) { *m = old; m->conn = -1; m->down = 0; } else m->on = 0;   // the old mount, as it was
   return r;
+}
+int nfs_mount(const char *host, int port, const char *dir, int check) {
+  int r = nfs_mountat("fs", host, port, dir, check);
+  return (!host || !*host) && r == -5 ? 0 : r;   // unmounting /mnt/fs when nothing is there
 }
 
 int nfs_stat(const char *abs, int *size, int *isdir) {
-  char req[NAME + 8];
-  if (req1(req, sizeof req, "STAT", abs) < 0 || simple(req, 0)) return -1;
+  char req[NAME + 8]; struct mount *m = req1(req, sizeof req, "STAT", abs);
+  if (!m || simple(m, req, 0)) return -1;
   *isdir = nf_line[3] == 'd';
   *size = *isdir ? 0 : atoi(nf_line + 5);         // "OK d" or "OK f size"
   return 0;
@@ -220,7 +271,7 @@ static unsigned char *blk_get(struct nfile *f, int i) {
     // fewer bytes than the server had when the file was opened: it shrank there meanwhile,
     // and this block cannot be read (zeros would pass for data)
     k = f->rsize - i * BLK; if (k > BLK) k = BLK;
-    if (request(&o, 0) || o.got < k) { nt_free(p); return 0; }
+    if (request(f->mt, &o, 0) || o.got < k) { nt_free(p); return 0; }
   }
   f->blk[i] = p;
   return p;
@@ -241,20 +292,20 @@ static int save_once(struct nfile *f, const char *tmp) {
   memset(&o, 0, sizeof o); o.req = req;
   if (f->mode == NFS_WRITE || !f->existed) {
     snprintf(req, sizeof req, "TRUNC 0 %s\n", dst);
-    if ((r = attempt(&o))) return r;
+    if ((r = attempt(f->mt, &o))) return r;
   }
   for (i = 0; i * BLK < f->size; i++) {
     if (f->mode == NFS_APPEND && (i >= f->nblk || !f->dirty[i])) continue;
     n = f->size - i * BLK; if (n > BLK) n = BLK;
     snprintf(req, sizeof req, "WRITE %d %d %s\n", i * BLK, n, dst);
     o.data = i < f->nblk && f->blk[i] ? f->blk[i] : zero; o.dlen = n;
-    if ((r = attempt(&o))) return r;
+    if ((r = attempt(f->mt, &o))) return r;
   }
   if (f->mode == NFS_WRITE) {
     snprintf(req, sizeof req, "RENAME %s\n", tmp);
     snprintf(to, sizeof to, "%s\n", f->name);
     o.data = to; o.dlen = strlen(to);
-    if ((r = attempt(&o))) return r;
+    if ((r = attempt(f->mt, &o))) return r;
   }
   return 0;
 }
@@ -271,17 +322,17 @@ static int file_save(struct nfile *f) {
     memcpy(tmp, f->name, b - f->name); tmp[b - f->name] = 0;
     strcat(tmp, "."); strcat(tmp, b); strcat(tmp, ".t2tmp");
   }
-  if (down) {
-    if (nt_millis() - down_at < DOWN_MS) return -1;
+  if (f->mt->down) {
+    if (nt_millis() - f->mt->down_at < DOWN_MS) return -1;
     tries = 1;
   }
   for (k = 0; k < tries; k++) {
-    if (k) { drop_conn(); nt_sleep(PAUSE); }
+    if (k) { drop_conn(f->mt); nt_sleep(PAUSE); }
     r = save_once(f, tmp);
-    if (r == 0) { down = 0; return 0; }
+    if (r == 0) { f->mt->down = 0; return 0; }
     if (r == -2) return -1;                    // the server refused: trying again will not help
   }
-  down = 1; down_at = nt_millis();
+  f->mt->down = 1; f->mt->down_at = nt_millis();
   return -1;
 }
 
@@ -294,7 +345,7 @@ int nfs_open(const char *abs, int mode) {
   if (h == NFILES || strlen(abs) >= sizeof f->abs) return -1;
   f = &nf_files[h];
   memset(f, 0, sizeof *f);
-  if (rname(abs, f->name) < 0) return -1;
+  if (!(f->mt = rname(abs, f->name))) return -1;
   strcpy(f->abs, abs);
   f->mode = mode;
   if (mode == NFS_READ) {
@@ -302,7 +353,7 @@ int nfs_open(const char *abs, int mode) {
     f->isdir = isdir; f->size = f->rsize = size;
   } else {                                     // a file (not a directory) in an existing directory
     char parent[160]; char *sl;
-    if (!strcmp(abs, NFS_ROOT)) return -1;
+    if (mroot(abs)) return -1;
     if (mode == NFS_WRITE && strlen(f->name) + 8 > NAME) return -1;   // no room for its temp name (file_save)
     if (nfs_stat(abs, &size, &isdir) == 0) {
       if (isdir) return -1;
@@ -364,29 +415,30 @@ int nfs_close(int h) {
 }
 
 static int verb(const char *v, const char *abs) {
-  char req[NAME + 8];
-  if (!strcmp(abs, NFS_ROOT) || req1(req, sizeof req, v, abs) < 0) return -1;
-  return simple(req, 0) ? -1 : 0;
+  char req[NAME + 8]; struct mount *m;
+  if (mroot(abs) || !(m = req1(req, sizeof req, v, abs))) return -1;
+  return simple(m, req, 0) ? -1 : 0;
 }
 int nfs_remove(const char *abs) { return verb("RM", abs); }
 int nfs_mkdir(const char *abs) { return verb("MKDIR", abs); }
 int nfs_rmdir(const char *abs) { return verb("RMDIR", abs); }
 int nfs_rename(const char *a, const char *b) {
-  char req[NAME + 10], to[NAME + 2]; struct op o;
-  if (!strcmp(a, NFS_ROOT) || req1(req, sizeof req, "RENAME", a) < 0 || rname(b, to) < 0) return -1;
+  char req[NAME + 10], to[NAME + 2]; struct op o; struct mount *m;
+  if (mroot(a) || mroot(b) || !nfs_same(a, b)) return -1;     // between mounts: the caller copies
+  if (!(m = req1(req, sizeof req, "RENAME", a)) || !rname(b, to)) return -1;
   strcat(to, "\n");
   memset(&o, 0, sizeof o); o.req = req; o.data = to; o.dlen = strlen(to);
-  return request(&o, 1) ? -1 : 0;              // not repeated once sent: it may have happened
+  return request(m, &o, 1) ? -1 : 0;              // not repeated once sent: it may have happened
 }
 
 // ---------------------------------------------------------------- directories
 int nfs_opendir(const char *abs) {
-  char req[NAME + 8]; struct op o; int d;
+  char req[NAME + 8]; struct op o; int d; struct mount *m;
   for (d = 0; d < NDIRS && nf_dirs[d].used; d++) {}
-  if (d == NDIRS || req1(req, sizeof req, "LS", abs) < 0) return -1;
+  if (d == NDIRS || !(m = req1(req, sizeof req, "LS", abs))) return -1;
   memset(&o, 0, sizeof o); o.req = req; o.alloc = 1;
-  if (request(&o, 0)) return -1;
-  nf_dirs[d].used = 1; nf_dirs[d].list = nf_dirs[d].at = o.list;
+  if (request(m, &o, 0)) return -1;
+  nf_dirs[d].used = 1; nf_dirs[d].mt = m; nf_dirs[d].list = nf_dirs[d].at = o.list;
   return d;
 }
 // LS lines are "   <dir>  name/" or "%8d  name"
