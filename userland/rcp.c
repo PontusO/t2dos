@@ -16,12 +16,13 @@ char *base(char *s) {
 
 // remote file -> local file; the byte count, or -1
 int get_file(char *remote, char *local) {
-  char req[220]; int sock; int out; int size;
+  char req[220]; int sock; int out; int size; int n;
   sock = net_open(net_host); if (sock < 0) return -1;
   sprintf(req, "GET %s\n", remote);
   size = net_request(sock, req); if (size < 0) { close(sock); return -1; }
   out = open(local, OPEN_WRITE); if (out < 0) { printf("rcp: cannot write %s\n", local); close(sock); return -1; }
-  if (net_recv_to(sock, out, size) < 0) { close(out); close(sock); return -1; }
+  n = net_recv_to(sock, out, size);
+  if (n < 0) { if (n == -2) printf("cannot write %s\n", local); close(out); close(sock); return -1; }
   close(out); close(sock);
   printf("%s: %d bytes\n", local, size);
   return size;

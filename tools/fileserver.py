@@ -21,8 +21,10 @@ def readline(c):
 
 def handle(c, addr):
     try:
-        req = readline(c).split(" ", 2)
+        req = readline(c).split(" ", 1)          # names may hold spaces: split off the command,
         cmd = req[0].upper() if req else ""
+        if cmd == "PUT" and len(req) == 2 and " " in req[1]:
+            req = [req[0]] + req[1].rsplit(" ", 1)   # and for PUT the size from the end
         if cmd == "GET" and len(req) >= 2:
             data = open(safe(req[1]), "rb").read()
             c.sendall(f"OK {len(data)}\n".encode() + data)

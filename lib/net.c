@@ -46,14 +46,16 @@ int net_request(int fd, char *req) {
   return net_line[2] == ' ' ? atoi(net_line + 3) : 0;
 }
 
-// receive exactly size bytes into fd (a file fd or 1 for the console)
+// receive exactly size bytes into fd (a file fd or 1 for the console); the size, -1 if the
+// transfer stalls (message printed), -2 if writing to out fails (the caller names the file)
 int net_recv_to(int sock, int out, int size) {
   char buf[1024]; int got; int n;
   got = 0;
   while (got < size) {
     n = recv(sock, buf, size - got > 1024 ? 1024 : size - got, 10000);
     if (n <= 0) { printf("\ntransfer stalled after %d bytes\n", got); return -1; }
-    write(out, buf, n); got += n;
+    if (write(out, buf, n) != n) return -2;
+    got += n;
   }
   return got;
 }
