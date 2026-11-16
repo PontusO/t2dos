@@ -174,7 +174,8 @@ static int sock_recv(int fd, char *buf, int n, int timeout) {
   return c->read((uint8_t *)buf, n);
 }
 static int sock_send(int fd, const char *buf, int n) { WiFiClient *c = sock_of(fd); if (!c || !c->connected()) return -1; int w = c->write((const uint8_t *)buf, n); return w > 0 ? w : -1; }
-static void sock_close(int fd) { WiFiClient *c = sock_of(fd); if (c) { c->stop(); sock_used[fd - SOCK_FD] = false; } }
+static uint32_t sock_closed_at;          // millis() of the last close, see SYS_connect
+static void sock_close(int fd) { WiFiClient *c = sock_of(fd); if (c) { c->stop(); sock_used[fd - SOCK_FD] = false; sock_closed_at = millis(); } }
 
 static const char *resolve(const char *in, char *out, int outsz) {
   char tmp[256];
@@ -569,7 +570,11 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_wifi_saved: { char s[33]; int r = wifi_load(s, nullptr); if (r == 1) strlcpy((char *)A(0), s, A(1)); return r; }
     case SYS_net_status: { int st = WiFi.status(); return st == WL_CONNECTED ? NET_UP : st == WL_IDLE_STATUS ? NET_CONNECTING : NET_DOWN; }
     case SYS_net_ip: strlcpy(ipbuf, WiFi.localIP().toString().c_str(), sizeof ipbuf); return (int)ipbuf;
-    case SYS_connect: { int i = sock_alloc(); if (i < 0) return -1;
+    case SYS_connect: {
+      // a connect within a few ms of a normal close misses its "connected" callback in
+      // arduino-pico 6.3.2 (ESP-Hosted) and only returns at the 5 s timeout: keep 10 ms apart
+      while (millis() - sock_closed_at < 10) delay(1);
+      int i = sock_alloc(); if (i < 0) return -1;
       if (!socks[i].connect((const char *)A(0), A(1))) { sock_used[i] = false; return -1; }
       return SOCK_FD + i; }
     case SYS_send: return sock_send(A(0), (const char *)A(1), A(2));
