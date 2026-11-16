@@ -2373,7 +2373,8 @@ described in [Named pipes](#named-pipes).
 ### Network protocol
 
 `fileserver.py` handles one request per connection: `GET name`,
-`PUT name size` followed by the bytes, or `LS [dir]`. It answers
+`PUT name size` followed by the bytes, `LS [dir]` or `MKDIR name` (also
+answered `OK` when the directory exists). It answers
 `OK [size]` and the data, or `ERR text`. Names are relative to the served
 directory, and a leading `/` is ignored. Socket fds start at 100. The
 board keeps the default server and the remote directory in `/etc/remote`

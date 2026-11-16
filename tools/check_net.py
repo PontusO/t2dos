@@ -47,7 +47,7 @@ STEPS = [
 ]
 FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n'}
 SERVER_FILES = {'projects/s.txt': b'sent\n', 'up.txt': b'sent\n'}
-ESCAPES = ['GET ../srv2/secret', 'GET /../srv2/secret', 'LS ..', 'PUT ../srv2/x 1']
+ESCAPES = ['GET ../srv2/secret', 'GET /../srv2/secret', 'LS ..', 'PUT ../srv2/x 1', 'MKDIR ../srv2/d']
 
 
 def content(path):
@@ -95,6 +95,11 @@ def main(argv):
             reply = s.recv(100); s.close()
             if reply != b'ERR outside root\n': bad += 1; print('FAIL %s: %r' % (req, reply))
         if os.path.exists(os.path.join(WORK, 'srv2', 'x')): bad += 1; print('FAIL PUT wrote outside the root')
+        for _ in range(2):                     # MKDIR, also of a directory that exists
+            s = socket.create_connection(('127.0.0.1', port), 5)
+            s.sendall(b'MKDIR projects/new\n'); reply = s.recv(100); s.close()
+            if reply != b'OK\n': bad += 1; print('FAIL MKDIR projects/new: %r' % reply)
+        if not os.path.isdir(os.path.join(SRV, 'projects', 'new')): bad += 1; print('FAIL MKDIR made no directory')
     finally:
         server.kill()
     if bad: print('%d failed' % bad); return 1

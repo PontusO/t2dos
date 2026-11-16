@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tiny file server for T2DOS get/send/rls.  Usage: fileserver.py [dir] [port]
-One request per connection:  GET name | PUT name size (+bytes) | LS [dir]"""
+"""Tiny file server for T2DOS get/send/rls/rcp.  Usage: fileserver.py [dir] [port]
+One request per connection:  GET name | PUT name size (+bytes) | LS [dir] | MKDIR name"""
 import os, socket, sys, threading
 
 ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
@@ -36,6 +36,10 @@ def handle(c, addr):
             open(safe(req[1]), "wb").write(got)
             c.sendall(b"OK\n")
             print(f"{addr[0]} PUT {req[1]} {size}")
+        elif cmd == "MKDIR" and len(req) >= 2:
+            os.makedirs(safe(req[1]), exist_ok=True)
+            c.sendall(b"OK\n")
+            print(f"{addr[0]} MKDIR {req[1]}")
         elif cmd == "LS":
             d = safe(req[1]) if len(req) >= 2 and req[1] else ROOT
             lines = []

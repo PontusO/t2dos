@@ -3,6 +3,7 @@
 //   GET name\n            -> OK size\n + size bytes   |  ERR text\n
 //   PUT name size\n + bytes -> OK\n                    |  ERR text\n
 //   LS [dir]\n            -> OK size\n + listing text
+//   MKDIR name\n          -> OK\n (also when it exists)  |  ERR text\n
 // Names are relative to the server's root directory.  /etc/remote keeps a default server
 // (line 1, host[:port], set by wifi -s or rcd) and the remote directory (line 2, set by rcd).
 char net_line[128];
