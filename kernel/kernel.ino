@@ -17,6 +17,8 @@
 #include "sys.h"
 #include "vault.h"
 #include "ramfs.h"
+#include "netfs.h"
+#include "netfs_fs.h"
 #include <hardware/irq.h>
 #include <hardware/structs/timer.h>
 
@@ -104,7 +106,10 @@ static FS *fsys = &SDFS;
 // resolved path.  A RAM file may use PSRAM down to TMP_MARGIN free, the rest is for programs.
 #define TMP_MARGIN (1024 * 1024)
 static FS *tmpfs;
+// /mnt/fs is the network filesystem (netfs.c, netfs.cpp) while one is mounted
+static FS *netfs;
 static FS *fs_for(const char *path) {
+  if (netfs && nfs_path(path)) return netfs;
   return tmpfs && !strncmp(path, "/tmp", 4) && (!path[4] || path[4] == '/') ? tmpfs : fsys;
 }
 
@@ -176,6 +181,58 @@ static int sock_recv(int fd, char *buf, int n, int timeout) {
 static int sock_send(int fd, const char *buf, int n) { WiFiClient *c = sock_of(fd); if (!c || !c->connected()) return -1; int w = c->write((const uint8_t *)buf, n); return w > 0 ? w : -1; }
 static uint32_t sock_closed_at;          // millis() of the last close, see SYS_connect
 static void sock_close(int fd) { WiFiClient *c = sock_of(fd); if (c) { c->stop(); sock_used[fd - SOCK_FD] = false; sock_closed_at = millis(); } }
+
+// The network filesystem's transport (see netfs.h): its own connection, outside the programs'
+// socket table.  These run inside syscalls, so they wait with delay(), never k_wait(): no task
+// switch inside a WiFi call.  The cache's blocks come from PSRAM and stop at TMP_MARGIN free.
+static WiFiClient nt_client;
+extern "C" int nt_connect(const char *host, int port, int timeout_ms) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  while (millis() - sock_closed_at < 10) delay(1);   // see SYS_connect
+  nt_client.setTimeout(timeout_ms);                  // name lookup and connect
+  if (!nt_client.connect(host, port)) { nt_client.stop(); sock_closed_at = millis(); return -1; }
+  nt_client.setNoDelay(true);
+  return 0;
+}
+extern "C" int nt_send(int, const void *b, int n) {
+  int done = 0;
+  while (done < n) {
+    if (!nt_client.connected()) return -1;
+    int w = nt_client.write((const uint8_t *)b + done, n - done);
+    if (w <= 0) return -1;
+    done += w;
+  }
+  return n;
+}
+extern "C" int nt_recv(int, void *b, int n, int timeout_ms) {
+  uint32_t t0 = millis();
+  while (!nt_client.available()) {
+    if (!nt_client.connected() || (int)(millis() - t0) >= timeout_ms) return -1;
+    delay(1);
+  }
+  int r = nt_client.read((uint8_t *)b, n);
+  return r > 0 ? r : -1;
+}
+extern "C" void nt_close(int) { nt_client.stop(); sock_closed_at = millis(); }
+extern "C" unsigned nt_millis(void) { return millis(); }
+extern "C" void nt_sleep(int ms) { delay(ms); }
+extern "C" void *nt_alloc(int n) {
+#if defined(PICO_RP2350)
+  if (rp2040.getPSRAMSize() > 0) return rp2040.getFreePSRAMHeap() >= TMP_MARGIN + (size_t)n ? pmalloc(n) : nullptr;
+#endif
+  return rp2040.getFreeHeap() >= 65536 + n ? malloc(n) : nullptr;
+}
+extern "C" void nt_free(void *p) { free(p); }
+// mounts what /etc/mount names (host[:port], then the remote dir), without asking the server
+static void netfs_boot() {
+  File f = fsys->open("/etc/mount", "r"); if (!f) return;
+  char buf[300]; int n = f.read((uint8_t *)buf, sizeof buf - 1); f.close();
+  buf[n > 0 ? n : 0] = 0;
+  char *nl = strchr(buf, '\n'); if (!nl) return; *nl = 0;
+  char *dir = nl + 1; char *e = strchr(dir, '\n'); if (e) *e = 0;
+  int port = 7777; char *c = strchr(buf, ':'); if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
+  nfs_mount(buf, port, *dir ? dir : "/", 0);
+}
 
 static const char *resolve(const char *in, char *out, int outsz) {
   char tmp[256];
@@ -363,7 +420,8 @@ static int k_rename(const char *a, const char *b) {
   File out = fb->open(b, "w"); if (!out) { in.close(); return -1; }
   uint8_t buf[512]; int k; bool ok = true;       // SRAM: PSRAM is never read while flash is written
   while ((k = in.read(buf, sizeof buf)) > 0) if ((int)out.write(buf, k) != k) { ok = false; break; }
-  in.close(); out.close();
+  in.close(); netfs_close_result = 0; out.close();      // a /mnt/fs save can fail at close
+  if (netfs_close_result < 0) ok = false;
   if (!ok || k < 0) { fb->remove(b); return -1; }
   return fa->remove(a) ? 0 : -1;
 }
@@ -523,7 +581,9 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_open: return k_open((const char *)A(0), A(1));
     case SYS_close: { int fd = A(0);
       if (is_pipe_fd(fd)) { int e = pfd_entry(fd); if (e >= 0) pipe_close(e, true); return 0; }
-      if (fd >= SOCK_FD) { sock_close(fd); return 0; } if (fd >= 2 && fd < MAX_FD && fds[fd]) { fds[fd].close(); fds[fd] = File(); } return 0; }
+      if (fd >= SOCK_FD) { sock_close(fd); return 0; }
+      // a /mnt/fs file is saved here, and that can fail (netfs.cpp); other files give 0
+      if (fd >= 2 && fd < MAX_FD && fds[fd]) { netfs_close_result = 0; fds[fd].close(); fds[fd] = File(); return netfs_close_result; } return 0; }
     case SYS_read: return k_read(A(0), (char *)A(1), A(2));
     case SYS_write: return k_write(A(0), (const char *)A(1), A(2));
     case SYS_seek: { int fd = A(0); if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
@@ -544,10 +604,14 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_readdir: { int d = A(0); if (d < 0 || d >= MAX_DIR || !dir_used[d]) return 0;
       if (!dirs[d].next()) return 0;
       dirent_t *e = (dirent_t *)A(1); strlcpy(e->name, dirs[d].fileName().c_str(), sizeof e->name); e->size = dirs[d].fileSize(); e->isdir = dirs[d].isDirectory(); return 1; }
-    case SYS_closedir: { int d = A(0); if (d >= 0 && d < MAX_DIR) dir_used[d] = false; return 0; }
+    case SYS_closedir: { int d = A(0); if (d >= 0 && d < MAX_DIR) { dir_used[d] = false; dirs[d] = Dir(); } return 0; }   // frees a /mnt/fs listing now
     case SYS_chdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1; strlcpy(cwd, path, sizeof cwd); return 0; }
     case SYS_getcwd: strlcpy((char *)A(0), cwd, A(1)); return A(0);
     case SYS_mkpipe: return k_mkpipe((const char *)A(0));
+    case SYS_mount: { const char *h = (const char *)A(0);
+      int r = nfs_mount(h, A(1), (const char *)A(2), 1);
+      if (r == 0 && *h) { if (!is_dir("/mnt")) fsys->mkdir("/mnt"); if (!fsys->exists("/mnt/fs")) fsys->mkdir("/mnt/fs"); }   // so ls / shows it
+      return r; }
     // ---- memory and strings
     case SYS_malloc: return (int)u_malloc(A(0));
     case SYS_free: u_free((void *)A(0)); return 0;
@@ -899,7 +963,7 @@ static void task_end(int code) {
   t->code = t->data = t->stack = nullptr;
   for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self) { fds[i].close(); fds[i] = File(); }
   for (int i = 0; i < MAX_SOCK; i++) if (sock_used[i] && sock_owner[i] == self) sock_close(SOCK_FD + i);
-  for (int i = 0; i < MAX_DIR; i++) if (dir_used[i] && dir_owner[i] == self) dir_used[i] = false;
+  for (int i = 0; i < MAX_DIR; i++) if (dir_used[i] && dir_owner[i] == self) { dir_used[i] = false; dirs[i] = Dir(); }
   if (server && server_owner == self) { server->stop(); delete server; server = nullptr; }
   pipes_release(self, -1);               // all levels: it may have been killed deep inside
   t->exit_code = code;
@@ -1040,6 +1104,8 @@ void setup() {
   if (mounted && !is_dir("/bin")) fsys->mkdir("/bin");
   tmpfs = ramfs_begin(TMP_MARGIN);     // nullptr without PSRAM: /tmp stays on fsys
   if (mounted && tmpfs && !fsys->exists("/tmp")) fsys->mkdir("/tmp");   // so ls / shows it
+  netfs = netfs_begin();
+  if (mounted) netfs_boot();         // connects on first use, so no network is needed yet
   preempt_start();
   vault_boot();
   char ssid[33], pass[64];          // join the saved network, without waiting for it

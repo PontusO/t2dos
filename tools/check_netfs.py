@@ -2,6 +2,9 @@
 """Check the network filesystem (/mnt/fs) and fileserver.py's session mode.
 
   check_netfs.py --pc    (needs `make` and `make host`)
+  check_netfs.py --board --server PCADDR:PORT
+                         (the board, on tools/board.py's port, with the new kernel and tools;
+                          starts fileserver.py on PORT; PCADDR is this PC as the board sees it)
 
 Starts tools/fileserver.py on a random local port with a fresh root under
 build/s/netfs/srv. Sends raw session requests and checks the replies, then runs
@@ -312,7 +315,85 @@ def run_steps(port, proxy):
         fail('the append did not write in place')
 
 
+BSRV = os.path.join(WORK, 'bsrv')
+MAIN_C = '#include "util.h"\nint main() { greet(); return 0; }\n'
+UTIL_H = 'int greet() { printf("hello from util\\n"); return 0; }\n'
+# (command, expected output lines); SERVER is the --server address
+BOARD_STEPS = [
+    ('umount', []),
+    ('mount SERVER', ['SERVER /']),
+    ('mount', ['SERVER /']),
+    ('ls /mnt/fs', ['   10000  big.bin', '   <dir>  prog/', '   <dir>  projects/', '       4  top.txt', '2 files, 10004 bytes']),
+    ('ls /', None),                            # checked below: shows mnt/
+    ('cat /mnt/fs/top.txt', ['top']),
+    ('cp /mnt/fs/big.bin /tmp/b.bin', []),
+    ('cmp /mnt/fs/big.bin /tmp/b.bin', []),
+    ('cp /tmp/b.bin /mnt/fs/up.bin', []),
+    ('mv /mnt/fs/up.bin /mnt/fs/up2.bin', []),
+    ('cmp /mnt/fs/up2.bin /tmp/b.bin', []),
+    ('mkdir /mnt/fs/nd', []),
+    ('rmdir /mnt/fs/nd', []),
+    ('echo more >> /mnt/fs/app.txt', []),
+    ('echo again >> /mnt/fs/app.txt', []),
+    ('cat /mnt/fs/app.txt', ['more', 'again']),
+    ('cd /mnt/fs/prog', []),
+    ('pwd', ['/mnt/fs/prog']),
+    ('cc -o main.bin main.c', []),
+    ('main.bin', ['hello from util']),
+    ('cd /projects', None),                    # may not exist: only leaves /mnt/fs
+    ('cd /', []),
+    ('mkdir /nfsprog', None),
+    ('cp /mnt/fs/prog/main.c /nfsprog/main.c', []),
+    ('cp /mnt/fs/prog/util.h /nfsprog/util.h', []),
+    ('cd /nfsprog', []),
+    ('cc -o main.bin main.c', []),
+    ('main.bin', ['hello from util']),
+    ('cd /', []),
+    ('umount', []),
+    ('mount', ['nothing mounted']),
+]
+
+
+def board_main(argv):
+    sys.path.insert(0, os.path.join(ROOT, 'tools'))
+    import board
+    server = argv[argv.index('--server') + 1]
+    port = int(server.rsplit(':', 1)[1])
+    shutil.rmtree(BSRV, ignore_errors=True)
+    os.makedirs(os.path.join(BSRV, 'projects', 'game')); os.makedirs(os.path.join(BSRV, 'prog'))
+    open(os.path.join(BSRV, 'top.txt'), 'w').write('top\n')
+    open(os.path.join(BSRV, 'big.bin'), 'wb').write(BIG)
+    open(os.path.join(BSRV, 'prog', 'main.c'), 'w').write(MAIN_C)
+    open(os.path.join(BSRV, 'prog', 'util.h'), 'w').write(UTIL_H)
+    srv = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), BSRV, str(port)],
+                           stdout=open(os.path.join(WORK, 'bsrv.log'), 'w'), stderr=subprocess.STDOUT)
+    times = {}
+    try:
+        time.sleep(1)
+        b = board.Board()
+        for cmd, want in BOARD_STEPS:
+            t0 = time.time()
+            got = b.run(cmd.replace('SERVER', server), 120.0)
+            times.setdefault(cmd, []).append(time.time() - t0)
+            if cmd == 'ls /' and '   <dir>  mnt/' not in got: fail('ls / has no mnt/: %r' % got)
+            if want is not None and got != [w.replace('SERVER', server) for w in want]:
+                fail('%s: %r' % (cmd, got))
+    finally:
+        srv.kill()
+    for name, data in [('up2.bin', BIG), ('app.txt', b'more\nagain\n')]:
+        try: got = open(os.path.join(BSRV, name), 'rb').read()
+        except OSError: got = None
+        if got != data: fail('server file %s' % name)
+    cc = times.get('cc -o main.bin main.c', [])
+    if len(cc) == 2: print('cc from /mnt/fs: %.1f s, from the SD card: %.1f s (wall clock over the serial console)' % tuple(cc))
+    if bad: print('%d failed' % bad); return 1
+    print('ok: %d board steps' % len(BOARD_STEPS))
+    return 0
+
+
 def main(argv):
+    if '--board' in argv and '--server' in argv:
+        return board_main(argv)
     if '--pc' not in argv:
         print(__doc__); return 2
     shutil.rmtree(WORK, ignore_errors=True)

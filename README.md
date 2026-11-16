@@ -944,6 +944,46 @@ resolve.
 ping: cannot resolve nosuch.local
 ```
 
+#### mount
+
+```
+mount [host[:port] [dir]]
+umount
+```
+
+Shows directory `dir` (default `/`) of the PC's `fileserver.py` at
+`/mnt/fs`, so every program works on the PC's files directly: `cd`, `ls`,
+`cat`, `cp`, `edit`, `cc`, and running a `.bin` from there. `mount` alone
+shows the current mount; `umount` removes it (not while a file under
+`/mnt/fs` is open). The setting is kept in `/etc/mount` and comes back at
+boot.
+
+```
+/> mount pc.local projects
+pc.local /projects
+/> cd /mnt/fs/game
+/mnt/fs/game> edit main.c
+/mnt/fs/game> cc -o game.bin main.c
+/mnt/fs/game> game.bin
+```
+
+How it behaves:
+
+- One connection carries all requests and is opened on first use, so the
+  board boots fine with the PC off.
+- An open file keeps the 4 KB blocks it has read or written in PSRAM;
+  changes go to the PC when the file is closed. A file written from the
+  start is saved under a temporary name (`.name.t2tmp`) and then renamed, so
+  a save that breaks off leaves the old file on the PC. A failed save is
+  tried 3 times; after that `close()` fails and `cp`, `edit`, the shell and
+  the compiler tools report it.
+- The board waits while a request travels (about 15-30 ms each). When the PC
+  cannot be reached, the first call fails after about 6 s; then calls under
+  `/mnt/fs` fail at once until 10 s have passed (one new try) or `mount` is
+  run again.
+- Changes made on the PC show up the next time a file is opened. When the
+  PC and the board change the same file, the last save wins.
+
 #### nc
 
 ```
@@ -2427,10 +2467,26 @@ described in [Named pipes](#named-pipes).
 `PUT name size` followed by the bytes, `LS [dir]` or `MKDIR name` (also
 answered `OK` when the directory exists). It answers
 `OK [size]` and the data, or `ERR text`. Names are relative to the served
-directory, and a leading `/` is ignored. Socket fds start at 100. The
+directory, and a leading `/` is ignored. Socket fds start at 100.
+
+A connection that starts with the line `SESSION` (answered `OK`) carries
+many requests until the client closes it; the network filesystem uses it.
+Numbers come before the name, so names may contain spaces:
+
+```
+STAT name                   -> OK f size | OK d | ERR text
+READ offset length name     -> OK n, then n bytes (fewer than length only at the end)
+WRITE offset length name    (then length bytes) -> OK  (creates the file)
+TRUNC size name             -> OK  (creates the file)
+LS name, MKDIR name, RM name, RMDIR name -> as above, OK or ERR text
+RENAME name                 (then a line with the new name) -> OK, replaces it
+```
+
+`READ` and `WRITE` move at most 4096 bytes. The
 board keeps the default server and the remote directory in `/etc/remote`
 (two lines: `host[:port]` and the directory), which `wifi -s` and `rcd`
-write.
+write. `/etc/mount` (the same two lines) is the network filesystem's
+server and directory, written by `mount`.
 
 ### File formats
 
@@ -2453,6 +2509,8 @@ write.
 sys.h             the system call ABI, shared by the kernel, the compiler and programs
 kernel/kernel.ino the kernel (arduino-pico; SD card on SPI, LittleFS fallback)
 kernel/ramfs.cpp  /tmp in PSRAM; vault.cpp seals the saved WiFi password
+kernel/netfs.c    the network filesystem at /mnt/fs (also used by host_linux.c);
+                  netfs.cpp makes it an arduino-pico filesystem
 compiler/cc.c     the compiler and driver; compiler/tests/ has the language tests
 assembler/as.c    the assembler
 linker/ld.c       the linker
@@ -2462,9 +2520,9 @@ basic/            the BASIC interpreter (several files; pcsys.c is the shim for 
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
                   write, edit, blink, reboot, wifi, get, send, rls, rcd, rcp, ping, nc,
-                  demosrv
-tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
-                  programs for the background job checks
+                  mount, umount, demosrv
+tests/            assembler, linker, object and toolchain tests; tests/jobs/ and
+                  tests/netfs/ have the programs for the job and /mnt/fs checks
 tools/            board.py (board access), fileserver.py, the check scripts
 host_linux.c      the kernel's system calls on Linux, to run programs under qemu-arm
 root/             the filesystem image that make fills: /bin, /lib, /src
@@ -2504,6 +2562,11 @@ compiler/cc -I root/lib -o hello.bin hello.c
 - `tools/check_net.py --pc`: `wifi -s`, `rcd`, `rls`, `get` and `send` under
   qemu against a local `fileserver.py`, plus requests that try to leave the
   served directory.
+- `tools/check_netfs.py --pc`: the file server's session requests, then
+  `/mnt/fs` under qemu: reading, writing, saves, renames, and a proxy that
+  drops or cuts connections to check the retries and the down state.
+  `--board --server PCADDR:PORT` runs the board part against a file server
+  it starts on this PC.
 
 With the board connected (and no `screen` on the port):
 
