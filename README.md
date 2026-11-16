@@ -774,8 +774,8 @@ wifi
 ```
 
 Joins a network (15 s timeout), or shows the status. `-s` saves the default
-file server (see below) in `/etc/remote`, so `rls`, `get`, `send` and `rcd`
-can be used without a host. The port defaults to 7777.
+file server (see below) in `/etc/remote`, so `rls`, `get`, `send`, `rcd` and
+`rcp` can be used without a host. The port defaults to 7777.
 
 `-k` also saves the network, once the join worked, in `/etc/wifi`. The kernel
 then joins it by itself at every boot, without waiting for it (`wifi` shows
@@ -808,7 +808,7 @@ protection should keep the key in a secure element (such as an ATECC608);
 
 #### The PC file server
 
-`rls`, `get`, `send` and `rcd` talk to `tools/fileserver.py` on the PC, which
+`rls`, `get`, `send`, `rcd` and `rcp` talk to `tools/fileserver.py` on the PC, which
 serves one directory (default port 7777) and refuses names outside it:
 
 ```sh
@@ -891,6 +891,57 @@ default remote name is the local file's name without its directory.
 /src> send hello.c
 /src> send hello.bin builds/hello.bin
 /src> send 192.168.1.10 hello.c
+```
+
+#### rcp
+
+```
+rcp [-r] src dst
+```
+
+Copies a file, or with `-r` a whole directory tree, between the board and the
+server. One side is local and the other is remote; a remote side contains a
+`:`:
+
+- `:path` uses the saved server, relative to the remote directory set with
+  `rcd`.
+- `host:path` uses another server on port 7777, and `host:port:path` gives
+  the port. The path starts at the served directory (`/`).
+
+As with `cp`, if the destination is an existing directory the source is
+copied into it under its own name; otherwise the destination is the new
+name. Directories are made as needed and existing files are overwritten;
+nothing is deleted. Each file is shown as it is copied, and `-r` ends with
+the totals. The first error stops the copy (exit code 1).
+
+```
+/src> rcp -r :projects/game /src/game     the remote tree becomes /src/game
+/src> rcp -r /src/game pc.local:backup     the local tree goes to backup/ on pc.local
+/src> rcp hello.c :                        one file into the remote directory
+/src> rcp pc.local:7778:notes.txt /tmp     a server on port 7778
+```
+
+Without `-r`, a directory is refused: `rcp: game: is a directory, use -r`.
+
+#### ping
+
+```
+ping host [-c count]
+```
+
+Sends `count` echo requests (default 4), one a second, and shows each round
+trip, then a summary. The host can be a numeric address, a `.local` name or
+a DNS name; the address it resolved to is shown. A reply has 1 s to arrive.
+The exit code is 0 if any reply came, 1 if none did or the name does not
+resolve.
+
+```
+/> ping -c 2 pc.local
+192.168.1.10: 12 ms
+192.168.1.10: 9 ms
+2 sent, 2 received
+/> ping nosuch.local
+ping: cannot resolve nosuch.local
 ```
 
 #### nc
@@ -2410,7 +2461,8 @@ lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
 basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
-                  write, edit, blink, reboot, wifi, get, send, rls, rcd, nc, demosrv
+                  write, edit, blink, reboot, wifi, get, send, rls, rcd, rcp, ping, nc,
+                  demosrv
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ has the
                   programs for the background job checks
 tools/            board.py (board access), fileserver.py, the check scripts
