@@ -4,7 +4,8 @@
 The test programs are tests/jobs/*.c: tick (prints "tick K" with sleep() between, returns 7),
 exectick (`exectick DIR`: chdir DIR, print "exectick cwd DIR", then exec `tick 0 600000`, which never ticks during the test),
 hog (getchar() forever), spin (`spin N [WANT]`: N rounds of integer and float work with no
-syscalls, 0 = forever; exit 1 if the result is WANT, else 2), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
+syscalls, 0 = forever; exit 1 if the result is WANT, else 2; always built with -O, so its float
+locals live in s16-s31 and preemption must keep them), listener (listen(port), then sleeps forever) and spawner (the foreground driver: `spawner CASE` prints one
 "ok ..."/"FAIL ..." line per check, then PASS or FAIL, and leaves the job table empty).
 The pipe cases use pecho (`pecho NAME` makes /pipe/NAME and /pipe/NAME.out and answers each
 message uppercased; "quit" answers "BYE" and exits 3) and pclient (`pclient CASE [NAME [TEXT]]`,
@@ -12,6 +13,7 @@ the pipe driver, same output style; `start` spawns pecho, `finish` makes it quit
 
   check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
                           compiler/cc (PC only, no board); OPT=-O in the environment adds -O
+                          (spin and fexec always get -O)
   check_jobs.py --board   --build, upload the programs to /src/jobs/ and sh.bin to /bin/,
                           record `free`, run every case, then `free` must show the same
                           free PSRAM as before the first case
@@ -82,6 +84,9 @@ Cases (spawner CASE on the board):
                       foreground (pwd is still /src/jobs); kill 1 while the job is one exec level
                       down (in tick's sleep) reports [1] done exectick (exit -9), and free PSRAM
                       equals the value before the spawn
+  fexec               fexec (always built with -O, which keeps float locals in s16-s31) execs
+                      itself; the child changes s16-s18 and ends by exit() from inside a
+                      function: the child's exit is 5 and the parent's floats are unchanged
   ctrl_c_pipe         with pecho p1 running, `cat /pipe/p1.out` blocks (no request); a Ctrl-C
                       byte ends the read, the prompt comes back and the board still answers;
                       then the same with a CR typed before the Ctrl-C (the CR is kept and
@@ -101,7 +106,8 @@ JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
 CC = os.path.join(ROOT, 'compiler', 'cc')
-PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick', 'spin']
+PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick', 'spin', 'fexec']
+OPT_ALWAYS = {'fexec': ['-O'], 'spin': ['-O']}
 SRCS = {'demosrv': os.path.join(ROOT, 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
@@ -121,7 +127,8 @@ def build():
     os.makedirs(WORK, exist_ok=True)
     jobs = [(os.path.join(WORK, p + '.bin'), SRCS.get(p, os.path.join(JOBS, p + '.c'))) for p in PROGS]
     for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'userland', 'sh.c'))]:
-        r = subprocess.run([CC] + os.environ.get('OPT', '').split() + ['-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
+        opt = OPT_ALWAYS.get(os.path.basename(out)[:-4], os.environ.get('OPT', '').split())
+        r = subprocess.run([CC] + opt + ['-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
         if r.returncode != 0 or r.stdout or r.stderr:
             return fail('cc %s: exit %d, %r' % (os.path.relpath(src, ROOT), r.returncode, r.stdout + r.stderr))
     print('ok: built %s and root/bin/sh.bin' % ', '.join(p + '.bin' for p in PROGS))
@@ -199,6 +206,16 @@ def run_typing(r, cmd, wait_for, text, wait=30.0):
     if not typed:
         out.append('(the script never saw %r, so it typed nothing)' % wait_for)
     return out, code
+
+
+def case_fexec(r):
+    out, code = r.run(REMOTE + '/fexec.bin', 30.0)
+    if code != 0 or not out or out[-1] != 'PASS':
+        fail('fexec: exit %d, output:' % code)
+        for l in out:
+            print('    ' + l)
+        return False
+    return True
 
 
 def case_spawn_basic(r):
@@ -687,6 +704,7 @@ CASES = [('spawn_basic', case_spawn_basic), ('spawn_errors', case_spawn_errors),
          ('demosrv_pipe', case_demosrv_pipe), ('demosrv_kill', case_demosrv_kill),
          ('demosrv_tcp', case_demosrv_tcp),
          ('sh_script_spawn', case_sh_script_spawn), ('job_exec_kill', case_job_exec_kill),
+         ('fexec', case_fexec),
          ('ctrl_c_pipe', case_ctrl_c_pipe)]   # last: on a kernel without it the board stays blocked
 
 

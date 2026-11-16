@@ -5,6 +5,8 @@ CLI:
   board.py put LOCAL REMOTE
   board.py run 'COMMAND' [WAIT_SECONDS]
   board.py fetch REMOTE LOCAL
+  board.py expect TEST.c [CCFLAGS]   compare the board's run with gcc's (expect_gcc); a float
+                                     test gets gcc -fsingle-precision-constant
 Port: $T2DOS_PORT, else the first /dev/serial/by-id/ entry of an iLabs RP2350 board (CPico 2350 or
 Challenger 2350).
 """
@@ -122,21 +124,22 @@ class Board:
                 f.write(data)
         return data
 
-    def expect_gcc(self, test_c, flags=''):
+    def expect_gcc(self, test_c, flags='', ccflags='', gccflags=''):
         """Compare the board's run of test_c (built by compiler/cc -S, as and ld) with a native
-        gcc run; flags (e.g. -D NAME=1) go to both compilers. Trailing white space is ignored."""
+        gcc run; flags (e.g. -D NAME=1) go to both compilers, ccflags (e.g. -O) only to cc and
+        gccflags only to gcc. Trailing white space is ignored."""
         name = os.path.splitext(os.path.basename(test_c))[0]
         bdir = os.path.join(ROOT, 'build', 'expect')
         os.makedirs(bdir, exist_ok=True)
         native = os.path.join(bdir, name + '.native')
-        subprocess.run(['gcc', '-w'] + flags.split() + ['-o', native, test_c, '-lm'], check=True)
+        subprocess.run(['gcc', '-w'] + flags.split() + gccflags.split() + ['-o', native, test_c, '-lm'], check=True)
         want = [l.rstrip() for l in subprocess.run([native], capture_output=True, text=True).stdout.split('\n')]
         while want and not want[-1]:
             want.pop()
         binp = os.path.join(bdir, name + '.bin')
         asm = os.path.join(bdir, name + '.s')
         obj = os.path.join(bdir, name + '.o')
-        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data'] + flags.split() + ['-o', asm, test_c], check=True)
+        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data'] + flags.split() + ccflags.split() + ['-o', asm, test_c], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', obj, asm], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'ld'), '-o', binp, obj], check=True)
         self.put(binp, '/src/%s.bin' % name)
@@ -158,6 +161,10 @@ def main(argv):
                 print(l)
         elif len(argv) >= 4 and argv[1] == 'fetch':
             Board().fetch(argv[2], argv[3])
+        elif len(argv) >= 3 and argv[1] == 'expect':
+            ok = Board().expect_gcc(argv[2], ccflags=' '.join(argv[3:]), gccflags='-fsingle-precision-constant')
+            print('ok: %s' % argv[2] if ok else 'FAIL: %s' % argv[2])
+            return 0 if ok else 1
         else:
             print(__doc__)
             return 1

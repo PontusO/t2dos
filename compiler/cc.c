@@ -404,6 +404,7 @@ int setcc(int cond) { ins("cmp\tr1, r0"); return itcc(cond); }
 // first checks with dead()/fdead() that nothing reads the old one again, following branches.
 // Offsets folded into loads and stores stay multiples of the access size (as wants that).
 int *labline;            // labline[n]: the line of label .Ln in the function being optimized
+int *labref;             // labref[n]: branches to .Ln (counted each round)
 int pchg;                // a rewrite happened in this round
 int oppw;                // opinfo(): the written register is only written, not also read
 int oprd; int opmask; int opkind; int opn;   // opinfo(): register written (-1 none), registers read
@@ -488,17 +489,22 @@ int opinfo(int i) {
   if (mnis("ldr") || mnis("ldrb") || mnis("ldrh") || mnis("ldrsb.w") || mnis("ldrsh.w")) purew = 1;
   if (oprd >= 0 && !purew) opmask = opmask | (1 << oprd);
   oppw = purew;
-  if (opmn[0] == 'v' && !mnis("vmov")) opkind = 4;           // other VFP forms: not tracked
-  return 0;
+  if (mnis("vpush") || mnis("vpop")) oprd = 13;   // FPU lines use no core register but vmov's,
+  return 0;                                         // vldr/vstr's base and these (sp)
 }
-// 1 if the value reg holds at line i is never read again (on every path)
+// 1 if the value reg holds at line i is never read again (on every path). A label already
+// reached in this query (dvis[line] == dstamp) is being or has been followed: nothing new there.
+int *dvis; int dstamp;
 int dead(int reg, int i, int depth) {
   int t; int k; int j; int a; int c;
+  if (!depth) dstamp = dstamp + 1;
+  if (depth > 40) return 0;
   while (i < nlines) {
     k = lkind[i];
-    if (k == L_BR) {
-      t = labat(llab[i]); if (t < 0 || depth > 6) return 0;
-      if (lcond[i] < 0) { i = t; depth = depth + 1; }
+    if (k == L_LAB) { if (dvis[i] == dstamp) return 1; dvis[i] = dstamp; i = i + 1; }
+    else if (k == L_BR) {
+      t = labat(llab[i]); if (t < 0) return 0;
+      if (lcond[i] < 0) i = t;
       else { if (!dead(reg, t, depth + 1)) return 0; i = i + 1; }
     }
     else if (k == L_INS) {
@@ -540,7 +546,7 @@ int fdead(int i, int depth) {
     else if (k == L_INS) {
       opinfo(i);
       if (opkind == 3 || opkind == 4) return 0;
-      if (opkind == 1 || opkind == 2) return 1;
+      if (opkind == 1 || opkind == 2 || mnis("vmrs")) return 1;
       if (mnis("cmp") || mnis("cmn") || mnis("tst") || mnis("adds") || mnis("subs") || mnis("movs") || mnis("lsls")
         || mnis("lsrs") || mnis("asrs") || mnis("muls") || mnis("ands") || mnis("orrs") || mnis("eors") || mnis("bics")
         || mnis("mvns") || mnis("rsbs")) return 1;
@@ -742,14 +748,17 @@ int peep_reload(int a) {
   pset(b); ls("mov\tr"); ls(dec(n)); ls(", r0"); lend();
   return 1;
 }
-int peep_mov(int a) {                       // mov r1, r0 ; movw r0, #N ; cmp/adds/subs with r1
-  int b; int c; int v; int e;
+int peep_mov(int a) {                       // mov r1, rS ; movw r0, #N ; cmp with r1 (adds/subs: S = 0)
+  int b; int c; int v; int e; int sr; char *t;
+  t = lpool + ltext[a]; sr = regword(t + 8, strlen(t + 8));
+  if (sr < 0 || sr > 12) return 0;
   b = nx(a); c = nx(b);
   v = pnum(b, "movw\tr0, #"); if (v < 0 || v > 255) return 0;
   e = nx(c);
   if (isins(c, "cmp\tr1, r0") && dead(0, e, 0) && dead(1, e, 0)) {
-    pset(c); ls("cmp\tr0, #"); ls(dec(v)); lend(); pdel(a); pdel(b); return 1;
+    pset(c); ls("cmp\t"); ls(t + 8); ls(", #"); ls(dec(v)); lend(); pdel(a); pdel(b); return 1;
   }
+  if (sr) return 0;
   if ((isins(c, "adds\tr0, r1, r0") || isins(c, "subs\tr0, r1, r0")) && dead(1, e, 0)) {
     if (isins(c, "adds\tr0, r1, r0")) { pset(c); ls("adds\tr0, #"); } else { pset(c); ls("subs\tr0, #"); }
     ls(dec(v)); lend(); pdel(a); pdel(b); return 1;
@@ -806,6 +815,9 @@ int peep_br(int a) {
   t = labat(llab[a]); if (t < 0) return 0;  // a branch to a b.w goes straight to its target
   u = t; while (u < nlines && lkind[u] == L_LAB) u = nx(u);
   if (u < nlines && lkind[u] == L_BR && lcond[u] < 0 && llab[u] != llab[a] && labat(llab[u]) >= 0) { llab[a] = llab[u]; pchg = 1; return 1; }
+  if (lcond[a] >= 0 && u < nlines && lkind[u] == L_BR && lcond[u] == lcond[a] && llab[u] != llab[a] && labat(llab[u]) >= 0) {
+    llab[a] = llab[u]; pchg = 1; return 1;  // the flags are the same there: it branches on too
+  }
   return 0;
 }
 int peep_ld(int a) {                        // address then load -> one load
@@ -818,6 +830,286 @@ int peep_ld(int a) {                        // address then load -> one load
   }
   return 0;
 }
+// ------------------------------------------------------------------ floats in s registers (-O)
+// Float code moves each operand r0/r1 -> s0/s1 and the result s0 -> r0. These rules let FPU
+// instructions read and write s registers directly: a float pushed around the right operand
+// waits in a free s register, "vmov sD, rX" whose rX came from "vmov rX, sS" (through mov
+// copies) uses sS, and an instruction that only computes a value for sD writes sD itself.
+// s0-s15 are scratch: a value in them never lives across a label, a branch or a call, in the
+// plain code and in these rules' output, so sdead() can stop there. s16-s31 hold promoted
+// float locals (see promote()).
+int swr;                 // sscan(): the s register line i writes, -1 none
+int prepro;              // 1 in the peep() before promote(): no vldr/vstr on [r7, ...] yet
+int pv(int i) { i = i - 1; while (i >= 0 && lkind[i] == L_DEL) i = i - 1; return i; }
+// t as an s register number ("s0".."s31" not followed by an identifier character), else -1
+int sat(char *t) {
+  int r;
+  if (t[0] != 's' || t[1] < '0' || t[1] > '9') return -1;
+  r = t[1] - '0';
+  if (t[2] >= '0' && t[2] <= '9') { r = r * 10 + t[2] - '0'; if (idchar(t[3])) return -1; }
+  else if (idchar(t[2])) return -1;
+  if (r > 31) return -1;
+  return r;
+}
+int swrites(char *t) {                      // the FPU mnemonic at t writes its first operand
+  return t[0] == 'v' && strncmp(t, "vcmp", 4) && strncmp(t, "vstr", 4) && strncmp(t, "vmrs", 4)
+    && strncmp(t, "vpush", 5) && strncmp(t, "vpop", 4);
+}
+// 1 if line i reads s register k; swr is the s register it writes (-1 none)
+int sscan(int i, int k) {
+  char *t; int first; int r; int prev; int wr; int rd;
+  swr = -1; rd = 0;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (t[0] != 'v') return 0;
+  wr = swrites(t);
+  while (*t && *t != 9) t = t + 1;
+  first = 1; prev = 9;
+  while (*t) {
+    r = -1; if (!idchar(prev)) r = sat(t);
+    if (r >= 0) {
+      if (first && wr) swr = r; else if (r == k) rd = 1;
+      first = 0; prev = '0'; t = t + 2; if (r >= 10) t = t + 1;
+    }
+    else { if (*t == ',') first = 0; prev = *t; t = t + 1; }
+  }
+  return rd;
+}
+// 1 if line i reads or writes s register k
+int smen(int i, int k) { if (sscan(i, k)) return 1; return swr == k; }
+// 1 if the value scratch register sk (k < 16) holds at line i is never read
+int sdead(int k, int i) {
+  if (k >= 16) return 0;
+  while (i < nlines) {
+    if (lkind[i] == L_LAB || lkind[i] == L_BR) return 1;
+    if (lkind[i] == L_INS) {
+      opinfo(i);
+      if (opkind == 1 || opkind == 2) return 1;
+      if (opkind == 4) return 0;            // an it line (3) is fine: no FPU instruction in its block
+      if (sscan(i, k)) return 0;
+      if (swr == k) return 1;
+    }
+    i = i + 1;
+  }
+  return 1;
+}
+// line i with s register from spelled sto: mode 1 only where it is written, 2 only where read
+int sren(int i, int from, int to, int mode) {
+  char *t; int first; int r; int prev; int wr; int w;
+  t = lpool + ltext[i]; wr = swrites(t);
+  pset(i);
+  while (*t && *t != 9) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+  first = 1; prev = 9;
+  while (*t) {
+    r = -1; if (!idchar(prev)) r = sat(t);
+    if (r >= 0) {
+      w = first && wr;
+      if (r == from && ((mode == 1 && w) || (mode == 2 && !w))) { ls("s"); ls(dec(to)); }
+      else { lpool[lppos] = 's'; lpool[lppos + 1] = t[1]; lppos = lppos + 2; if (r >= 10) { lpool[lppos] = t[2]; lppos = lppos + 1; } }
+      first = 0; prev = '0'; t = t + 2; if (r >= 10) t = t + 1;
+    }
+    else { if (*t == ',') first = 0; lpool[lppos] = *t; lppos = lppos + 1; prev = *t; t = t + 1; }
+  }
+  lend();
+  return 0;
+}
+// "[rB]" or "[rB, #off]" at t, an operand vldr/vstr take: 1, else 0 (prepro: not rB = r7)
+int vaddr(char *t) {
+  char *c; int b; int v; int neg;
+  if (*t != '[') return 0;
+  c = t + 1; while (*c && *c != ',' && *c != ']') c = c + 1;
+  b = regword(t + 1, c - t - 1);
+  if (b < 0 || b == 15 || (prepro && b == 7)) return 0;
+  if (*c == ']') return !c[1];
+  if (strncmp(c, ", #", 3)) return 0;
+  c = c + 3; neg = 0; if (*c == '-') { neg = 1; c = c + 1; }
+  v = 0;
+  while (*c >= '0' && *c <= '9') { if (v > 100000) return 0; v = v * 10 + *c - '0'; c = c + 1; }
+  if (strcmp(c, "]") || v % 4 || v > 1020) return 0;
+  return 1;
+}
+// the float with bits hi << 16 as the imm8 of vmov.f32 sd, #imm, else -1
+int fimm8(int hi) {
+  int b;
+  if (hi < 0 || hi > 65535 || (hi & 7)) return -1;
+  b = (hi >> 13) & 1;
+  if (((hi >> 14) & 1) == b) return -1;
+  if (((hi >> 9) & 31) != (b ? 31 : 0)) return -1;
+  return (hi >> 15) << 7 | b << 6 | ((hi >> 3) & 63);
+}
+int lspad(int v, int w) {                  // v in w digits, leading zeros
+  char *t; t = dec(v);
+  while (w > strlen(t)) { ls("0"); w = w - 1; }
+  ls(t);
+  return 0;
+}
+int lsfimm(int v) {                        // vmov.f32's imm8 as a decimal ("-2.0", "0.1328125")
+  int q; int f;
+  q = (16 + (v & 15)) << (((v >> 4) + 4) & 7);   // the value times 128
+  f = (q & 127) * 78125;                   // its fraction in 7 decimals
+  if (v & 128) ls("-");
+  ls(dec(q >> 7)); ls(".");
+  if (f % 1000000 == 0) ls(dec(f / 1000000));
+  else if (f % 10000 == 0) lspad(f / 10000, 3);
+  else lspad(f, 7);
+  return 0;
+}
+// vmov sD, rX (or vmov.f32 sD, sS) where the value is already in an s register
+int peep_fmov(int j) {
+  char *t; char *u; char *c; int d; int s; int x; int y; int i; int k; int m; int n; int sw; int wm; int cp; int v;
+  t = lpool + ltext[j];
+  if (!strncmp(t, "vmov.f32\ts", 10)) {
+    d = sat(t + 9); c = strchr(t, ','); if (d < 0 || !c) return 0;
+    s = sat(c + 2); if (s < 0) return 0;
+    i = j;
+  }
+  else {
+    d = sat(t + 5); c = strchr(t, ','); if (d < 0 || !c || c[1] != ' ') return 0;
+    x = regword(c + 2, strlen(c + 2)); if (x < 0 || x > 12) return 0;
+    i = pv(j); n = 0; s = -1; wm = 0; cp = -1;
+    while (s < 0) {                         // the line that gave rX its value, through movs
+      if (i < 0 || lkind[i] != L_INS || n > 24) break;
+      opinfo(i);
+      if (opkind != 0) break;
+      if (oprd == x) {
+        u = lpool + ltext[i]; c = strchr(u, ',');
+        if (!c) break;
+        if (!strncmp(u, "vmov\tr", 6)) { s = sat(c + 2); if (s < 0) break; }
+        else if (!strncmp(u, "mov\tr", 5)) {
+          y = regword(c + 2, strlen(c + 2));
+          if (y < 0 || y > 12 || y == 7 || y == 8 || y == 9) break;
+          x = y;
+          if (!(wm & (1 << y))) cp = y;     // rY still holds it at line j
+        }
+        else if (n == 0 && !strncmp(u, "ldr\tr", 5) && vaddr(c + 2) && dead(x, nx(j), 0)) {
+          pset(j); ls("vldr\ts"); ls(dec(d)); ls(", "); ls(c + 2); lend(); pdel(i);
+          return 1;
+        }
+        else if (n == 0 && !strncmp(u, "movt\tr", 6) && c[2] == '#' && fimm8(atoi(c + 3)) >= 0) {
+          k = pv(i); v = fimm8(atoi(c + 3));  // movw rX, #0 ; movt rX, #hi: a constant vmov.f32 takes
+          if (k < 0 || !preins(k, "movw\t") || strncmp(lpool + ltext[k] + 5, u + 5, c - u - 5)
+            || strcmp(lpool + ltext[k] + (c - u), ", #0") || !dead(x, nx(j), 0)) break;
+          pset(j); ls("vmov.f32\ts"); ls(dec(d)); ls(", #"); lsfimm(v); lend(); pdel(i); pdel(k);
+          return 1;
+        }
+        else break;
+      }
+      if (oprd >= 0) wm = wm | (1 << oprd);
+      if (s < 0) { i = pv(i); n = n + 1; }
+    }
+    if (s < 0) {                            // vmov sD, rY for a copy rX of rY
+      if (cp < 0) return 0;
+      pset(j); ls("vmov\ts"); ls(dec(d)); ls(", r"); ls(dec(cp)); lend();
+      return 1;
+    }
+    m = nx(i);
+    while (m < j) { sscan(m, -1); if (swr == s) return 0; m = nx(m); }
+  }
+  if (s == d) { pdel(j); return 1; }
+  if (s < 16 && sdead(s, nx(j))) {          // the line that computed sS computes sD
+    sw = 1; m = i;
+    while (m < j && sw) { if (m != i && smen(m, d)) sw = 0; m = nx(m); }
+    k = pv(i); n = 0;
+    while (sw) {
+      if (k < 0 || lkind[k] != L_INS || n > 24) { sw = 0; break; }
+      opinfo(k); if (opkind != 0) { sw = 0; break; }
+      sscan(k, -1);
+      if (swr == s) break;
+      if (smen(k, d)) sw = 0;
+      k = pv(k); n = n + 1;
+    }
+    if (sw) {
+      m = nx(k);
+      while (m < j) { if (sscan(m, s)) sren(m, s, d, 2); m = nx(m); }
+      sren(k, s, d, 1); pdel(j);
+      return 1;
+    }
+  }
+  if (d < 16) {                             // later reads of sD read sS
+    m = nx(j); n = 0; sw = 0; k = 0;
+    while (m < nlines && lkind[m] != L_LAB && lkind[m] != L_BR) {
+      if (lkind[m] == L_INS) {
+        opinfo(m);
+        if (opkind == 1 || opkind == 2) break;
+        if (opkind == 4) return 0;
+        if (sscan(m, d)) { if (sw) return 0; k = 1; }
+        if (swr == d) { m = m + 1; break; }    // its own read is renamed too
+        if (swr == s) sw = 1;
+        n = n + 1; if (n > 200) return 0;
+      }
+      m = m + 1;
+    }
+    if (k) {
+      n = nx(j);
+      while (n < m) { if (lkind[n] == L_INS && sscan(n, d)) sren(n, d, s, 2); n = nx(n); }
+    }
+    pdel(j);
+    return 1;
+  }
+  if (i == j) return 0;
+  pset(j); ls("vmov.f32\ts"); ls(dec(d)); ls(", s"); ls(dec(s)); lend();
+  return 1;
+}
+// vmov rX, sS ; str rX, [rB, #off] -> vstr sS, [rB, #off] (rX not read afterwards)
+int peep_vstr(int i) {
+  char *t; char *u; char *c; int x; int s; int b;
+  t = lpool + ltext[i]; c = strchr(t, ',');
+  if (!c) return 0;
+  x = regword(t + 5, c - t - 5); s = sat(c + 2);
+  if (x < 0 || x > 12 || s < 0) return 0;
+  b = nx(i); if (b >= nlines || lkind[b] != L_INS) return 0;
+  u = lpool + ltext[b];
+  if (strncmp(u, "str\tr", 5)) return 0;
+  c = strchr(u, ','); if (!c || regword(u + 4, c - u - 4) != x || !vaddr(c + 2)) return 0;
+  opinfo(b); if (opmask & (1 << x)) return 0;   // str r1, [r1]
+  if (!dead(x, nx(b), 0)) return 0;
+  pset(b); ls("vstr\ts"); ls(dec(s)); ls(", "); ls(c + 2); lend(); pdel(i);
+  return 1;
+}
+// a line whose result nobody reads: mov/vmov into r0-r3, FPU writes to s0-s15
+int peep_dce(int i) {
+  char *t;
+  t = lpool + ltext[i];
+  opinfo(i);
+  if (opkind != 0) return 0;
+  if (oprd >= 0 && oprd <= 3 && (mnis("mov") || mnis("vmov")) && dead(oprd, nx(i), 0)) { pdel(i); return 1; }
+  if (t[0] != 'v') return 0;
+  sscan(i, -1);
+  if (swr >= 0 && swr < 16 && sdead(swr, nx(i))) { pdel(i); return 1; }
+  return 0;
+}
+// vmov r0, sX ; push {r0} ; Y ; pop {r1} -> vmov r0, sX ; vmov sT, r0 ; Y ; vmov r1, sT
+// when Y uses FPU registers itself (else peep_push does better): no call, label or stack use
+int peep_fpush(int a) {
+  int j; int dep; int n; int k; int t; int w; int used;
+  j = pv(a); if (j < 0 || !preins(j, "vmov\tr0, s")) return 0;
+  j = nx(a); dep = 0; n = 0; w = 0; used = 0;
+  while (j < nlines && !(dep == 0 && isins(j, "pop\t{r1}"))) {
+    if (lkind[j] != L_INS) return 0;
+    n = n + 1; if (n > 80) return 0;
+    if (isins(j, "push\t{r0}")) dep = dep + 1;
+    else if (isins(j, "pop\t{r1}")) dep = dep - 1;
+    else {
+      opinfo(j);
+      if (opkind != 0 || oprd == 13 || (opmask & 8192) || mnis("push") || mnis("pop")) return 0;
+      sscan(j, -1); if (swr >= 0) w = 1;
+      k = 2; while (k < 16) { if (smen(j, k)) used = used | (1 << k); k = k + 1; }
+    }
+    j = nx(j);
+  }
+  if (j >= nlines || !w) return 0;
+  t = 2; while (t < 16 && ((used & (1 << t)) || !sdead(t, a))) t = t + 1;
+  if (t >= 16) return 0;
+  pset(a); ls("vmov\ts"); ls(dec(t)); ls(", r0"); lend();
+  pset(j); ls("vmov\tr1, s"); ls(dec(t)); lend();
+  return 1;
+}
+int peep_fp(int i) {
+  if ((preins(i, "vmov\ts") || preins(i, "vmov.f32\ts")) && peep_fmov(i)) return 1;
+  if (preins(i, "vmov\tr") && peep_vstr(i)) return 1;
+  return peep_dce(i);
+}
+
 // ------------------------------------------------------------------ locals in registers (-O)
 // After peep(), promote() moves up to 5 word-sized locals and parameters into r4-r6, r10 and
 // r11: the ones only ever accessed as "ldr/str rX, [r7, #off]" (never their address, never as
@@ -825,11 +1117,16 @@ int peep_ld(int a) {                        // address then load -> one load
 // level. The prologue saves those registers with r7 and lr ("push {r4, r5, r7, lr}"), so the
 // parameters move up by 4 bytes per register; a promoted parameter is loaded once, into one of
 // the 5 empty lines parse_global() leaves after the prologue. peep() then runs again, and
-// peep_hsrc()/peep_tohi() use the registers directly instead of copies in r0-r3.
+// peep_hsrc()/peep_tohi() use the registers directly instead of copies in r0-r3. Float words
+// go to s16-s31 instead (up to 16, "vmov rX, sN" and "vmov sN, rX"), saved by a vpush after the
+// push (pvpush, an empty line) and restored by a vpop before the return (pvpop).
 int *slotk;              // slotk[off / 4 + 256]: 1 when the frame word at off is part of an array or struct
 int *slotw;              // promote(): use weight of each frame word; -1 not promotable, -2 - k in register k
 int *pdep;               // promote(): loop depth of each line
 int npro;                // registers promote() gave out in the function being compiled
+int nfpro;               // s registers it gave out (s16 up)
+int *slotf;              // slotf[off / 4 + 256]: 1 when the frame word at off is a float local or parameter
+int pvpush; int pvpop;   // the empty lines for promote()'s vpush and vpop
 int phold;               // the first of the empty lines after the prologue, -1 if none
 int rfoff; int rfplain;  // r7ref(): the frame offset; 1 for a plain ldr/str of r0-r3
 
@@ -920,25 +1217,35 @@ int promote() {
     }
     i = i + 1;
   }
-  while (npro < 5) {
+  nfpro = 0;
+  while (npro < 5 || nfpro < 16) {
     best = -1; bw = 0; i = 0;
     while (i < 512) {
       w = slotw[i];
       if (i >= 258 && w > 0) w = w - 1;     // a parameter costs a load in the prologue
+      if (slotf[i] && (nfpro >= 16 || (i - 256) * 4 > 900)) w = 0;   // vldr reaches 1020
+      if (!slotf[i] && npro >= 5) w = 0;
       if (w > bw) { bw = w; best = i; }
       i = i + 1;
     }
     if (best < 0) break;
-    slotw[best] = -2 - npro; npro = npro + 1;
+    if (slotf[best]) { slotw[best] = -20 - nfpro; nfpro = nfpro + 1; }
+    else { slotw[best] = -2 - npro; npro = npro + 1; }
   }
-  if (!npro) return 0;
-  sh = 4 * npro;
+  if (!npro && !nfpro) return 0;
+  sh = 4 * (npro + nfpro);
   i = 0;
   while (i < nlines) {
     k = r7ref(i);
     if (k == 1) {
       n = slotix(rfoff);
-      if (n >= 0 && slotw[n] <= -2) {
+      if (n >= 0 && slotw[n] <= -20) {
+        t = lpool + ltext[i]; pset(i); ls("vmov\t");
+        if (t[0] == 'l') { ls("r"); lpool[lppos] = t[5]; lppos = lppos + 1; ls(", s"); ls(dec(-4 - slotw[n])); }
+        else { ls("s"); ls(dec(-4 - slotw[n])); ls(", r"); lpool[lppos] = t[5]; lppos = lppos + 1; }
+        lend();
+      }
+      else if (n >= 0 && slotw[n] <= -2) {
         t = lpool + ltext[i]; rn = regnm(-2 - slotw[n]);
         pset(i); ls("mov\t");
         if (t[0] == 'l') { lpool[lppos] = 'r'; lpool[lppos + 1] = t[5]; lppos = lppos + 2; ls(", "); ls(rn); }
@@ -951,9 +1258,17 @@ int promote() {
     else if (isins(i, "pop\t{r7, pc}")) { pset(i); reglist("pop", "pc"); }
     i = i + 1;
   }
+  if (nfpro) {
+    pset(pvpush); ls("vpush\t{s16"); if (nfpro > 1) { ls("-s"); ls(dec(15 + nfpro)); } ls("}"); lend();
+    pset(pvpop); ls("vpop\t{s16"); if (nfpro > 1) { ls("-s"); ls(dec(15 + nfpro)); } ls("}"); lend();
+  }
   n = phold; i = 258;
   while (i < 512) {                         // promoted parameters: load them once
-    if (slotw[i] <= -2) {
+    if (slotw[i] <= -20) {
+      pset(n); ls("vldr\ts"); ls(dec(-4 - slotw[i])); ls(", [r7, #"); ls(dec((i - 256) * 4 + sh)); ls("]"); lend();
+      n = n + 1;
+    }
+    else if (slotw[i] <= -2) {
       pset(n); ls("ldr\t"); ls(regnm(-2 - slotw[i])); ls(", [r7, #"); ls(dec((i - 256) * 4 + sh)); ls("]"); lend();
       n = n + 1;
     }
@@ -1090,19 +1405,27 @@ int peep_icall(int a) {
 }
 int peep() {
   int i; int round; int k;
-  if (!labline) { labline = malloc(65536 * 4); opmn = malloc(64); }
+  if (!labline) { labline = malloc(65536 * 4); opmn = malloc(64); labref = malloc(65536 * 4); dvis = malloc(16400 * 4);
+    i = 0; while (i < 16400) { dvis[i] = 0; i = i + 1; }   // stamps start at 1: no line is visited yet
+  }
   i = 0; while (i < nlines) { if (lkind[i] == L_LAB && llab[i] >= 0 && llab[i] < 65536) labline[llab[i]] = i; i = i + 1; }
   pchg = 1; round = 0;
   while (pchg && round < 16) {
-    pchg = 0; i = 0;
+    pchg = 0;
+    i = 0; while (i < nlines) { if (lkind[i] == L_LAB && llab[i] >= 0 && llab[i] < 65536) labref[llab[i]] = 0; i = i + 1; }
+    i = 0; while (i < nlines) { if (lkind[i] == L_BR && llab[i] >= 0 && llab[i] < 65536) labref[llab[i]] = labref[llab[i]] + 1; i = i + 1; }
+    i = 0; while (i < nlines) { if (lkind[i] == L_LAB && llab[i] >= 0 && llab[i] < 65536 && !labref[llab[i]]) pdel(i); i = i + 1; }
+    i = 0;
     while (i < nlines) {
       k = lkind[i];
       if (k == L_BR) peep_br(i);
       else if (k == L_INS) {
         if (npro && preins(i, "mov\tr") && peep_hsrc(i)) ;
         else if (npro && peep_tohi(i)) ;
-        else if (isins(i, "push\t{r0}")) { if (!peep_icall(i)) peep_push(i); }
-        else if (isins(i, "mov\tr1, r0")) peep_mov(i);
+        else if (lpool[ltext[i]] == 'v') peep_fp(i);
+        else if (preins(i, "mov\tr") && peep_dce(i)) ;
+        else if (isins(i, "push\t{r0}")) { if (!peep_icall(i) && !peep_fpush(i)) peep_push(i); }
+        else if (preins(i, "mov\tr1, r")) peep_mov(i);
         else if (preins(i, "ite\t")) peep_ite(i);
         else if (froff(i) != 1) { if (!peep_astore(i) && !peep_store(i)) { if (!peep_ld(i)) peep_tor1(i); } }
         else if (preins(i, "add.w\tr0, r9, r")) { if (!peep_ld(i)) peep_tor1(i); }
@@ -2385,6 +2708,7 @@ int newlocal(struct Sym *s, int t, int size) {
   if (optim) {                              // for promote(): words of arrays and structs
     if (t >= PTR && !(t & ARR) && size > 4) markbad(-loc + 4, -loc + size);   // array: its pointer word, then the storage
     else if (size != 4 || (t & ARR) || (t < PTR && t != TINT && t != TUINT && t != TFLOAT)) markbad(-loc, -loc + size);
+    else if (t == TFLOAT && slotix(-loc) >= 0) slotf[slotix(-loc)] = 1;
   }
   return 0;
 }
@@ -2541,7 +2865,10 @@ int parse_global() {
       s->type = t; next();
       // prototype or definition? parse params either way
       n = 0; loc = 0; maxloc = 0;
-      if (optim) { if (!slotk) slotk = malloc(512 * 4); i = 0; while (i < 512) { slotk[i] = 0; i = i + 1; } }
+      if (optim) {
+        if (!slotk) { slotk = malloc(512 * 4); slotf = malloc(512 * 4); }
+        i = 0; while (i < 512) { slotk[i] = 0; slotf[i] = 0; i = i + 1; }
+      }
       if (!s->ptypes) s->ptypes = malloc(32 * 4);
       while (tk != ')') {
         bt = declarator(parse_type());
@@ -2566,22 +2893,25 @@ int parse_global() {
       if (tk != '{') die("{ expected");
       // fix param offsets: param i at r7 + 8 + 4*(n-1-i)
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) syms[i].val = 8 + 4 * (n - 1 - syms[i].val); i = i + 1; }
+      if (optim) { i = 0; while (i < nsyms) { if (syms[i].class == CLoc && syms[i].type == TFLOAT && slotix(syms[i].val) >= 0) slotf[slotix(syms[i].val)] = 1; i = i + 1; } }
       s->class = CFun; s->val = 0; nparams = n; fnrty = t;   // val >= 0: defined
       oput("\t.global\t"); oname(s); oput("\n"); oname(s); oput(":\n");
       ins("push\t{r7, lr}");
+      if (optim) pvpush = lnew(L_DEL);         // promote()'s vpush
       ins("mov\tr7, sp");
       frame_at = nlines; imm2(1, 0);            // movw+movt r1,#frame (filled in below)
       ins("sub.w\tsp, sp, r1");
       phold = -1;
-      if (optim) { phold = nlines; i = 0; while (i < 5) { lnew(L_DEL); i = i + 1; } }   // promote()'s parameter loads
+      if (optim) { phold = nlines; i = 0; while (i < 21) { lnew(L_DEL); i = i + 1; } }  // promote()'s parameter loads
       ret_fix = -1;
       stmt();
       chain_here(ret_fix);
       ins("mov\tsp, r7");
+      if (optim) pvpop = lnew(L_DEL);          // promote()'s vpop
       ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
       i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
-      if (optim) { peep(); promote(); }
+      if (optim) { prepro = 1; peep(); prepro = 0; promote(); }
       flush();
       npro = 0; phold = -1;
       // restore shadowed symbols

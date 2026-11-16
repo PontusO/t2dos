@@ -697,8 +697,14 @@ static int run_loaded(uint8_t *code, uint32_t code_size, uint8_t *data, uint8_t 
   uint32_t here; asm volatile("mov %0, sp" : "=r"(here));
   uint32_t saved_sys_sp = t2_sys_sp;
   if (on_kstack(here)) t2_sys_sp = (here - 128) & ~7u;
+  // s16-s31 are callee-saved, and cc -O keeps float locals in them; a child that ends by exit(),
+  // Ctrl-C or kill longjmps past its own vpop, and newlib's longjmp restores no FPU registers,
+  // so a parent in exec() would get the child's values back
+  uint32_t fsave[16];
+  asm volatile("vstmia %0, {s16-s31}" : : "r"(fsave) : "memory");
   if (setjmp(pr->jb) == 0) ret = run(code + entry + 1, (void *)sys_entry, data, stack + STACK_SIZE - 64, argc, argv);
   else ret = pr->exit_code;
+  asm volatile("vldmia %0, {s16-s31}" : : "r"(fsave) : "memory");
   t2_sys_sp = saved_sys_sp;            // also after exit(), which longjmps past run()
   // leaked by the child: opened at this level by this task (another task's are not ours to close)
   for (int i = 2; i < MAX_FD; i++) if (fds[i] && fd_owner[i] == self && !(pr->fd_mask & (1 << i))) { fds[i].close(); fds[i] = File(); }

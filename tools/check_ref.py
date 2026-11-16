@@ -14,7 +14,7 @@ behaviour on the board instead.
 A file the reference cc rejects with "undefined function: NAME(" for a builtin newer than
 the reference cc (NEWER_BUILTINS: spawn, yield, jobs, kill, mkpipe, reboot, wifi_save, wifi_saved and the maths calls sin
 to fmod) cannot be compared either: it is excluded too and checked by behaviour on the board
-(check_jobs.py; test13.c with Board().expect_gcc). Any other reference failure counts as
+(check_jobs.py; test13.c with `board.py expect`). Any other reference failure counts as
 different.
 
 Prints "identical: N, excluded (init code): M, excluded (newer builtins): B, different: K",

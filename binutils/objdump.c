@@ -446,6 +446,20 @@ int dec_branch(int h1, int h2) {
 
 // single-precision FPU
 int sreg(int v, int bit) { return v << 1 | bit; }
+// vmov.f32's imm8 as its float bits (fbits) and as GNU writes the value (fdec: " 2.0", "-0.250",
+// " 0.1328125": 1, 3 or 7 decimals, the fewest that are exact)
+int fbits; char fdec[24];
+int fimm(int v) {
+  int b; int pw; int q; int f;
+  b = (v >> 6) & 1;
+  fbits = (v >> 7) << 31 | (!b) << 30 | (b ? 0x3E000000 : 0) | (v & 63) << 19;
+  pw = ((v >> 4) + 4) & 7; q = (16 + (v & 15)) << pw;   // the value times 128
+  f = (q & 127) * 78125;                // the fraction in 7 decimals
+  if (f % 1000000 == 0) sprintf(fdec, "%c%d.%d", v & 128 ? '-' : ' ', q >> 7, f / 1000000);
+  else if (f % 10000 == 0) sprintf(fdec, "%c%d.%03d", v & 128 ? '-' : ' ', q >> 7, f / 10000);
+  else sprintf(fdec, "%c%d.%07d", v & 128 ? '-' : ' ', q >> 7, f);
+  return 0;
+}
 int dec_vfp(int h1, int h2) {
   int d; int n; int m; int a; int b; int rn; int v; int first; int cnt; char *nm;
   if (icond >= 0) return 0;                             // as: no FPU instructions in an IT block
@@ -464,6 +478,7 @@ int dec_vfp(int h1, int h2) {
     return 1;
   }
   a = h1 & ~0x40; b = h2 & ~0xF02F;
+  if (a == 0xEEB0 && b == 0x0A40) nm = "vmov.f32";
   if (a == 0xEEB1 && b == 0x0A40) nm = "vneg.f32";
   if (a == 0xEEB1 && b == 0x0AC0) nm = "vsqrt.f32";
   if (a == 0xEEB4 && b == 0x0A40) nm = "vcmp.f32";
@@ -474,6 +489,13 @@ int dec_vfp(int h1, int h2) {
   if (nm) {
     strcpy(mn, nm);
     sprintf(ops, "s%d, s%d", d, m);
+    return 1;
+  }
+  if ((h1 & 0xFFB0) == 0xEEB0 && (h2 & 0x0FF0) == 0x0A00) {     // vmov.f32 sd, #imm8
+    v = (h1 & 15) << 4 | (h2 & 15);
+    fimm(v);
+    sprintf(ops, "s%d, #%d\t@ 0x%08x %s", d, v, fbits, fdec);
+    strcpy(mn, "vmov.f32");
     return 1;
   }
   if (a == 0xEEB5 && (h2 & ~0xF000) == 0x0A40) {

@@ -223,7 +223,7 @@ def check_error(src):
 
 # ------------------------------------------------------------------ corpus
 LINE_RE = re.compile(r'^\s*([0-9a-f]+):\t([0-9a-f ]+?)\s*\t(\S+)(?:\t(.*))?$')
-FPU_RE = re.compile(r'^(v(add|sub|mul|div|neg|sqrt|cmp)\.f32|vcvt\.(f32\.[su]32|[su]32\.f32)|vmov|vmrs|vldr|vstr|vpush|vpop)$')
+FPU_RE = re.compile(r'^(v(add|sub|mul|div|neg|sqrt|cmp)\.f32|vcvt\.(f32\.[su]32|[su]32\.f32)|vmov(\.f32)?|vmrs|vldr|vstr|vpush|vpop)$')
 BRANCH_RE = re.compile(r'^bl?(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)?(\.[nw])?$')
 
 
@@ -287,8 +287,18 @@ REWRITES = [
 ]
 
 
+def vfp_imm(n):
+    """The float value of vmov.f32's imm8 (GNU prints the imm8, as takes the value)."""
+    b = (n >> 6) & 1
+    v = (16 + (n & 15)) * 2.0 ** ((((n >> 4) + 4) & 7) - 7)
+    return repr(-v if n & 128 else v)
+
+
 def as_form(mn, ops):
     """An instruction as objdump prints it, in the spelling build/host/as takes."""
+    m = re.match(r'^(s\d+), #(\d+)$', ops.split('@')[0].strip())
+    if mn == 'vmov.f32' and m:
+        return mn, '%s, #%s' % (m.group(1), vfp_imm(int(m.group(2))))
     for mre, ore, f in REWRITES:
         m = mre.match(mn)
         o = ore.match(ops) if m else None

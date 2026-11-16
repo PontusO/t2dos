@@ -1913,11 +1913,21 @@ whole word qualify: never one whose address is taken, and never part of an
 array or struct. The function saves the registers it uses with `push {r4, ...,
 r7, lr}`.
 
+Float locals and parameters get registers of their own: up to 16, in the FPU
+registers s16 to s31 (saved with `vpush {s16, ...}`). Float arithmetic then
+works on the FPU registers directly: an operation reads its operands from the
+variables' registers and writes its result into the variable it is assigned
+to, an intermediate result waits in a free FPU register instead of on the
+stack, and a constant such as `2.0` or `0.125` is one `vmov.f32 s1, #2.0`
+where it fits that instruction (16 to 31 sixteenths times a power of two from
+1/8 to 16, either sign). `mandel` (below) runs 5 times as fast as without
+`-O`.
+
 Without `-O` the output is exactly what it always was. On the board, with all
 programs built with `-O`:
 
-- `examples/basic/bench.bas`: 275,000 statements per second instead of 185,500
-- the programs in `/bin` are about 27% smaller (501 KB instead of 689 KB)
+- `examples/basic/bench.bas`: 285,000 statements per second instead of 185,500
+- the programs in `/bin` are about 31% smaller (494 KB instead of 711 KB)
 - `cc` compiling `cc.c` takes about as long as before (27 s). Most of that
   time is writing the 880 KB assembly file: the board's flash file system
   writes about 56 KB/s, so compiling itself takes about 2 s of it.
@@ -1932,18 +1942,18 @@ NAME` for one, `--opt "FLAGS"` to compare other flags). On the board:
 
 | benchmark | plain ms | `-O` ms | speedup |
 |---|---|---|---|
-| crc | 519 | 209 | 2.48x |
-| dispatch | 511 | 289 | 1.77x |
-| fib | 450 | 312 | 1.44x |
-| interp | 1107 | 685 | 1.62x |
-| list | 923 | 594 | 1.55x |
-| loop | 743 | 248 | 3.00x |
-| mandel | 479 | 472 | 1.01x |
-| matmul | 465 | 222 | 2.09x |
-| sieve | 968 | 355 | 2.73x |
-| sort | 548 | 242 | 2.26x |
-| strings | 475 | 191 | 2.49x |
-| total | 7188 | 3819 | 1.88x |
+| crc | 519 | 213 | 2.44x |
+| dispatch | 483 | 290 | 1.67x |
+| fib | 446 | 313 | 1.42x |
+| interp | 1093 | 701 | 1.56x |
+| list | 921 | 529 | 1.74x |
+| loop | 748 | 243 | 3.08x |
+| mandel | 475 | 87 | 5.46x |
+| matmul | 470 | 227 | 2.07x |
+| sieve | 964 | 341 | 2.83x |
+| sort | 554 | 233 | 2.38x |
+| strings | 476 | 170 | 2.80x |
+| total | 7149 | 3347 | 2.14x |
 
 `make OPT=-O` builds every program with `-O`. A `cc` built with `-O` gives
 the same output as the plain one, and `cc -O` on the board writes the same
@@ -2178,7 +2188,7 @@ References to `extern` variables always use the 12-byte form.
 `as` takes the GNU unified syntax for Thumb-2, the subset that compiled C and
 hand-written code need: the ARMv8-M mainline integer instructions with their
 narrow and wide forms (`.n`, `.w`), IT blocks, and the single precision FPU
-instructions (`vadd.f32`, `vldr`, `vmov`, `vcvt`, `vpush`, ...). The
+instructions (`vadd.f32`, `vldr`, `vmov`, `vmov.f32 s1, #2.0`, `vcvt`, `vpush`, ...). The
 encodings equal GNU `as` with `-mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16`,
 and `as` refuses what GNU refuses (for example `r13 not allowed here` where
 ARMv8-M makes `sp` unpredictable). `add rd, pc, #imm` is `adr`.

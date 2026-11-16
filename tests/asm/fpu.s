@@ -33,6 +33,23 @@ start:
         vdiv.f32 s15, s1, s31
         vdiv.f32 s31, s31, s31
         vdiv.f32 s2, s3, s4
+        vmov.f32 s0, s0
+        vmov.f32 s1, s31
+        vmov.f32 s31, s1
+        vmov.f32 s19, s16
+        vmov.f32 s2, s17
+        vmov.f32 s0, #2.0
+        vmov.f32 s1, #-1.5
+        vmov.f32 s31, #0.1328125
+        vmov.f32 s16, #31
+        vmov.f32 s17, #.5
+        vmov.f32 s3, #+4
+        vmov.f32 s4, #1e1
+        vmov.f32 s5, #2.5e-1
+        vmov.f32 s6, #1.0E1
+        vmov.f32 s7, #-0.9687500
+        vmov.f32 s8, #1.9375
+        vmov.f32 s9, #0.125
         vneg.f32 s0, s0
         vneg.f32 s1, s31
         vneg.f32 s31, s1

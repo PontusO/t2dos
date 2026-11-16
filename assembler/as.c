@@ -1004,11 +1004,43 @@ int do_vpush(int pop) {
   return emit32((pop ? 0xECBD : 0xED2D) | (first & 1) << 6, 0x0A00 | (first >> 1) << 12 | count);
 }
 
+// the float literal at p ([+-]digits[.digits][e[+-]digits], exactly +-(16..31)/16 * 2^-3..4)
+// as the imm8 of vmov.f32 sd, #imm
+int fimm8() {
+  int neg; int n; int k; int e; int en; int i; int q; int pw;
+  neg = 0;
+  if (*p == '+' || *p == '-') { neg = *p == '-'; p++; }
+  if ((*p < '0' || *p > '9') && *p != '.') fail("immediate expected");
+  n = 0; k = 0;
+  while (*p >= '0' && *p <= '9') { if (n > 10000000) fail("immediate out of range"); n = n * 10 + *p - '0'; p++; }
+  if (*p == '.') {
+    p++;
+    while (*p >= '0' && *p <= '9') { if (n > 10000000) fail("immediate out of range"); n = n * 10 + *p - '0'; k++; p++; }
+  }
+  if (*p == 'e' || *p == 'E') {
+    p++; en = 0;
+    if (*p == '+' || *p == '-') { en = *p == '-'; p++; }
+    if (*p < '0' || *p > '9') fail("immediate expected");
+    e = 0;
+    while (*p >= '0' && *p <= '9') { if (e > 100) fail("immediate out of range"); e = e * 10 + *p - '0'; p++; }
+    if (en) k = k + e; else k = k - e;
+  }
+  while (k < 0) { if (n > 100000000) fail("immediate out of range"); n = n * 10; k++; }
+  for (i = 0; i < k; i++) { if (n % 5) fail("immediate out of range"); n = n / 5; }
+  q = n; pw = 7 - k;                   // the value times 128 is q * 2^pw
+  while (pw < 0) { if (q % 2) fail("immediate out of range"); q = q / 2; pw++; }
+  while (pw > 0) { if (q > 4096) fail("immediate out of range"); q = q * 2; pw--; }
+  pw = 0;
+  while (q >= 32) { if (q % 2) fail("immediate out of range"); q = q / 2; pw++; }
+  if (q < 16 || pw > 7) fail("immediate out of range");
+  return neg << 7 | ((pw + 4) & 7) << 4 | (q - 16);
+}
+
 // mn is the whole lower-case mnemonic, e.g. "vcvt.f32.s32"
 int do_vfp(char *mn) {
   char *t; char *nm; int k; int n; int d; int a; int m; int r; int h1; int h2;
   t = "vadd.f32 vsub.f32 vmul.f32 vdiv.f32 vneg.f32 vsqrt.f32 vcmp.f32 vcvt.f32.s32 vcvt.f32.u32 "
-      "vcvt.s32.f32 vcvt.u32.f32 vmov vmrs vldr vstr vpush vpop ";
+      "vcvt.s32.f32 vcvt.u32.f32 vmov vmrs vldr vstr vpush vpop vmov.f32 ";
   k = 0;
   while (*t) {
     nm = t; n = 0;
@@ -1017,7 +1049,7 @@ int do_vfp(char *mn) {
     if (strlen(mn) == n && strncmp(mn, nm, n) == 0) break;
     k++;
   }
-  if (k == 17) return -1;             // not an FPU mnemonic
+  if (k == 18) return -1;             // not an FPU mnemonic
   if (itleft) fail("FPU instructions in an IT block are not supported");
   if (k <= 3) {                        // vadd vsub vmul vdiv sd, sn, sm
     d = sreg(); comma(); a = sreg(); comma(); m = sreg();
@@ -1055,6 +1087,12 @@ int do_vfp(char *mn) {
   }
   if (k == 12) { keyword("apsr_nzcv"); comma(); keyword("fpscr"); return emit32(0xEEF1, 0xFA10); }
   if (k == 13 || k == 14) return do_vldr(k == 14);
+  if (k == 17) {                       // vmov.f32 sd, sm / sd, #float
+    d = sreg(); comma(); skipws();
+    if (*p == '#') { p++; skipws(); m = fimm8(); return vfp3(0xEEB0 | m >> 4, 0x0A00 | (m & 15), d, 0, 0); }
+    m = sreg();
+    return vfp3(0xEEB0, 0x0A40, d, 0, m);
+  }
   return do_vpush(k == 16);
 }
 
