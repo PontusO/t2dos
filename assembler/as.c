@@ -1586,7 +1586,7 @@ int writeobj(char *out) {
   fd = open(out, 577, 420);
   if (fd < 0) { printf("as: cannot write %s\n", out); exit(1); }
   if (t2o_write(fd, &o) < 0) { printf("as: write error on %s\n", out); close(fd); exit(1); }
-  close(fd);
+  if (close(fd) < 0) { printf("as: write error on %s\n", out); exit(1); }   // a /mnt/fs save can fail here
   return 0;
 }
 

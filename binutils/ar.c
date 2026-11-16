@@ -100,7 +100,7 @@ int create(char *path) {
     ok = write(fd, mbuf[i], msize[i]) == msize[i];
     pos = pos + msize[i];
   }
-  close(fd);
+  if (close(fd) < 0) ok = 0;                    // a /mnt/fs save can fail here
   if (!ok) { printf("ar: cannot write %s\n", path); return 1; }
   return 0;
 }
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
       if (fd < 0 || write(fd, a.base + a.members[i].offset, a.members[i].size) != a.members[i].size) {
         printf("ar: cannot write %s\n", name); rc = 1;
       }
-      if (fd >= 0) close(fd);
+      if (fd >= 0 && close(fd) < 0) { printf("ar: cannot write %s\n", name); rc = 1; }
     }
     return rc;
   }

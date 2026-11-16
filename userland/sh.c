@@ -509,8 +509,14 @@ int run_script(char *name, int argc, char **argv);
 int ends_with(char *s, char *t) { int a; int b; a = strlen(s); b = strlen(t); return a >= b && !strcmp(s + a - b, t); }
 
 // one simple command; sets status
+// closes a redirect target: 1 (with a message) if that fails, as a /mnt/fs save can
+int close_out(int fd, char *name) {
+  if (close(fd) < 0) { printf("sh: cannot write %s\n", name); return 1; }
+  return 0;
+}
+
 int run_cmd(char *cmd) {
-  int fd; int old; int r; int t0; int bg; int i; char *eq; char ln[256]; char *a0; int rd;
+  int fd; int old; int r; int t0; int bg; int i; char *eq; char ln[256]; char *a0; int rd; char rn[160];
   if (!words(cmd)) return status;
   if (is_assign(av[0])) {              // a=1 b=2 ...
     i = 0; while (i < ac && is_assign(av[i])) i++;
@@ -532,6 +538,7 @@ int run_cmd(char *cmd) {
     fd = open(redir, append ? OPEN_APPEND : OPEN_WRITE);
     if (fd < 0) { printf("cannot write %s\n", redir); status = 1; return status; }
     old = redirect(fd);
+    if (strlen(redir) < 160) strcpy(rn, redir); else strcpy(rn, "output");   // a script run below reuses redir
   }
   r = -1000;                           // not a builtin
   if (!strcmp(a0, "cd")) { r = 0; if (chdir(ac > 1 ? av[1] : "/") < 0) { printf("cd: no such directory\n"); r = 1; } }
@@ -566,7 +573,7 @@ int run_cmd(char *cmd) {
     else { printf("%s: not found\n", a0); r = 127; }
   }
   if (r != -1000) {
-    if (rd) { redirect(old); close(fd); }
+    if (rd) { redirect(old); if (close_out(fd, rn)) r = 1; }
     status = r;
     return r;
   }
@@ -597,7 +604,7 @@ int run_cmd(char *cmd) {
   }
   t0 = millis();
   r = exec(path, ac, av);
-  if (redir) { redirect(old); close(fd); }
+  if (redir) { redirect(old); if (close_out(fd, rn) && !r) r = 1; }
   if (r < -1) printf("%s: not a valid program (%d)\n", a0, r);
   else if (r && !depth) printf("[exit %d, %d ms]\n", r, millis() - t0);   // scripts test $? instead
   status = r;

@@ -11,7 +11,9 @@ int main(int argc, char **argv) {
   }
   fi = open(argv[1], OPEN_READ); if (fi < 0) { printf("cp: %s: not found\n", argv[1]); return 1; }
   fo = open(dst, OPEN_WRITE); if (fo < 0) { printf("cp: cannot write %s\n", dst); return 1; }
-  while ((n = read(fi, buf, 4096)) > 0) write(fo, buf, n);
-  close(fi); close(fo);
+  while ((n = read(fi, buf, 4096)) > 0)
+    if (write(fo, buf, n) != n) { printf("cp: cannot write %s\n", dst); close(fi); close(fo); return 1; }
+  close(fi);
+  if (close(fo) < 0) { printf("cp: cannot write %s\n", dst); return 1; }   // a /mnt/fs save can fail here
   return 0;
 }

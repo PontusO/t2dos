@@ -8,7 +8,7 @@ build/s/netfs/srv. Sends raw session requests and checks the replies, then runs
 the board tools under qemu-arm with host_linux against it.
 Exit status 0 when every check passes.
 """
-import os, random, re, shutil, socket, subprocess, sys, time
+import os, random, re, shutil, socket, subprocess, sys, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'netfs')
@@ -57,15 +57,34 @@ STEPS = [
     ('wr /mnt/fs/LONGN hi', 'close -1\n', 0),   # fits, but its temp name does not
     ('mount @', '@ /\n', 0),
     ('full', 'wrote 8192\nclose 0\n', 0, '', {'T2_NETFS_CACHE': '8300'}),
+    # failures (Task 4): PROXY sits in front of the server; ('PROXY', mode, cut) sets it
+    ('PROXY', 'flaky', None),                  # every other connection closed at once
+    ('mount PROXY', 'PROXY /\n', 0),
+    ('cat /mnt/fs/top.txt', 'top\n', 0),
+    ('cp s.txt /mnt/fs/f1.txt', '', 0),
+    ('cp /mnt/fs/f1.txt f1.txt', '', 0),
+    ('ls /mnt/fs/projects', '   <dir>  game/\n0 files, 0 bytes\n', 0),
+    ('PROXY', 'pass', ('RENAME', 2)),          # the save breaks twice, the third try works
+    ('cp s.txt /mnt/fs/r.txt', '', 0),
+    ('PROXY', 'pass', ('WRITE', 3)),           # it breaks three times: the old file stays
+    ('cp short.txt /mnt/fs/r.txt', 'cp: cannot write /mnt/fs/r.txt\n', 1),
+    ('PROXY', 'pass', ('WRITE', 3)),
+    ('sh', re.compile(r'(?s).*sh: cannot write /mnt/fs/r\.txt\n.*'), 0, 'echo x > /mnt/fs/r.txt\nexit\n'),
+    ('PROXY', 'pass', ('RENAME', 3)),
+    ('cc -o /mnt/fs/h.bin h.c', 'ld: cannot write /mnt/fs/h.bin\n', 1),
+    ('PROXY', 'pass', None),
+    ('cc -o /mnt/fs/h.bin h.c', '', 0),
+    ('/mnt/fs/h.bin', '', 0),
+    ('DOWN', None, None),                      # the down state: see check_down()
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
 ]
 LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135}
-FILES = {'b.bin': BIG, 'local.txt': None}
+FILES = {'b.bin': BIG, 'local.txt': None, 'f1.txt': b'sent\n'}
 SERVER_FILES = {'s.txt': b'sent\nmore\n', 'o.txt': b'x\n', 'big2.bin': BIG, 's2.txt': None, 'm1.txt': None,
                 'm2.txt': None, 'm3.txt': b'move\n', 't.txt': b'new\n', 'nc.txt': b'data\n', 'L' * 151: b'sent\n',
-                'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192}
-TEST_PROGS = ['twice', 'noclose', 'wr', 'full']
+                'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192, 'f1.txt': b'sent\n', 'r.txt': b'sent\n'}
+TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down']
 
 bad = 0
 
@@ -172,22 +191,103 @@ def check_server(port):
     if r != b'OK 4\ntop\n': fail('GET top.txt: %r' % r)
 
 
-def run_steps(port):
+class Proxy:
+    """Listens on port and passes connections to target.  mode 'pass', 'flaky' (every other
+    connection closed at once) or 'hole' (accepted, never answered); cut = (prefix, times) closes
+    a connection when the client sends a line starting with prefix, times times.  Changing the
+    mode closes the open connections."""
+    def __init__(self, port, target):
+        self.target, self.mode, self.cut, self.k, self.conns = target, 'pass', None, 0, []
+        self.ls = socket.socket(); self.ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.ls.bind(('127.0.0.1', port)); self.ls.listen(8)
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def set(self, mode, cut):
+        self.mode, self.cut, self.k = mode, list(cut) if cut else None, 0
+        for c in self.conns:
+            try: c.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+        self.conns = []
+
+    def run(self):
+        while True:
+            c, _ = self.ls.accept()
+            k, self.k = self.k, self.k + 1
+            if self.mode == 'flaky' and k % 2 == 0: c.close(); continue
+            self.conns.append(c)
+            if self.mode == 'hole': continue
+            t = socket.create_connection(('127.0.0.1', self.target)); self.conns.append(t)
+            threading.Thread(target=self.up, args=(c, t), daemon=True).start()
+            threading.Thread(target=self.down, args=(t, c), daemon=True).start()
+
+    def close_both(self, a, b):
+        for x in (a, b):
+            try: x.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+
+    def up(self, c, t):                        # client to server, following the requests
+        linebuf, skip = b'', 0                 # skip: WRITE data bytes still to come
+        try:
+            while True:
+                d = c.recv(4096)
+                if not d: break
+                for ch in d:
+                    if skip: skip -= 1; continue
+                    linebuf += bytes([ch])
+                    if self.cut and self.cut[1] > 0 and linebuf == self.cut[0].encode():
+                        self.cut[1] -= 1; self.close_both(c, t); return
+                    if ch == 10:
+                        if linebuf.startswith(b'WRITE '): skip = int(linebuf.split()[2])
+                        linebuf = b''
+                t.sendall(d)
+        except OSError: pass
+        self.close_both(c, t)
+
+    def down(self, t, c):
+        try:
+            while True:
+                d = t.recv(4096)
+                if not d: break
+                c.sendall(d)
+        except OSError: pass
+        self.close_both(c, t)
+
+
+def check_down(proxy):
+    """The down state: a failing request takes its tries (slow), then calls fail at once
+    until DOWN_MS (10 s) has passed, then one try works again."""
+    p = subprocess.Popen(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, '/bin/down.bin'],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    def step():
+        p.stdin.write(b'\n'); p.stdin.flush()
+        return p.stdout.readline().decode().strip()
+    got = [step()]
+    proxy.set('hole', None); got.append(step())
+    got.append(step())
+    proxy.set('pass', None); time.sleep(10.5); got.append(step())
+    p.stdin.write(b'q'); p.stdin.flush(); p.wait(10)
+    if got != ['ok fast', 'fail slow', 'fail fast', 'ok fast']: fail('down state: %r' % got)
+
+
+def run_steps(port, proxy):
     hp = '127.0.0.1:%d' % port
+    pp = '127.0.0.1:%d' % (port + 1)
     echo = os.path.getsize(os.path.join(SRV, 'echo.bin'))
     for step in STEPS:
         cmd, want, status = step[:3]
+        if cmd == 'PROXY': proxy.set(want, status); continue
+        if cmd == 'DOWN': check_down(proxy); continue
         stdin = step[3].encode() if len(step) > 3 else b''
         env = dict(os.environ, **step[4]) if len(step) > 4 else None
         for k, v in LONG.items(): cmd = cmd.replace(k, v) if isinstance(cmd, str) else cmd
-        args = cmd.replace('@', hp).split() if isinstance(cmd, str) else cmd
+        args = cmd.replace('PROXY', pp).replace('@', hp).split() if isinstance(cmd, str) else cmd
         prog = args[0] if args[0].startswith('/') else '/bin/%s.bin' % args[0]
         try:
             r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, prog] + args[1:],
                                input=stdin, capture_output=True, timeout=60, env=env)
         except subprocess.TimeoutExpired:
             fail('%s: timed out' % cmd); continue
-        out = r.stdout.decode(errors='replace').replace(hp, '@')
+        out = r.stdout.decode(errors='replace').replace(pp, 'PROXY').replace(hp, '@')
         for k, v in LONG.items(): out = out.replace(v, k)
         if isinstance(want, str):
             want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4))
@@ -204,7 +304,7 @@ def run_steps(port):
         if srv_file(name) != data: fail('server file %s: %r' % (name[:40], srv_file(name)))
     for d, _, names in os.walk(SRV):
         for n in names:
-            if n.endswith('.t2tmp'): fail('temp file left: %s' % n)
+            if n.endswith('.t2tmp') and n not in ('.r.txt.t2tmp', '.h.bin.t2tmp'): fail('temp file left: %s' % n)
     log = open(os.path.join(WORK, 'srv.log')).read()
     if not re.search(r'TRUNC /\.s\.txt\.t2tmp 0\n.*WRITE /\.s\.txt\.t2tmp 0 5\n.*RENAME /\.s\.txt\.t2tmp /s\.txt\n', log, re.S):
         fail('cp to /mnt/fs did not save through a temp file')
@@ -244,7 +344,8 @@ def main(argv):
         for t in TEST_PROGS:
             subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
                             os.path.join(BOARD, 'bin', t + '.bin'), os.path.join(ROOT, 'tests', 'netfs', t + '.c')], check=True)
-        run_steps(port)
+        open(os.path.join(BOARD, 'h.c'), 'w').write('int main() { return 0; }\n')
+        run_steps(port, Proxy(port + 1, port))
     finally:
         server.kill()
     if bad: print('%d failed' % bad); return 1

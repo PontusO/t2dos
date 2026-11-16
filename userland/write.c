@@ -18,6 +18,6 @@ int main(int argc, char **argv) {
     else if ((c == 8 || c == 127) && len) { len--; printf("\b \b"); }
     else if (len < 254 && (c >= 32 || c == 9)) { l[len++] = c; putchar(c); }
   }
-  close(fd);
+  if (close(fd) < 0) { printf("write: cannot write %s\n", argv[1]); return 1; }
   return 0;
 }

@@ -368,6 +368,6 @@ int main(int argc, char **argv) {
       || write(fd, code, csize) != csize || (dsize && write(fd, data, dsize) != dsize)) {
     printf("ld: cannot write %s\n", out); close(fd); quit();
   }
-  close(fd);
+  if (close(fd) < 0) { printf("ld: cannot write %s\n", out); quit(); }   // a /mnt/fs save can fail here
   return 0;
 }

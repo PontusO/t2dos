@@ -213,7 +213,7 @@ int save() {
   w = 0; n = len();
   if (gs > 0) w += write(fd, b, gs);
   if (cap > ge) w += write(fd, b + ge, cap - ge);
-  close(fd);
+  if (close(fd) < 0) { sprintf(msg, "cannot save %s", fname); return 0; }   // a /mnt/fs save can fail here
   if (w != n) { sprintf(msg, "write error: %d of %d bytes", w, n); return 0; }
   dirty = 0; sprintf(msg, "saved %d bytes", n);
   return 1;

@@ -3048,7 +3048,8 @@ int compile(char *src, char *out) {
   }
   write_data();
   oflush();
-  close(ofd); ofd = -1;
+  if (close(ofd) < 0) { ofd = -1; printf("cannot write %s\n", outname); unlink(outname); cleanup(); exit(1); }
+  ofd = -1;
 
   i = 0; while (i < nsyms) { if (syms[i].ptypes) free(syms[i].ptypes); i = i + 1; }
   i = 0; while (i < nfn) { if (fnparams[i]) free(fnparams[i]); i = i + 1; }
