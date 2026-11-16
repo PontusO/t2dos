@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the network file tools (wifi -s, rcd, rls, get, send) on the PC.
+"""Check the network tools (wifi -s, rcd, rls, get, send, rcp, ping) on the PC.
 
 Runs the root/bin/*.bin tools under qemu-arm with host_linux (whose sockets are real)
 against tools/fileserver.py on a random local port. The board side's root and the server's
@@ -9,14 +9,14 @@ and exit status must match. Also sends raw requests that try to leave the server
   check_net.py --pc    (needs `make` and `make host`)
 Exit status 0 when every step passes.
 """
-import os, random, shutil, socket, subprocess, sys, time
+import os, random, re, shutil, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'net')
 BOARD = os.path.join(WORK, 'board')
 SRV = os.path.join(WORK, 'srv')
 
-# (command, expected output, expected exit status); "@" is 127.0.0.1:PORT
+# (command, expected output or a regex for all of it, expected exit status); "@" is 127.0.0.1:PORT
 STEPS = [
     ('rls', 'no server: give host[:port] or set one with wifi -s host[:port]\n', 1),
     ('wifi -s @', 'server @\nconnected, ip 127.0.0.1\n', 0),
@@ -59,6 +59,9 @@ STEPS = [
     ('rcp -r t1 :up1', None, 0),
     ('rcp -r t1/sub :projects', None, 0),
     ('rcp -r :nothere t2', 'server: ERR No such file or directory\n', 1),
+    ('ping -c 2 127.0.0.1', re.compile(r'127\.0\.0\.1: \d+ ms\n127\.0\.0\.1: \d+ ms\n2 sent, 2 received\n'), 0),
+    ('ping nosuchhost.invalid', 'ping: cannot resolve nosuchhost.invalid\n', 1),
+    ('ping', 'usage: ping host [-c count]\n', 1),
 ]
 FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n', 'r1.txt': b'top\n', 'r2.txt': b'top\n',
          't1/a.txt': b'A\n', 't1/sub/b.txt': b'B\n', 't1/tree/a.txt': b'A\n', 't1/tree/sub/b.txt': b'B\n'}
@@ -104,7 +107,8 @@ def main(argv):
             r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, '/bin/%s.bin' % args[0]] + args[1:],
                                capture_output=True, timeout=30)
             out = r.stdout.decode(errors='replace').replace(hp, '@')
-            if r.returncode != status or (want is not None and out != want):
+            ok = want is None or (want.fullmatch(out) if isinstance(want, re.Pattern) else out == want)
+            if r.returncode != status or not ok:
                 bad += 1
                 print('FAIL %s: exit %d (want %d)\n%s' % (cmd, r.returncode, status, out))
         for name, data in FILES.items():

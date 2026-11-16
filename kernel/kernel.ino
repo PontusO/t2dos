@@ -589,6 +589,12 @@ extern "C" int sys(int num, int n, int *argv) {
         if (!server) return -1;           // its owner ended meanwhile
       } }
     case SYS_sock_avail: { WiFiClient *c = sock_of(A(0)); return c ? c->available() : -1; }
+    case SYS_ping: { if (WiFi.status() != WL_CONNECTED) return -3;
+      IPAddress ip; if (WiFi.hostByName((const char *)A(0), ip, 5000) != 1) return -2;
+      strlcpy((char *)A(1), ip.toString().c_str(), 16);
+      WiFi.setTimeout(1000); uint32_t t0 = millis(); int ttl = WiFi.ping(ip); int ms = millis() - t0;
+      WiFi.setTimeout(15000);             // the library default, used by begin() and hostByName()
+      return ttl > 0 ? ms : -1; }
     // ---- board
     case SYS_gpio_mode: pinMode(A(0), A(1) == PIN_OUTPUT ? OUTPUT : A(1) == PIN_INPUT_PULLUP ? INPUT_PULLUP : INPUT); return 0;
     case SYS_gpio_write: digitalWrite(A(0), A(1)); return 0;

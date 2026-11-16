@@ -104,6 +104,18 @@ static int sock_connect(const char *host, int port) {
   freeaddrinfo(res); return fd;
 }
 
+// ping: the PC's own ping program, since unprivileged ICMP sockets are often switched off
+static int host_ping(const char *host, char *ip) {
+  struct addrinfo hints = {0}, *res; hints.ai_family = AF_INET;
+  if (getaddrinfo(host, 0, &hints, &res)) return -2;
+  inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, ip, 16); freeaddrinfo(res);
+  char cmd[64], line[256]; snprintf(cmd, sizeof cmd, "ping -c 1 -W 1 -n %s 2>/dev/null", ip);
+  FILE *f = popen(cmd, "r"); if (!f) return -1;
+  int ms = -1; char *t;
+  while (fgets(line, sizeof line, f)) if ((t = strstr(line, "time=")) && ms < 0) ms = (int)(atof(t + 5) + 0.5);
+  pclose(f); return ms;
+}
+
 // named pipes under /pipe/ (one task on the host: nest == owner)
 #define PIPE_FD 200
 #define MAX_PIPES 8
@@ -246,6 +258,7 @@ int sys(int num, int n, int *argv) {
       struct sockaddr_in a = {0}; a.sin_family = AF_INET; a.sin_port = htons(A(0)); a.sin_addr.s_addr = INADDR_ANY;
       if (bind(listen_fd, (struct sockaddr *)&a, sizeof a) || listen(listen_fd, 2)) return -1; return 0; }
     case SYS_accept: { if (listen_fd < 0) return -1; struct pollfd p = { listen_fd, POLLIN, 0 }; int r = poll(&p, 1, A(0)); if (r == 0) return 0; if (r < 0) return -1; return accept(listen_fd, 0, 0); }
+    case SYS_ping: return host_ping((const char *)A(0), (char *)A(1));
     case SYS_sock_avail: { struct pollfd p = { A(0), POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
     case SYS_gpio_mode: case SYS_gpio_write: case SYS_pwm_write: case SYS_delay_us: case SYS_spi_transfer: return 0;
     case SYS_gpio_read: case SYS_analog_read: case SYS_i2c_write: case SYS_i2c_read: return 0;
