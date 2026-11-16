@@ -106,7 +106,7 @@ static FS *fsys = &SDFS;
 // resolved path.  A RAM file may use PSRAM down to TMP_MARGIN free, the rest is for programs.
 #define TMP_MARGIN (1024 * 1024)
 static FS *tmpfs;
-// /mnt/fs is the network filesystem (netfs.c, netfs.cpp) while one is mounted
+// /mnt/NAME is the network filesystem (netfs.c, netfs.cpp) for every mounted NAME
 static FS *netfs;
 static FS *fs_for(const char *path) {
   if (netfs && nfs_path(path)) return netfs;
@@ -182,38 +182,44 @@ static int sock_send(int fd, const char *buf, int n) { WiFiClient *c = sock_of(f
 static uint32_t sock_closed_at;          // millis() of the last close, see SYS_connect
 static void sock_close(int fd) { WiFiClient *c = sock_of(fd); if (c) { c->stop(); sock_used[fd - SOCK_FD] = false; sock_closed_at = millis(); } }
 
-// The network filesystem's transport (see netfs.h): its own connection, outside the programs'
-// socket table.  These run inside syscalls, so they wait with delay(), never k_wait(): no task
+// The network filesystem's transport (see netfs.h): one connection per mount in use, outside
+// the programs' socket table; the handle is the index in nt_clients.  These run inside syscalls, so they wait with delay(), never k_wait(): no task
 // switch inside a WiFi call.  The cache's blocks come from PSRAM and stop at TMP_MARGIN free.
-static WiFiClient nt_client;
+static WiFiClient nt_clients[NFS_MOUNTS]; static bool nt_used[NFS_MOUNTS];
+static WiFiClient *nt_of(int h) { return h >= 0 && h < NFS_MOUNTS && nt_used[h] ? &nt_clients[h] : nullptr; }
 extern "C" int nt_connect(const char *host, int port, int timeout_ms) {
-  if (WiFi.status() != WL_CONNECTED) return -1;
+  int h = 0; while (h < NFS_MOUNTS && nt_used[h]) h++;
+  if (h == NFS_MOUNTS || WiFi.status() != WL_CONNECTED) return -1;
+  WiFiClient &c = nt_clients[h];
   while (millis() - sock_closed_at < 10) delay(1);   // see SYS_connect
-  nt_client.setTimeout(timeout_ms);                  // name lookup and connect
-  if (!nt_client.connect(host, port)) { nt_client.stop(); sock_closed_at = millis(); return -1; }
-  nt_client.setNoDelay(true);
-  return 0;
+  c.setTimeout(timeout_ms);                          // name lookup and connect
+  if (!c.connect(host, port)) { c.stop(); sock_closed_at = millis(); return -1; }
+  c.setNoDelay(true);
+  nt_used[h] = true;
+  return h;
 }
-extern "C" int nt_send(int, const void *b, int n) {
-  int done = 0;
+extern "C" int nt_send(int h, const void *b, int n) {
+  WiFiClient *c = nt_of(h); int done = 0;
+  if (!c) return -1;
   while (done < n) {
-    if (!nt_client.connected()) return -1;
-    int w = nt_client.write((const uint8_t *)b + done, n - done);
+    if (!c->connected()) return -1;
+    int w = c->write((const uint8_t *)b + done, n - done);
     if (w <= 0) return -1;
     done += w;
   }
   return n;
 }
-extern "C" int nt_recv(int, void *b, int n, int timeout_ms) {
-  uint32_t t0 = millis();
-  while (!nt_client.available()) {
-    if (!nt_client.connected() || (int)(millis() - t0) >= timeout_ms) return -1;
+extern "C" int nt_recv(int h, void *b, int n, int timeout_ms) {
+  WiFiClient *c = nt_of(h); uint32_t t0 = millis();
+  if (!c) return -1;
+  while (!c->available()) {
+    if (!c->connected() || (int)(millis() - t0) >= timeout_ms) return -1;
     delay(1);
   }
-  int r = nt_client.read((uint8_t *)b, n);
+  int r = c->read((uint8_t *)b, n);
   return r > 0 ? r : -1;
 }
-extern "C" void nt_close(int) { nt_client.stop(); sock_closed_at = millis(); }
+extern "C" void nt_close(int h) { WiFiClient *c = nt_of(h); if (c) { c->stop(); nt_used[h] = false; sock_closed_at = millis(); } }
 extern "C" unsigned nt_millis(void) { return millis(); }
 extern "C" void nt_sleep(int ms) { delay(ms); }
 extern "C" void *nt_alloc(int n) {
@@ -226,12 +232,9 @@ extern "C" void nt_free(void *p) { free(p); }
 // mounts what /etc/mount names (host[:port], then the remote dir), without asking the server
 static void netfs_boot() {
   File f = fsys->open("/etc/mount", "r"); if (!f) return;
-  char buf[300]; int n = f.read((uint8_t *)buf, sizeof buf - 1); f.close();
+  static char buf[2048]; int n = f.read((uint8_t *)buf, sizeof buf - 1); f.close();
   buf[n > 0 ? n : 0] = 0;
-  char *nl = strchr(buf, '\n'); if (!nl) return; *nl = 0;
-  char *dir = nl + 1; char *e = strchr(dir, '\n'); if (e) *e = 0;
-  int port = 7777; char *c = strchr(buf, ':'); if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
-  nfs_mount(buf, port, *dir ? dir : "/", 0);
+  nfs_boot_text(buf);
 }
 
 static const char *resolve(const char *in, char *out, int outsz) {
@@ -249,6 +252,12 @@ static const char *resolve(const char *in, char *out, int outsz) {
   return out;
 }
 
+// /mnt/name on the main filesystem, so ls / and ls /mnt show the mounts
+static void mnt_dir(const char *name) {
+  char p[32]; snprintf(p, sizeof p, "/mnt/%s", name);
+  if (!fsys->exists("/mnt")) fsys->mkdir("/mnt");
+  if (!fsys->exists(p)) fsys->mkdir(p);
+}
 static bool is_dir(const char *path) { File f = fs_for(path)->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
 
 // The saved WiFi network: /etc/wifi is "T2W1" and a vault-sealed "ssid\0password\0".  Only the
@@ -415,7 +424,7 @@ static void pipes_release(int task, int level) {
 // rename within one filesystem, or copy and remove between /tmp and the others
 static int k_rename(const char *a, const char *b) {
   FS *fa = fs_for(a), *fb = fs_for(b);
-  if (fa == fb) return fa->rename(a, b) ? 0 : -1;
+  if (fa == fb && (fa != netfs || nfs_same(a, b))) return fa->rename(a, b) ? 0 : -1;   // else two mounts: copy
   File in = fa->open(a, "r"); if (!in || in.isDirectory()) return -1;
   File out = fb->open(b, "w"); if (!out) { in.close(); return -1; }
   uint8_t buf[512]; int k; bool ok = true;       // SRAM: PSRAM is never read while flash is written
@@ -610,7 +619,11 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_mkpipe: return k_mkpipe((const char *)A(0));
     case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
-      if (r == 0 && *h) { if (!is_dir("/mnt")) fsys->mkdir("/mnt"); if (!fsys->exists("/mnt/fs")) fsys->mkdir("/mnt/fs"); }   // so ls / shows it
+      if (r == 0 && *h) mnt_dir("fs");
+      return r; }
+    case SYS_mountat: { const char *nm = A(0) ? (const char *)A(0) : "", *h = A(1) ? (const char *)A(1) : "";
+      int r = nfs_mountat(nm, h, A(2), (const char *)A(3), 1);
+      if (r == 0 && *h) mnt_dir(nm);
       return r; }
     // ---- memory and strings
     case SYS_malloc: return (int)u_malloc(A(0));

@@ -440,9 +440,19 @@ MAIN_C = '#include "util.h"\nint main() { greet(); return 0; }\n'
 UTIL_H = 'int greet() { printf("hello from util\\n"); return 0; }\n'
 # (command, expected output lines); SERVER is the --server address
 BOARD_STEPS = [
-    ('umount', []),
-    ('mount SERVER', ['SERVER /']),
-    ('mount', ['SERVER /']),
+    ('umount', None),                          # whatever an earlier run left
+    ('umount two', None),
+    ('mount SERVER', ['SERVER / /mnt/fs']),
+    ('mount', ['SERVER / /mnt/fs']),
+    ('mount SERVER2 / two', ['SERVER2 / /mnt/two']),
+    ('mount', ['SERVER / /mnt/fs', 'SERVER2 / /mnt/two']),
+    ('cat /mnt/two/two.txt', ['two']),
+    ('cp /mnt/fs/big.bin /mnt/two/big.bin', []),
+    ('cmp /mnt/fs/big.bin /mnt/two/big.bin', []),
+    ('REBOOT', None),                          # both mounts come back from /etc/mount
+    ('mount', ['SERVER / /mnt/fs', 'SERVER2 / /mnt/two']),
+    ('cat /mnt/two/two.txt', ['two']),
+    ('umount two', []),
     ('ls /mnt/fs', ['   10000  big.bin', 'CPBIN  cp.bin', '   <dir>  prog/', '   <dir>  projects/', '       4  top.txt', 'CPALL']),
     ('ls /', None),                            # checked below: shows mnt/
     ('cat /mnt/fs/top.txt', ['top']),
@@ -476,6 +486,24 @@ BOARD_STEPS = [
     ('umount', []),
     ('mount', ['nothing mounted']),
 ]
+BSRV2 = os.path.join(WORK, 'bsrv2')
+
+
+def reboot(board, b):
+    """Reboots the board and waits until it is back on WiFi; the new Board."""
+    try: b._write(b'reboot\r'); time.sleep(0.5); b.s.close()
+    except Exception: pass
+    time.sleep(3)
+    for _ in range(60):
+        try: b = board.Board(); break
+        except board.BoardError: time.sleep(0.5)
+    for _ in range(30):
+        try:
+            if any(l.startswith('connected') for l in b.run('wifi', 5)): return b
+        except board.BoardError: pass
+        time.sleep(1)
+    fail('the board did not come back on WiFi after reboot')
+    return b
 
 
 def board_main(argv):
@@ -492,6 +520,11 @@ def board_main(argv):
     shutil.copy(os.path.join(ROOT, 'root', 'bin', 'cp.bin'), os.path.join(BSRV, 'cp.bin'))
     srv = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), BSRV, str(port)],
                            stdout=open(os.path.join(WORK, 'bsrv.log'), 'w'), stderr=subprocess.STDOUT)
+    shutil.rmtree(BSRV2, ignore_errors=True); os.makedirs(BSRV2)
+    open(os.path.join(BSRV2, 'two.txt'), 'w').write('two\n')
+    server2 = '%s:%d' % (server.rsplit(':', 1)[0], port + 2)
+    srv2 = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), BSRV2, str(port + 2)],
+                            stdout=open(os.path.join(WORK, 'bsrv2.log'), 'w'), stderr=subprocess.STDOUT)
     times = {}
     try:
         time.sleep(1)
@@ -505,18 +538,20 @@ def board_main(argv):
                 b.run('mount %s:%d' % (pc, pport), 30); continue
             if cmd == 'PROXYOFF':
                 b.run('mount ' + server, 30); continue
+            if cmd == 'REBOOT':
+                b = reboot(board, b); continue
             t0 = time.time()
-            got = b.run(cmd.replace('SERVER', server), 120.0)
+            got = b.run(cmd.replace('SERVER2', server2).replace('SERVER', server), 120.0)
             times.setdefault(cmd, []).append(time.time() - t0)
             if cmd == 'ls /' and '   <dir>  mnt/' not in got: fail('ls / has no mnt/: %r' % got)
             if cmd == '/mnt/fs/cp.bin' and want is None and any('usage' in l for l in got): fail('ran a half-loaded cp.bin')
             cpb = os.path.getsize(os.path.join(BSRV, 'cp.bin'))
-            want = want and [w.replace('SERVER', server).replace('CPBIN', '%8d' % cpb).replace('CPALL', '3 files, %d bytes' % (10004 + cpb)) for w in want]
+            want = want and [w.replace('SERVER2', server2).replace('SERVER', server).replace('CPBIN', '%8d' % cpb).replace('CPALL', '3 files, %d bytes' % (10004 + cpb)) for w in want]
             if want is not None and got != want:
                 fail('%s: %r' % (cmd, got))
     finally:
-        srv.kill()
-    for name, data in [('up2.bin', BIG), ('app.txt', b'more\nagain\n')]:
+        srv.kill(); srv2.kill()
+    for name, data in [('up2.bin', BIG), ('app.txt', b'more\nagain\n'), ('../bsrv2/big.bin', BIG)]:
         try: got = open(os.path.join(BSRV, name), 'rb').read()
         except OSError: got = None
         if got != data: fail('server file %s' % name)
