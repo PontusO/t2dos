@@ -983,6 +983,11 @@ How it behaves:
   run again.
 - Changes made on the PC show up the next time a file is opened. When the
   PC and the board change the same file, the last save wins.
+- A save that fails can leave a `.name.t2tmp` file on the PC; `ls` on the
+  board does not show these, and the next save of that file reuses it.
+- After `umount`, `/mnt/fs` is an ordinary directory on the SD card again:
+  files written there stay on the card and are hidden while something is
+  mounted. `cd` out of `/mnt/fs` before unmounting.
 
 #### nc
 

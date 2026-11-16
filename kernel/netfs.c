@@ -155,6 +155,7 @@ static int busy(void) {
   return 0;
 }
 int nfs_mount(const char *host, int port, const char *dir, int check) {
+  if (!dir) dir = "/";
   char oh[64], od[NAME], req[NAME + 8]; int oport = m_port, oon = m_on, r, k;
   if (busy()) return -3;
   drop_conn(); down = 0;
@@ -206,7 +207,7 @@ static int blk_slots(struct nfile *f, int i) {
 }
 // block i of f: cached, read from the server, or new zeros past its end there; 0 on failure
 static unsigned char *blk_get(struct nfile *f, int i) {
-  unsigned char *p; char req[NAME + 32]; struct op o;
+  unsigned char *p; char req[NAME + 32]; struct op o; int k;
   if (blk_slots(f, i) < 0) return 0;
   if (i >= f->nblk) f->nblk = i + 1;
   if (f->blk[i]) return f->blk[i];
@@ -216,7 +217,10 @@ static unsigned char *blk_get(struct nfile *f, int i) {
   if ((long)i * BLK < f->rsize) {
     if (snprintf(req, sizeof req, "READ %d %d %s\n", i * BLK, BLK, f->name) >= (int)sizeof req) { nt_free(p); return 0; }
     memset(&o, 0, sizeof o); o.req = req; o.in = p; o.inmax = BLK;
-    if (request(&o, 0)) { nt_free(p); return 0; }
+    // fewer bytes than the server had when the file was opened: it shrank there meanwhile,
+    // and this block cannot be read (zeros would pass for data)
+    k = f->rsize - i * BLK; if (k > BLK) k = BLK;
+    if (request(&o, 0) || o.got < k) { nt_free(p); return 0; }
   }
   f->blk[i] = p;
   return p;
@@ -299,6 +303,7 @@ int nfs_open(const char *abs, int mode) {
   } else {                                     // a file (not a directory) in an existing directory
     char parent[160]; char *sl;
     if (!strcmp(abs, NFS_ROOT)) return -1;
+    if (mode == NFS_WRITE && strlen(f->name) + 8 > NAME) return -1;   // no room for its temp name (file_save)
     if (nfs_stat(abs, &size, &isdir) == 0) {
       if (isdir) return -1;
       if (mode == NFS_APPEND) { f->existed = 1; f->size = f->rsize = f->pos = size; }
@@ -402,6 +407,7 @@ int nfs_readdir(int d, char *name, int namesz, int *size, int *isdir) {
     k = e - s;
     if (*isdir && k > 0 && s[k - 1] == '/') k--;
     if (k <= 0) continue;
+    if (s[0] == '.' && k > 7 && !strncmp(s + k - 6, ".t2tmp", 6)) continue;   // left by a failed save
     if (k > namesz - 1) k = namesz - 1;
     memcpy(name, s, k); name[k] = 0;
     return 1;

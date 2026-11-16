@@ -318,10 +318,10 @@ int sys(int num, int n, int *argv) {
       o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); return 1; }
     case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_dir_owner[d - 4] = -1; nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
     case SYS_chdir: { char r[160]; resolve((char *)A(0), r, sizeof r);
-      if (nfs_path(r)) { int sz, d; if (nfs_stat(r, &sz, &d) || !d) return -1; strcpy(cwd, r); return 0; } }
+      if (nfs_path(r)) { int sz, d; if (strlen(r) >= sizeof cwd || nfs_stat(r, &sz, &d) || !d) return -1; strcpy(cwd, r); return 0; } }
       { struct stat st; if (stat(hostpath((char *)A(0), p1), &st) || !S_ISDIR(st.st_mode)) return -1; resolve((char *)A(0), cwd, sizeof cwd); return 0; }
     case SYS_getcwd: strncpy((char *)A(0), cwd, A(1)); return A(0);
-    case SYS_mount: { const char *h = (const char *)A(0);
+    case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
       if (r == 0 && *h) { snprintf(p1, sizeof p1, "%s/mnt", root); mkdir(p1, 0755); strcat(p1, "/fs"); mkdir(p1, 0755); }
       return r; }

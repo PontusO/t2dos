@@ -28,8 +28,8 @@ STEPS = [
     ('mount', '@ /\n', 0),
     ('mount 127.0.0.1:1', 'mount: cannot reach 127.0.0.1:1\n', 1),
     ('mount @ nothere', 'mount: nothere: not a directory\n', 1),
-    ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\nECHO  echo.bin\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
-     '       1  s2.txt\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n       5  victim.txt\n8 files, ALL bytes\n', 0),
+    ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\n   <dir>  ' + 'd' * 40 + '/\nECHO  echo.bin\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
+     '       1  s2.txt\n    8192  shrink.bin\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n       5  victim.txt\n9 files, ALL bytes\n', 0),
     ('ls /', re.compile(r'(?s).*   <dir>  mnt/\n.*'), 0),
     ('cat /mnt/fs/top.txt', 'top\n', 0),
     ('cp /mnt/fs/big.bin b.bin', '', 0),
@@ -57,10 +57,15 @@ STEPS = [
     ('cp s.txt /mnt/fs/LONGL', '', 0),           # /mnt/fs/ + 151: a 159-byte path
     ('cat /mnt/fs/LONGL', 'sent\n', 0),
     ('mount @ LONGD', '@ /LONGD\n', 0),
-    ('wr /mnt/fs/LONGN hi', 'close -1\n', 0),   # fits, but its temp name does not
+    ('wr /mnt/fs/LONGN hi', 'open failed\n', 1),   # fits, but its temp name does not: refused at open
     ('mount @', '@ /\n', 0),
     ('full', 'wrote 8192\nclose 0\n', 0, '', {'T2_NETFS_CACHE': '8300'}),
     ('nl', 'stat -1\nopen -1\nmkdir -1\n', 0),       # victim.txt must survive
+    ('shrink', 'read -1\n', 0),                # the file shrank on the server meanwhile
+    ('cc -S -o /mnt/fs/cps.s cps.c', 'cannot write /mnt/fs/cps.s\n', 1, '', {'T2_NETFS_CACHE': '8300'}),
+    ('sh', re.compile(r'(?s).*> cd /mnt/fs/DEEP\ncd: no such directory\n/> pwd\n/\n.*'), 0, 'cd /mnt/fs/DEEP\npwd\nexit\n'),   # longer than cwd holds
+    ('mnull', 'mount 0\n', 0),
+    ('mount', '@ /\n', 0),                     # mount() itself does not touch /etc/mount
     # failures (Task 4): PROXY sits in front of the server; ('PROXY', mode, cut) sets it
     ('PROXY', 'flaky', None),                  # every other connection closed at once
     ('mount PROXY', 'PROXY /\n', 0),
@@ -83,13 +88,13 @@ STEPS = [
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
 ]
-LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135}
+LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135, 'DEEP': ('d' * 40 + '/') * 3 + 'd' * 10}
 FILES = {'b.bin': BIG, 'local.txt': None, 'f1.txt': b'sent\n'}
 SERVER_FILES = {'s.txt': b'sent\nmore\n', 'o.txt': b'x\n', 'big2.bin': BIG, 's2.txt': None, 'm1.txt': None,
                 'm2.txt': None, 'm3.txt': b'move\n', 't.txt': b'new\n', 'nc.txt': b'data\n', 'L' * 151: b'sent\n',
                 'D' * 60 + '/' + 'N' * 135: None, 'full.bin': b'z' * 8192, 'f1.txt': b'sent\n', 'r.txt': b'sent\n',
                 'victim.txt': b'keep\n'}
-TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down', 'nl']
+TEST_PROGS = ['twice', 'noclose', 'wr', 'full', 'down', 'nl', 'shrink', 'mnull']
 
 bad = 0
 
@@ -190,6 +195,21 @@ def check_server(port):
         s.close()
         if r != 'ERR outside root': fail('%s: %r' % (line, r))
     if os.path.exists(os.path.join(WORK, 'x')): fail('a request wrote outside the root')
+    s = session(port)                            # a refused WRITE still takes its data: never run as a request
+    r1, _ = ask(s, 'WRITE 0 13 ../x', b'STAT top.txt\n')
+    r2, _ = ask(s, 'STAT nothere')
+    s.close()
+    if r1 != 'ERR outside root' or not r2.startswith('ERR'): fail('refused WRITE data ran as a request: %r %r' % (r1, r2))
+    s = session(port)                            # names keep trailing spaces and bytes that are not UTF-8
+    s.sendall(b'WRITE 0 1 sp \nA'); r1 = recv_line(s)
+    s.sendall(b'WRITE 0 1 \xff.bin\nB'); r2 = recv_line(s)
+    r3, p = ask(s, 'LS /')
+    s.close()
+    if r1 != 'OK' or srv_file('sp ') != b'A' or srv_file('sp') is not None: fail('trailing space in a name: %r' % r1)
+    if r2 != 'OK' or not os.path.exists(os.path.join(SRV.encode(), b'\xff.bin')): fail('non-UTF-8 name: %r' % r2)
+    if b'  \xff.bin\n' not in p: fail('LS of a non-UTF-8 name: %r' % p)
+    for n in (b'sp ', b'sp', b'\xff.bin', b'\xef\xbf\xbd.bin'):
+        if os.path.exists(os.path.join(SRV.encode(), n)): os.remove(os.path.join(SRV.encode(), n))
     s = socket.create_connection(('127.0.0.1', port), 5)   # the one-request mode is unchanged
     s.sendall(b'GET top.txt\n')
     r = recv_n(s, 10); s.close()
@@ -282,7 +302,9 @@ def run_steps(port, proxy):
         cmd, want, status = step[:3]
         if cmd == 'PROXY': proxy.set(want, status); continue
         if cmd == 'DOWN': check_down(proxy); continue
-        stdin = step[3].encode() if len(step) > 3 else b''
+        stdin = step[3] if len(step) > 3 else ''
+        for k, v in LONG.items(): stdin = stdin.replace(k, v)
+        stdin = stdin.encode()
         env = dict(os.environ, **step[4]) if len(step) > 4 else None
         for k, v in LONG.items(): cmd = cmd.replace(k, v) if isinstance(cmd, str) else cmd
         args = cmd.replace('PROXY', pp).replace('@', hp).split() if isinstance(cmd, str) else cmd
@@ -295,7 +317,7 @@ def run_steps(port, proxy):
         out = r.stdout.decode(errors='replace').replace(pp, 'PROXY').replace(hp, '@')
         for k, v in LONG.items(): out = out.replace(v, k)
         if isinstance(want, str):
-            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4 + 5))
+            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4 + 5 + 8192))
             ok = out == want
         else:
             ok = want.fullmatch(out)
@@ -309,7 +331,7 @@ def run_steps(port, proxy):
         if srv_file(name) != data: fail('server file %s: %r' % (name[:40], srv_file(name)))
     for d, _, names in os.walk(SRV):
         for n in names:
-            if n.endswith('.t2tmp') and n not in ('.r.txt.t2tmp', '.h.bin.t2tmp'): fail('temp file left: %s' % n)
+            if n.endswith('.t2tmp') and n not in ('.r.txt.t2tmp', '.h.bin.t2tmp', '.old.t2tmp'): fail('temp file left: %s' % n)
     log = open(os.path.join(WORK, 'srv.log')).read()
     if not re.search(r'TRUNC /\.s\.txt\.t2tmp 0\n.*WRITE /\.s\.txt\.t2tmp 0 5\n.*RENAME /\.s\.txt\.t2tmp /s\.txt\n', log, re.S):
         fail('cp to /mnt/fs did not save through a temp file')
@@ -435,6 +457,11 @@ def main(argv):
         open(os.path.join(SRV, 'big.bin'), 'wb').write(BIG)
         shutil.copy(os.path.join(ROOT, 'root', 'bin', 'echo.bin'), os.path.join(SRV, 'echo.bin'))
         os.makedirs(os.path.join(SRV, 'sp')); open(os.path.join(SRV, 'sp', 'my file.txt'), 'w').write('S\n')
+        open(os.path.join(SRV, 'shrink.bin'), 'w').write('a' * 8192)
+        os.makedirs(os.path.join(SRV, LONG['DEEP']))
+        open(os.path.join(SRV, '.old.t2tmp'), 'w').write('left from a failed save\n')
+        shutil.copy(os.path.join(ROOT, 'userland', 'cp.c'), os.path.join(BOARD, 'cps.c'))
+        shutil.copy(os.path.join(ROOT, 'sys.h'), os.path.join(BOARD, 'sys.h'))
         for n, t in [('victim.txt', 'keep\n'), ('o.txt', 'a longer old content\n'), ('s2.txt', 'x'), ('m1.txt', 'move\n'), ('t.txt', 'old\n')]:
             open(os.path.join(SRV, n), 'w').write(t)
         os.makedirs(os.path.join(SRV, 'D' * 60))

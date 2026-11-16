@@ -608,7 +608,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_chdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1; strlcpy(cwd, path, sizeof cwd); return 0; }
     case SYS_getcwd: strlcpy((char *)A(0), cwd, A(1)); return A(0);
     case SYS_mkpipe: return k_mkpipe((const char *)A(0));
-    case SYS_mount: { const char *h = (const char *)A(0);
+    case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
       if (r == 0 && *h) { if (!is_dir("/mnt")) fsys->mkdir("/mnt"); if (!fsys->exists("/mnt/fs")) fsys->mkdir("/mnt/fs"); }   // so ls / shows it
       return r; }

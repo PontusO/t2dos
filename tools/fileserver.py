@@ -5,6 +5,7 @@ or, after a SESSION line, many: STAT, READ, WRITE, TRUNC, LS, MKDIR, RM, RMDIR, 
 (see README, network protocol)"""
 import os, socket, sys, threading
 
+sys.stdout.reconfigure(errors="backslashreplace")   # the log may show names that are not UTF-8
 ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 7777
 
@@ -19,7 +20,8 @@ def readline(c):
         ch = c.recv(1)
         if not ch: break
         b += ch
-    return b.decode(errors="replace").strip()
+    # only the line end goes: names keep their spaces, and bytes that are not UTF-8 survive
+    return b.decode(errors="surrogateescape").rstrip("\r\n")
 
 def recv_exact(c, size):
     got = b""
@@ -37,7 +39,7 @@ def listing(name):
     for n in sorted(os.listdir(d)):
         p = os.path.join(d, n)
         lines.append(f"   <dir>  {n}/" if os.path.isdir(p) else f"{os.path.getsize(p):8d}  {n}")
-    return ("\n".join(lines) + "\n").encode()
+    return ("\n".join(lines) + "\n").encode(errors="surrogateescape")
 
 def one(c, addr, line):
     """Answers one request. Numbers come before the name, so names may hold spaces."""
@@ -75,8 +77,8 @@ def one(c, addr, line):
         off, n, name = rest.split(" ", 2)
         off, n = int(off), int(n)
         if n > BLOCK or off < 0 or n < 0: raise ValueError("bad size")
+        data = recv_exact(c, n)                   # first: refused data must not be read as requests
         p = safe(name)
-        data = recv_exact(c, n)
         with open(p, "r+b" if os.path.exists(p) else "wb") as f:
             f.seek(off); f.write(data)
         c.sendall(b"OK\n")
@@ -109,7 +111,7 @@ def answer(c, addr, line):
     except Exception as e:
         # an OSError's text holds the full PC path: send only the reason
         msg = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
-        try: c.sendall(f"ERR {msg}\n".encode())
+        try: c.sendall(f"ERR {msg}\n".encode(errors="replace"))
         except Exception: return False
     return True
 

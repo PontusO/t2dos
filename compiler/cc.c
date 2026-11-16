@@ -143,7 +143,7 @@ char *ibuf; int ipos; int tobuf;                 // .Linit's code; tobuf: flush(
 char *numbuf;
 struct Sym **gsym; int *goff; int nglob;         // global variables: their data offsets, for the labels
 
-int oflush() { if (opos) write(ofd, obuf, opos); opos = 0; return 0; }
+int oflush() { if (opos && write(ofd, obuf, opos) != opos) { printf("cannot write %s\n", outname); quit(); } opos = 0; return 0; }
 int oput(char *s) {
   if (tobuf) {
     while (*s) { ibuf[ipos] = *s; ipos = ipos + 1; s = s + 1; }
@@ -3043,7 +3043,7 @@ int compile(char *src, char *out) {
   // global initializer code: one run-before-main function (ld calls it from its entry stub)
   if (ipos) {
     oput(".Linit:\n\tpush\t{r4, lr}\n"); oflush();
-    write(ofd, ibuf, ipos);
+    if (write(ofd, ibuf, ipos) != ipos) { printf("cannot write %s\n", outname); quit(); }
     oput("\tpop\t{r4, pc}\n\t.t2init\t.Linit\n");
   }
   write_data();
