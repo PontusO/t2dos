@@ -4,7 +4,7 @@ PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
 BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
-all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin basic_examples
+all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/mtab.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin basic_examples
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
@@ -20,7 +20,7 @@ $(CC_HOST): compiler/cc.c sys.h
 root/bin/cc.bin: compiler/cc.c $(TOOLS)
 	@mkdir -p root/lib root/src
 	$(call CCBIN,compiler/cc.c,)
-root/bin/%.bin: userland/%.c $(TOOLS) lib/net.c
+root/bin/%.bin: userland/%.c $(TOOLS) lib/net.c lib/mtab.c
 	$(call CCBIN,$<,-I lib)
 # binutils: host builds for the PC (tests) and board builds with compiler/cc
 build/host/%: binutils/%.c lib/t2obj.h lib/t2obj.c
@@ -57,6 +57,8 @@ root/lib/t2obj.c: lib/t2obj.c
 	@mkdir -p root/lib && cp lib/t2obj.c root/lib/
 root/lib/net.c: lib/net.c
 	@mkdir -p root/lib && cp lib/net.c root/lib/
+root/lib/mtab.c: lib/mtab.c
+	@mkdir -p root/lib && cp lib/mtab.c root/lib/
 root/lib/sys.h: sys.h
 	@mkdir -p root/lib && cp sys.h root/lib/
 root/lib/math.h: lib/math.h

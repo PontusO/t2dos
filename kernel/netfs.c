@@ -222,6 +222,31 @@ int nfs_mountat(const char *name, const char *host, int port, const char *dir, i
   if (had) { *m = old; m->conn = -1; m->down = 0; } else m->on = 0;   // the old mount, as it was
   return r;
 }
+// one "host[:port]" and dir, from /etc/mount
+static void boot_one(const char *name, char *host, char *dir) {
+  int port = 7777; char *c = strchr(host, ':');
+  if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
+  nfs_mountat(name, host, port, *dir ? dir : "/", 0);
+}
+void nfs_boot_text(char *t) {
+  char *nl = strchr(t, '\n'), *sp = strchr(t, ' '), *e, *host, *dir;
+  if (nl && (!sp || sp > nl)) {                // the old format: host[:port], then dir
+    *nl = 0; e = strchr(nl + 1, '\n'); if (e) *e = 0;
+    boot_one("fs", t, nl + 1);
+    return;
+  }
+  while (*t) {                                 // name host[:port] dir
+    nl = strchr(t, '\n'); if (nl) *nl = 0;
+    host = strchr(t, ' ');
+    if (host) {
+      *host++ = 0;
+      dir = strchr(host, ' ');
+      if (dir) { *dir++ = 0; boot_one(t, host, dir); }
+    }
+    if (!nl) break;
+    t = nl + 1;
+  }
+}
 int nfs_mount(const char *host, int port, const char *dir, int check) {
   int r = nfs_mountat("fs", host, port, dir, check);
   return (!host || !*host) && r == -5 ? 0 : r;   // unmounting /mnt/fs when nothing is there

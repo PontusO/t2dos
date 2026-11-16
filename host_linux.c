@@ -213,16 +213,13 @@ static void mnt_dir(const char *name) {
   snprintf(p, sizeof p, "%s/mnt/%s", root, name); mkdir(p, 0755);
 }
 static int nfs_mode(int fl) { return fl == OPEN_APPEND ? NFS_APPEND : (fl & 1) ? NFS_WRITE : NFS_READ; }
-// reads /etc/mount (host[:port], then the remote dir) and mounts without asking the server
+// reads /etc/mount and mounts every line without asking the server; a line that cannot be
+// mounted (bad name, too long, no free mount) is skipped
 static void nfs_boot(void) {
-  char p[300], buf[300], host[64]; int port = 7777; snprintf(p, sizeof p, "%s/etc/mount", root);
+  char p[300], buf[2048]; snprintf(p, sizeof p, "%s/etc/mount", root);
   FILE *f = fopen(p, "r"); if (!f) return;
   int n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n > 0 ? n : 0] = 0;
-  char *nl = strchr(buf, '\n'); if (!nl) return; *nl = 0;
-  char *dir = nl + 1; char *e = strchr(dir, '\n'); if (e) *e = 0;
-  if (strlen(buf) >= sizeof host) return;
-  strcpy(host, buf); char *c = strchr(host, ':'); if (c) { *c = 0; if (c[1]) port = atoi(c + 1); }
-  nfs_mount(host, port, *dir ? dir : "/", 0);
+  nfs_boot_text(buf);
 }
 
 static int k_write(int fd, const char *buf, int n) {

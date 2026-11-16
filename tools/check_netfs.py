@@ -25,12 +25,12 @@ BIG = bytes((i * 7 + i // 300) & 255 for i in range(10000))   # crosses blocks, 
 # expected output is a string (all of it) or a regex that must match all of it.
 STEPS = [
     ('mount', 'nothing mounted\n', 1),
-    ('mount @', '@ /\n', 0),
-    ('mount', '@ /\n', 0),
+    ('mount @', '@ / /mnt/fs\n', 0),
+    ('mount', '@ / /mnt/fs\n', 0),
     ('mount 127.0.0.1:1', 'mount: cannot reach 127.0.0.1:1\n', 1),
     ('mount @ nothere', 'mount: nothere: not a directory\n', 1),
-    ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\n   <dir>  ' + 'd' * 40 + '/\nECHO  echo.bin\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
-     '       1  s2.txt\n    8192  shrink.bin\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n       5  victim.txt\n9 files, ALL bytes\n', 0),
+    ('ls /mnt/fs', '   <dir>  LONGD/\n   10000  big.bin\n   <dir>  ' + 'd' * 40 + '/\nECHO  echo.bin\n      25  hs.c\n       5  m1.txt\n      21  o.txt\n   <dir>  projects/\n'
+     '       1  s2.txt\n    8192  shrink.bin\n   <dir>  sp/\n       4  t.txt\n       4  top.txt\n       5  victim.txt\n10 files, ALL bytes\n', 0),
     ('ls /', re.compile(r'(?s).*   <dir>  mnt/\n.*'), 0),
     ('cat /mnt/fs/top.txt', 'top\n', 0),
     ('cp /mnt/fs/big.bin b.bin', '', 0),
@@ -57,19 +57,19 @@ STEPS = [
     ('noclose', '', 0),
     ('cp s.txt /mnt/fs/LONGL', '', 0),           # /mnt/fs/ + 151: a 159-byte path
     ('cat /mnt/fs/LONGL', 'sent\n', 0),
-    ('mount @ LONGD', '@ /LONGD\n', 0),
+    ('mount @ LONGD', '@ /LONGD /mnt/fs\n', 0),
     ('wr /mnt/fs/LONGN hi', 'open failed\n', 1),   # fits, but its temp name does not: refused at open
-    ('mount @', '@ /\n', 0),
+    ('mount @', '@ / /mnt/fs\n', 0),
     ('full', 'wrote 8192\nclose 0\n', 0, '', {'T2_NETFS_CACHE': '8300'}),
     ('nl', 'stat -1\nopen -1\nmkdir -1\n', 0),       # victim.txt must survive
     ('shrink', 'read -1\n', 0),                # the file shrank on the server meanwhile
     ('cc -S -o /mnt/fs/cps.s cps.c', 'cannot write /mnt/fs/cps.s\n', 1, '', {'T2_NETFS_CACHE': '8300'}),
     ('sh', re.compile(r'(?s).*> cd /mnt/fs/DEEP\ncd: no such directory\n/> pwd\n/\n.*'), 0, 'cd /mnt/fs/DEEP\npwd\nexit\n'),   # longer than cwd holds
     ('mnull', 'mount 0\n', 0),
-    ('mount', '@ /\n', 0),                     # mount() itself does not touch /etc/mount
+    ('mount', '@ / /mnt/fs\n', 0),            # mount() itself does not touch /etc/mount
     # failures (Task 4): PROXY sits in front of the server; ('PROXY', mode, cut) sets it
     ('PROXY', 'flaky', None),                  # every other connection closed at once
-    ('mount PROXY', 'PROXY /\n', 0),
+    ('mount PROXY', 'PROXY / /mnt/fs\n', 0),
     ('cat /mnt/fs/top.txt', 'top\n', 0),
     ('cp s.txt /mnt/fs/f1.txt', '', 0),
     ('cp /mnt/fs/f1.txt f1.txt', '', 0),
@@ -86,6 +86,41 @@ STEPS = [
     ('cc -o /mnt/fs/h.bin h.c', '', 0),
     ('/mnt/fs/h.bin', '', 0),
     ('DOWN', None, None),                      # the down state: see check_down()
+    # several mounts: SRV2 is the second server (port + 2)
+    ('mount @', '@ / /mnt/fs\n', 0),
+    ('mount SRV2 / two', 'SRV2 / /mnt/two\n', 0),
+    ('mount', '@ / /mnt/fs\nSRV2 / /mnt/two\n', 0),
+    ('cp /mnt/fs/top.txt /mnt/two/top.txt', '', 0),
+    ('cat /mnt/two/top.txt', 'top\n', 0),
+    ('mv /mnt/two/top.txt /mnt/fs/top2.txt', '', 0),
+    ('mv /mnt/fs/projects /mnt/two/projects', 'mv failed\n', 1),
+    ('cc -o /mnt/two/h2.bin /mnt/fs/hs.c', '', 0),
+    ('/mnt/two/h2.bin', '', 0),
+    ('mount @ / /mnt/x', '@ / /mnt/x\n', 0),
+    ('mount @ / y', '@ / /mnt/y\n', 0),
+    ('mount @ / z', 'mount: too many mounts (4)\n', 1),
+    ('mount @ / bad/name', 'mount: bad name bad/name\n', 1),
+    ('mount @ / ..', 'mount: bad name ..\n', 1),
+    ('mount @ projects x', '@ /projects /mnt/x\n', 0),
+    ('mount', '@ / /mnt/fs\nSRV2 / /mnt/two\n@ /projects /mnt/x\n@ / /mnt/y\n', 0),
+    ('cat /mnt/x/game/a.txt', 'hello\n', 0),
+    ('umount x', '', 0),
+    ('umount /mnt/y', '', 0),
+    ('umount nope', 'umount: nope is not mounted\n', 1),
+    ('STOP2', None, None),                     # one server gone: only its mount fails
+    ('ls /mnt/two', 'ls: /mnt/two: not found\n', 0),
+    ('cat /mnt/fs/top2.txt', 'top\n', 0),
+    ('START2', None, None),
+    ('umount two', '', 0),
+    ('ETC', 'bad/n @ /\nfs @ /\na @ /\nb @ /\nc @ /\nd @ /\n', None),   # a bad name, then 5 mounts
+    ('cat /mnt/fs/top2.txt', 'top\n', 0),
+    ('cat /mnt/c/top2.txt', 'top\n', 0),
+    ('ls /mnt/d', 'ls: /mnt/d: not found\n', 0),
+    ('ETC', '@\n/projects\n', None),          # the old format: host, then dir
+    ('cat /mnt/fs/game/a.txt', 'hello\n', 0),
+    ('mount', '@ /projects /mnt/fs\n', 0),
+    ('mount @', '@ / /mnt/fs\n', 0),
+    ('ETCIS', 'fs @ /\n', None),               # rewritten in the new format
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
     ('TWO', None, None),                       # several mounts at once: see check_two()
@@ -316,6 +351,18 @@ fs 0 0
 '''
 
 
+SERVER2 = [None]
+
+
+def start2(port):
+    """(Re)starts the second fileserver.py, on port + 2 with root SRV2."""
+    SERVER2[0] = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV2, str(port + 2)],
+                                  stdout=open(os.path.join(WORK, 'srv2.log'), 'a'), stderr=subprocess.STDOUT)
+    for _ in range(50):
+        try: socket.create_connection(('127.0.0.1', port + 2), 0.2).close(); return
+        except OSError: time.sleep(0.1)
+
+
 def check_two(port):
     """two.bin: mounts a (first server) and b (second server, port + 2) in one program."""
     r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, '/bin/two.bin', str(port), str(port + 2)],
@@ -331,28 +378,37 @@ def check_two(port):
 def run_steps(port, proxy):
     hp = '127.0.0.1:%d' % port
     pp = '127.0.0.1:%d' % (port + 1)
+    s2 = '127.0.0.1:%d' % (port + 2)
     echo = os.path.getsize(os.path.join(SRV, 'echo.bin'))
     for step in STEPS:
         cmd, want, status = step[:3]
         if cmd == 'PROXY': proxy.set(want, status); continue
         if cmd == 'DOWN': check_down(proxy); continue
         if cmd == 'TWO': check_two(port); continue
+        if cmd == 'STOP2': SERVER2[0].kill(); SERVER2[0].wait(); continue
+        if cmd == 'START2': start2(port); continue
+        if cmd in ('ETC', 'ETCIS'):
+            path = os.path.join(BOARD, 'etc', 'mount'); text = want.replace('@', hp)
+            if cmd == 'ETC':
+                os.makedirs(os.path.dirname(path), exist_ok=True); open(path, 'w').write(text)
+            elif open(path).read() != text: fail('/etc/mount is %r' % open(path).read())
+            continue
         stdin = step[3] if len(step) > 3 else ''
         for k, v in LONG.items(): stdin = stdin.replace(k, v)
         stdin = stdin.encode()
         env = dict(os.environ, **step[4]) if len(step) > 4 else None
         for k, v in LONG.items(): cmd = cmd.replace(k, v) if isinstance(cmd, str) else cmd
-        args = cmd.replace('PROXY', pp).replace('@', hp).split() if isinstance(cmd, str) else cmd
+        args = cmd.replace('PROXY', pp).replace('SRV2', s2).replace('@', hp).split() if isinstance(cmd, str) else cmd
         prog = args[0] if args[0].startswith('/') else '/bin/%s.bin' % args[0]
         try:
             r = subprocess.run(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', BOARD, prog] + args[1:],
                                input=stdin, capture_output=True, timeout=60, env=env)
         except subprocess.TimeoutExpired:
             fail('%s: timed out' % cmd); continue
-        out = r.stdout.decode(errors='replace').replace(pp, 'PROXY').replace(hp, '@')
+        out = r.stdout.decode(errors='replace').replace(pp, 'PROXY').replace(s2, 'SRV2').replace(hp, '@')
         for k, v in LONG.items(): out = out.replace(v, k)
         if isinstance(want, str):
-            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 5 + 21 + 1 + 4 + 4 + 5 + 8192))
+            want = want.replace('ECHO', '%8d' % echo).replace('ALL', str(10000 + echo + 25 + 5 + 21 + 1 + 4 + 4 + 5 + 8192))
             ok = out == want
         else:
             ok = want.fullmatch(out)
@@ -362,6 +418,11 @@ def run_steps(port, proxy):
         try: got = open(os.path.join(BOARD, name), 'rb').read()
         except OSError: got = None
         if got != data: fail('board file %s' % name)
+    for path, data in [(os.path.join(SRV, 'top2.txt'), b'top\n'), (os.path.join(SRV2, 'top.txt'), None)]:
+        try: got = open(path, 'rb').read()
+        except OSError: got = None
+        if got != data: fail('server file %s: %r' % (path, got))
+    if not os.path.exists(os.path.join(SRV2, 'h2.bin')): fail('no h2.bin on the second server')
     for name, data in SERVER_FILES.items():
         if srv_file(name) != data: fail('server file %s: %r' % (name[:40], srv_file(name)))
     for d, _, names in os.walk(SRV):
@@ -482,8 +543,7 @@ def main(argv):
     server = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
                               stdout=open(os.path.join(WORK, 'srv.log'), 'w'), stderr=subprocess.STDOUT)
     os.makedirs(SRV2)
-    server2 = subprocess.Popen([sys.executable, '-u', os.path.join(ROOT, 'tools', 'fileserver.py'), SRV2, str(port + 2)],
-                               stdout=open(os.path.join(WORK, 'srv2.log'), 'w'), stderr=subprocess.STDOUT)
+    start2(port)
     try:
         for pt in (port, port + 2):
             for _ in range(50):
@@ -510,9 +570,10 @@ def main(argv):
             subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
                             os.path.join(BOARD, 'bin', t + '.bin'), os.path.join(ROOT, 'tests', 'netfs', t + '.c')], check=True)
         open(os.path.join(BOARD, 'h.c'), 'w').write('int main() { return 0; }\n')
+        open(os.path.join(SRV, 'hs.c'), 'w').write('int main() { return 0; }\n')
         run_steps(port, Proxy(port + 1, port))
     finally:
-        server.kill(); server2.kill()
+        server.kill(); SERVER2[0].kill()
     if bad: print('%d failed' % bad); return 1
     print('ok: server session requests, %d tool steps' % len(STEPS))
     return 0

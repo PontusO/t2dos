@@ -29,6 +29,10 @@ void nt_free(void *p);
 int nfs_mountat(const char *name, const char *host, int port, const char *dir, int check);
 // nfs_mountat("fs", ...), except that unmounting it when it is not mounted gives 0
 int nfs_mount(const char *host, int port, const char *dir, int check);
+// mounts every line of /etc/mount's text (changed in place), without asking the servers; a
+// line that cannot be mounted is skipped.  Lines are "name host[:port] dir" (dir is the rest of
+// the line); the old format, "host[:port]" then "dir", is mounted as fs.
+void nfs_boot_text(char *text);
 int nfs_mounted(void);                  // 1 while anything is mounted
 int nfs_path(const char *abs);          // 1 if a resolved path is /mnt/NAME or below it for a mounted NAME
 int nfs_same(const char *a, const char *b);   // 1 if both are on the same mount

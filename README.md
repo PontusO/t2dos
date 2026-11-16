@@ -947,20 +947,29 @@ ping: cannot resolve nosuch.local
 #### mount
 
 ```
-mount [host[:port] [dir]]
-umount
+mount [host[:port] [dir] [name]]
+umount [name]
 ```
 
 Shows directory `dir` (default `/`) of the PC's `fileserver.py` at
-`/mnt/fs`, so every program works on the PC's files directly: `cd`, `ls`,
-`cat`, `cp`, `edit`, `cc`, and running a `.bin` from there. `mount` alone
-shows the current mount; `umount` removes it (not while a file under
-`/mnt/fs` is open). The setting is kept in `/etc/mount` and comes back at
-boot.
+`/mnt/name` (default `/mnt/fs`), so every program works on the PC's files
+directly: `cd`, `ls`, `cat`, `cp`, `edit`, `cc`, and running a `.bin` from
+there. Up to 4 mounts can be in use at once, to different PCs, ports or
+directories; a name is 1 to 15 letters, digits, `_`, `-` or `.`, and may
+also be written as `/mnt/name`. Mounting a name again replaces it. `mount`
+alone lists the mounts; `umount name` removes one (`fs` when no name is
+given; not while a file under it is open). The mounts are kept in
+`/etc/mount` and come back at boot.
 
 ```
 /> mount pc.local projects
-pc.local /projects
+pc.local /projects /mnt/fs
+/> mount laptop:7778 / lap
+laptop:7778 / /mnt/lap
+/> mount
+pc.local /projects /mnt/fs
+laptop:7778 / /mnt/lap
+/> cp /mnt/lap/notes.txt /mnt/fs/notes.txt
 /> cd /mnt/fs/game
 /mnt/fs/game> edit main.c
 /mnt/fs/game> cc -o game.bin main.c
@@ -969,8 +978,11 @@ pc.local /projects
 
 How it behaves:
 
-- One connection carries all requests and is opened on first use, so the
-  board boots fine with the PC off.
+- Each mount has one connection, which carries all its requests and is
+  opened on first use, so the board boots fine with the PC off. The board's
+  network stack has 5 TCP connections in all, shared by programs' sockets
+  and the mounts in use; when none is free, a mount fails like an
+  unreachable PC (below).
 - An open file keeps the 4 KB blocks it has read or written in PSRAM;
   changes go to the PC when the file is closed. A file written from the
   start is saved under a temporary name (`.name.t2tmp`) and then renamed, so
@@ -979,15 +991,17 @@ How it behaves:
   the compiler tools report it.
 - The board waits while a request travels (about 15-30 ms each). When the PC
   cannot be reached, the first call fails after about 6 s; then calls under
-  `/mnt/fs` fail at once until 10 s have passed (one new try) or `mount` is
-  run again.
+  that mount fail at once until 10 s have passed (one new try) or `mount` is
+  run again. Other mounts keep working.
+- Moving a file between two mounts copies it; moving a directory between
+  them is refused.
 - Changes made on the PC show up the next time a file is opened. When the
   PC and the board change the same file, the last save wins.
 - A save that fails can leave a `.name.t2tmp` file on the PC; `ls` on the
   board does not show these, and the next save of that file reuses it.
-- After `umount`, `/mnt/fs` is an ordinary directory on the SD card again:
+- After `umount`, `/mnt/name` is an ordinary directory on the SD card again:
   files written there stay on the card and are hidden while something is
-  mounted. `cd` out of `/mnt/fs` before unmounting.
+  mounted. `cd` out of it before unmounting.
 
 #### nc
 
@@ -2490,8 +2504,10 @@ RENAME name                 (then a line with the new name) -> OK, replaces it
 `READ` and `WRITE` move at most 4096 bytes. The
 board keeps the default server and the remote directory in `/etc/remote`
 (two lines: `host[:port]` and the directory), which `wifi -s` and `rcd`
-write. `/etc/mount` (the same two lines) is the network filesystem's
-server and directory, written by `mount`.
+write. `/etc/mount` holds the network filesystem's mounts, one
+`name host[:port] dir` line each (dir is the rest of the line), written by
+`mount` and `umount` (`lib/mtab.c`); a file in the older format, two lines
+`host[:port]` and `dir`, is read as the mount `fs`.
 
 ### File formats
 
@@ -2520,7 +2536,8 @@ compiler/cc.c     the compiler and driver; compiler/tests/ has the language test
 assembler/as.c    the assembler
 linker/ld.c       the linker
 binutils/         ar, nm, objdump
-lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers)
+lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers),
+                  mtab.c (/etc/mount for mount and umount)
 basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
