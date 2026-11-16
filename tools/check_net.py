@@ -44,9 +44,20 @@ STEPS = [
     ('get', 'usage: get [host[:port]] remotefile [localfile]\n', 1),
     ('rcd @ /', '@ /\n', 0),
     ('get projects/game/a.txt b.txt', None, 0),
+    ('rcp', 'usage: rcp [-r] src dst\n', 1),
+    ('rcp a.txt b.txt', 'rcp: one side must be remote (host:path or :path)\n', 1),
+    ('rcp :top.txt r1.txt', 'r1.txt: 4 bytes\n', 0),
+    ('rcp @:top.txt r2.txt', None, 0),       # host:port:path
+    ('rcp s.txt :projects/game', '/projects/game/s.txt: 5 bytes\n', 0),   # into an existing directory
+    ('rcp s.txt :projects/game/s2.txt', None, 0),
+    ('rcp s.txt :nodir/x.txt', 'server: ERR No such file or directory\n', 1),
+    ('rcp :projects r3', 'rcp: projects: is a directory, use -r\n', 1),
+    ('mkdir ld', None, 0),
+    ('rcp ld :x', 'rcp: ld: is a directory, use -r\n', 1),
 ]
-FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n'}
-SERVER_FILES = {'projects/s.txt': b'sent\n', 'up.txt': b'sent\n'}
+FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n', 'r1.txt': b'top\n', 'r2.txt': b'top\n'}
+SERVER_FILES = {'projects/s.txt': b'sent\n', 'up.txt': b'sent\n', 'projects/game/s.txt': b'sent\n',
+                'projects/game/s2.txt': b'sent\n'}
 ESCAPES = ['GET ../srv2/secret', 'GET /../srv2/secret', 'LS ..', 'PUT ../srv2/x 1', 'MKDIR ../srv2/d']
 
 

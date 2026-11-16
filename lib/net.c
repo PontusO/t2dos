@@ -160,3 +160,57 @@ int net_pick(int argc, char **argv) {
   if (!net_host[0]) { printf("no server: give host[:port] or set one with wifi -s host[:port]\n"); return -1; }
   return 0;
 }
+
+// rcp's remote argument: ":path" (the saved server and remote directory), "host:path" or
+// "host:port:path" (that host, from "/" unless it is the saved server).  0 if arg has no ':'
+// (a local name), 1 with net_host set and net_path the resolved remote path, -1 on error.
+int net_remote(char *arg) {
+  char h[64]; char t[64]; char *c; char *p; char *d; int k;
+  c = strchr(arg, ':');
+  if (!c) return 0;
+  net_load();
+  if (c == arg) {
+    if (!net_host[0]) { printf("no server: give host:path or set one with wifi -s host[:port]\n"); return -1; }
+    return net_resolve(arg + 1) < 0 ? -1 : 1;
+  }
+  p = c + 1;
+  d = strchr(p, ':');
+  if (d) {                                      // host:port:path when the middle part is a number
+    k = 0; while (p + k < d && p[k] >= '0' && p[k] <= '9') k++;
+    if (p + k == d) { c = d; p = d + 1; }
+  }
+  k = c - arg;
+  if (k > 63) { printf("server name too long\n"); return -1; }
+  memcpy(t, arg, k); t[k] = 0;
+  if (net_norm(h, t) < 0) return -1;
+  if (strcmp(h, net_host)) { strcpy(net_host, h); strcpy(net_dir, "/"); }
+  return net_resolve(p) < 0 ? -1 : 1;
+}
+
+// 1 if path is a directory on net_host (LS answers OK), 0 if not, -1 if the server is unreachable
+int net_isdir(char *path) {
+  char req[220]; char buf[256]; int sock; int size; int r;
+  sock = net_open(net_host); if (sock < 0) return -1;
+  sprintf(req, "LS %s\n", path);
+  send(sock, req, strlen(req));
+  if (net_readline(sock, net_line, 128) < 0) { printf("no reply\n"); close(sock); return -1; }
+  if (strncmp(net_line, "OK", 2)) { close(sock); return 0; }
+  size = net_line[2] == ' ' ? atoi(net_line + 3) : 0;
+  while (size > 0) {                            // the listing is not needed: drain it
+    r = recv(sock, buf, size > 256 ? 256 : size, 10000);
+    if (r <= 0) break;
+    size = size - r;
+  }
+  close(sock);
+  return 1;
+}
+
+// creates directory path on net_host (no error if it exists); 0, or -1 with a message
+int net_mkdir(char *path) {
+  char req[220]; int sock; int r;
+  sock = net_open(net_host); if (sock < 0) return -1;
+  sprintf(req, "MKDIR %s\n", path);
+  r = net_request(sock, req);
+  close(sock);
+  return r < 0 ? -1 : 0;
+}
