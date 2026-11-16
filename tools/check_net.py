@@ -21,7 +21,7 @@ STEPS = [
     ('rls', 'no server: give host[:port] or set one with wifi -s host[:port]\n', 1),
     ('wifi -s @', 'server @\nconnected, ip 127.0.0.1\n', 0),
     ('wifi', 'connected, ip 127.0.0.1\nserver @ /\n', 0),
-    ('rls', '   <dir>  projects/\n       4  top.txt\n', 0),
+    ('rls', '   <dir>  projects/\n       4  top.txt\n   <dir>  tree/\n', 0),
     ('rcd projects/game', '@ /projects/game\n', 0),
     ('rcd', '@ /projects/game\n', 0),
     ('rls', '       6  a.txt\n', 0),
@@ -33,7 +33,7 @@ STEPS = [
     ('send s.txt', None, 0),
     ('send s.txt ../up.txt', None, 0),
     ('rls .', '   <dir>  game/\n       5  s.txt\n', 0),
-    ('rls ../..', '   <dir>  projects/\n       4  top.txt\n       5  up.txt\n', 0),
+    ('rls ../..', '   <dir>  projects/\n       4  top.txt\n   <dir>  tree/\n       5  up.txt\n', 0),
     ('rls ../../../srv2', 'server: ERR No such file or directory\n', 1),
     ('wifi -s 127.0.0.1:PORT', 'server @\nconnected, ip 127.0.0.1\n', 0),
     ('rcd', '@ /projects\n', 0),
@@ -54,10 +54,19 @@ STEPS = [
     ('rcp :projects r3', 'rcp: projects: is a directory, use -r\n', 1),
     ('mkdir ld', None, 0),
     ('rcp ld :x', 'rcp: ld: is a directory, use -r\n', 1),
+    ('rcp -r :tree t1', 't1/a.txt: 2 bytes\nt1/sub/b.txt: 2 bytes\n2 files, 4 bytes\n', 0),
+    ('rcp -r :tree t1', None, 0),             # t1 exists now: copied into it
+    ('rcp -r t1 :up1', None, 0),
+    ('rcp -r t1/sub :projects', None, 0),
+    ('rcp -r :nothere t2', 'server: ERR No such file or directory\n', 1),
 ]
-FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n', 'r1.txt': b'top\n', 'r2.txt': b'top\n'}
+FILES = {'a.txt': b'hello\n', 'b.txt': b'hello\n', 't2.txt': b'top\n', 'r1.txt': b'top\n', 'r2.txt': b'top\n',
+         't1/a.txt': b'A\n', 't1/sub/b.txt': b'B\n', 't1/tree/a.txt': b'A\n', 't1/tree/sub/b.txt': b'B\n'}
 SERVER_FILES = {'projects/s.txt': b'sent\n', 'up.txt': b'sent\n', 'projects/game/s.txt': b'sent\n',
-                'projects/game/s2.txt': b'sent\n'}
+                'projects/game/s2.txt': b'sent\n', 'up1/a.txt': b'A\n', 'up1/sub/b.txt': b'B\n',
+                'up1/tree/a.txt': b'A\n', 'projects/sub/b.txt': b'B\n'}
+BOARD_DIRS = ['t1/empty', 't1/tree/empty']
+SERVER_DIRS = ['up1/empty', 'up1/tree/empty']
 ESCAPES = ['GET ../srv2/secret', 'GET /../srv2/secret', 'LS ..', 'PUT ../srv2/x 1', 'MKDIR ../srv2/d']
 
 
@@ -77,6 +86,9 @@ def main(argv):
     open(os.path.join(SRV, 'projects', 'game', 'a.txt'), 'w').write('hello\n')
     open(os.path.join(SRV, 'top.txt'), 'w').write('top\n')
     open(os.path.join(WORK, 'srv2', 'secret'), 'w').write('secret\n')
+    os.makedirs(os.path.join(SRV, 'tree', 'sub')); os.makedirs(os.path.join(SRV, 'tree', 'empty'))
+    open(os.path.join(SRV, 'tree', 'a.txt'), 'w').write('A\n')
+    open(os.path.join(SRV, 'tree', 'sub', 'b.txt'), 'w').write('B\n')
     open(os.path.join(BOARD, 's.txt'), 'w').write('sent\n')
     port = random.randint(20000, 29999)
     server = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tools', 'fileserver.py'), SRV, str(port)],
@@ -99,6 +111,10 @@ def main(argv):
             if content(os.path.join(BOARD, name)) != data: bad += 1; print('FAIL board file', name)
         for name, data in SERVER_FILES.items():
             if content(os.path.join(SRV, name)) != data: bad += 1; print('FAIL server file', name)
+        for d in BOARD_DIRS:
+            if not os.path.isdir(os.path.join(BOARD, d)): bad += 1; print('FAIL board dir', d)
+        for d in SERVER_DIRS:
+            if not os.path.isdir(os.path.join(SRV, d)): bad += 1; print('FAIL server dir', d)
         if content(os.path.join(BOARD, 'etc', 'remote')) != (hp + '\n/\n').encode(): bad += 1; print('FAIL /etc/remote')
         for req in ESCAPES:
             s = socket.create_connection(('127.0.0.1', port), 5)
