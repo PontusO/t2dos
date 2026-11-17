@@ -348,6 +348,12 @@ static void mnt_dir(const char *name) {
   if (!fsys->exists("/mnt")) fsys->mkdir("/mnt");
   if (!fsys->exists(p)) fsys->mkdir(p);
 }
+// after an unmount (or umount of a name not mounted): removes /mnt/name if it is empty
+static void mnt_undir(const char *name) {
+  if (!*name || !strcmp(name, ".") || !strcmp(name, "..") || strchr(name, '/') || strlen(name) > 15) return;
+  char p[32]; snprintf(p, sizeof p, "/mnt/%s", name);
+  if (fsys->exists(p)) fsys->rmdir(p);   // fails, and keeps it, unless empty
+}
 static bool is_dir(const char *path) { File f = fs_for(path)->open(path, "r"); bool d = f && f.isDirectory(); if (f) f.close(); return d; }
 
 // The saved WiFi network: /etc/wifi is "T2W1" and a vault-sealed "ssid\0password\0".  Only the
@@ -754,10 +760,12 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
       if (r == 0 && *h) mnt_dir("fs");
+      if ((r == 0 || r == MOUNT_BADNAME) && !*h) mnt_undir("fs");
       return r; }
     case SYS_mountat: { const char *nm = A(0) ? (const char *)A(0) : "", *h = A(1) ? (const char *)A(1) : "";
       int r = nfs_mountat(nm, h, A(2), (const char *)A(3), 1);
       if (r == 0 && *h) mnt_dir(nm);
+      if ((r == 0 || r == MOUNT_BADNAME) && !*h) mnt_undir(nm);
       return r; }
     // ---- memory and strings
     case SYS_malloc: return (int)u_malloc(A(0));
@@ -1273,7 +1281,9 @@ void loop() {
     Serial.println("no /bin/sh.bin, recovery prompt");
   } else {
     char *argv[] = { (char *)"sh" };
-    int r = run_bin("/bin/sh.bin", 1, argv);
+    int r;
+    // exit typed while a telnet session is logged in logs that session out; USB gets a new sh
+    do r = run_bin("/bin/sh.bin", 1, argv); while (td_logout("logged out"));
     Serial.printf("sh exited (%d), recovery prompt\r\n", r);
   }
   static char line[128];

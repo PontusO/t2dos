@@ -148,6 +148,15 @@ def scenario(con, host, port, local_ip):
     c3.close()
     con.r.wait(b'telnetd: %s disconnected' % local_ip.encode(), name='disconnect note')
 
+    # exit in the session logs it out and starts sh again, so USB keeps a shell
+    c10 = Client(host, port)
+    c10.login('before exit')
+    c10.send('exit\r\n')
+    c10.r.wait(b'[logged out]\r\n', name='exit logs out'); c10.r.closed(name='exit close'); c10.close()
+    con.r.wait(b'telnetd: %s logged out' % local_ip.encode(), name='logged out note')
+    local('echo again', re.compile(rb'again\r?\n'), 'sh after exit')
+    time.sleep(0.3)
+
     # a wrong try then a new connection: the next prompt still waits 2 s
     c8 = Client(host, port); c8.r.wait(b'password: ', name='retry prompt'); c8.send('bad\r\n')
     c8.r.wait(b'wrong password\r\n', name='retry wrong'); c8.close()

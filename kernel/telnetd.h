@@ -23,6 +23,7 @@ unsigned td_millis(void);
 
 void td_start(const char *pass);   // connections may log in with pass from now on (a live session stays)
 void td_stop(const char *why);     // tells the live session why, then closes every session
+int td_logout(const char *why);   // ends the live session with why: 1, or 0 if none was logged in
 void td_poll(void);                // accepts connections, runs the logins, reads the live session
 int td_avail(void);                // input bytes from the live session (after td_poll)
 int td_getc(void);                 // the next one, or -1

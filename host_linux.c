@@ -259,6 +259,12 @@ static void mnt_dir(const char *name) {
   char p[300]; snprintf(p, sizeof p, "%s/mnt", root); mkdir(p, 0755);
   snprintf(p, sizeof p, "%s/mnt/%s", root, name); mkdir(p, 0755);
 }
+// after an unmount (or umount of a name not mounted): removes /mnt/name if it is empty
+static void mnt_undir(const char *name) {
+  if (!*name || !strcmp(name, ".") || !strcmp(name, "..") || strchr(name, '/') || strlen(name) > 15) return;
+  char p[300]; snprintf(p, sizeof p, "%s/mnt/%s", root, name);
+  rmdir(p);                          // fails, and keeps it, unless empty
+}
 static int nfs_mode(int fl) { return fl == OPEN_APPEND ? NFS_APPEND : (fl & 1) ? NFS_WRITE : NFS_READ; }
 // reads /etc/mount and mounts every line without asking the server; a line that cannot be
 // mounted (bad name, too long, no free mount) is skipped
@@ -376,10 +382,12 @@ int sys(int num, int n, int *argv) {
     case SYS_mount: { const char *h = A(0) ? (const char *)A(0) : "";   // a null host unmounts too
       int r = nfs_mount(h, A(1), (const char *)A(2), 1);
       if (r == 0 && *h) mnt_dir("fs");
+      if ((r == 0 || r == MOUNT_BADNAME) && !*h) mnt_undir("fs");
       return r; }
     case SYS_mountat: { const char *nm = A(0) ? (const char *)A(0) : "", *h = A(1) ? (const char *)A(1) : "";
       int r = nfs_mountat(nm, h, A(2), (const char *)A(3), 1);
       if (r == 0 && *h) mnt_dir(nm);
+      if ((r == 0 || r == MOUNT_BADNAME) && !*h) mnt_undir(nm);
       return r; }
     case SYS_mkpipe: { const char *nm = (const char *)A(0);   // the part after /pipe/
       if (!nm[0] || strlen(nm) > 31 || strchr(nm, '/')) return -1;
@@ -497,7 +505,8 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "-r")) { strcpy(root, argv[2]); argv += 2; argc -= 2; }
   nfs_boot();
   if (isatty(0)) { struct termios t; tcgetattr(0, &t); t.c_lflag &= ~(ICANON | ECHO); tcsetattr(0, TCSANOW, &t); }
-  int r = run_bin(argv[1], argc - 1, argv + 1);
+  int r;
+  do r = run_bin(argv[1], argc - 1, argv + 1); while (td_logout("logged out"));   // as the board's loop()
   fflush(stdout);
   return r;
 }

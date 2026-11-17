@@ -23,6 +23,7 @@ BIG = bytes((i * 7 + i // 300) & 255 for i in range(10000))   # crosses blocks, 
 # Tool steps under qemu: (command, expected output, expected exit status[, stdin]).  A command
 # is a string split at spaces or a list (names with spaces); "@" is 127.0.0.1:PORT.  The
 # expected output is a string (all of it) or a regex that must match all of it.
+MNT_FS_TWO = re.compile(r'(   <dir>  (fs|two)/\n){2}0 files, 0 bytes\n')   # ls order is the host's
 STEPS = [
     ('mount', 'nothing mounted\n', 1),
     ('mount @', '@ / /mnt/fs\n', 0),
@@ -107,6 +108,10 @@ STEPS = [
     ('umount x', '', 0),
     ('umount /mnt/y', '', 0),
     ('umount nope', 'umount: nope is not mounted\n', 1),
+    ('ls /mnt', MNT_FS_TWO, 0),   # umount removed x/ and y/
+    ('mkdir /mnt/old', '', 0),                 # left by an older kernel: umount removes it too
+    ('umount old', 'umount: old is not mounted\n', 1),
+    ('ls /mnt', MNT_FS_TWO, 0),
     ('STOP2', None, None),                     # one server gone: only its mount fails
     ('ls /mnt/two', 'ls: /mnt/two: not found\n', 0),
     ('cat /mnt/fs/top2.txt', 'top\n', 0),
@@ -128,6 +133,7 @@ STEPS = [
     ('ETCIS', 'fs @ /\n', None),               # rewritten in the new format
     ('umount', '', 0),
     ('mount', 'nothing mounted\n', 1),
+    ('ls /mnt', '0 files, 0 bytes\n', 0),
     ('TWO', None, None),                       # several mounts at once: see check_two()
 ]
 LONG = {'LONGL': 'L' * 151, 'LONGD': 'D' * 60, 'LONGN': 'N' * 135, 'DEEP': ('d' * 40 + '/') * 3 + 'd' * 10}

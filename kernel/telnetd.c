@@ -154,6 +154,14 @@ void td_stop(const char *why) {
   memset(pass, 0, sizeof pass); on = 0; in_n = 0; out_n = 0;
 }
 
+int td_logout(const char *why) {
+  if (live.state != S_LIVE) return 0;
+  td_flush();
+  say(&live, "\r\n["); say(&live, why); say(&live, "]\r\n");
+  note("logged out", &live); drop(&live); in_n = 0;
+  return 1;
+}
+
 void td_poll(void) {
   unsigned now = td_millis();
   int h;
