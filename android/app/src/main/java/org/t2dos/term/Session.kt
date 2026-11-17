@@ -16,7 +16,7 @@ import java.util.concurrent.Executors
 class Session(
     private val host: String, private val port: Int, private val password: String?,
     cols: Int, rows: Int, private val listener: Listener,
-    private val idleMs: Int = 10000,
+    private val idleMs: Int = 15000,
 ) {
     interface Listener {
         fun changed()                       // the screen changed (called on the session thread)
@@ -47,15 +47,16 @@ class Session(
             sock = s; out = s.getOutputStream()
             val inp = s.getInputStream()
             val buf = ByteArray(4096)
-            var probing = false
+            var missed = 0
             while (!ended) {
                 val n = try { inp.read(buf) } catch (e: SocketTimeoutException) {
                     // quiet for idleMs: ask the board for an answer (telnetd answers IAC DO 6 with
-                    // IAC WONT 6); quiet again after that means it is gone (power cut, reset)
-                    if (probing) { error = "no answer from the board"; break }
-                    probing = true; send0(byteArrayOf(-1, -3, 6)); continue
+                    // IAC WONT 6); PROBES asks in a row with no answer means it is gone (power
+                    // cut, reset), about a minute with the default idleMs
+                    if (missed >= PROBES) { error = "no answer from the board"; break }
+                    missed++; send0(byteArrayOf(-1, -3, 6)); continue
                 }
-                probing = false
+                missed = 0
                 if (n < 0) { clean = true; break }
                 val data = synchronized(telnet) { telnet.receive(buf, 0, n) }
                 if (data.isEmpty()) continue
@@ -126,6 +127,7 @@ class Session(
     }
 
     companion object {
+        const val PROBES = 3
         private val BRACKET = Regex("""\r\n\[([^\]\r\n]{1,100})\]\r\n$""")
 
         /** What to show when the board closes: the [message] or refusal it ended with, else null. */

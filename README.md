@@ -1093,9 +1093,17 @@ Add a board with its address and port; its password can be saved (encrypted
 with the phone's key store) and is then typed for you, once per connection.
 Tap the screen for the keyboard. The row above it has Esc, Ctrl (tap once
 for the next key, twice to lock it), Tab, the arrows, Home, End, PgUp, PgDn,
-Del and ^C. Pinch to change the font size, drag down to scroll back through
-the shell's output, long-press to paste. When the board ends the session
-the last screen stays, with the reason and a Reconnect button.
+Del and ^C, and Disconnect at the end. Pinch to change the font size, drag
+down to scroll back through the shell's output, long-press to paste. When
+the board ends the session the last screen stays, with the reason and a
+Reconnect button.
+
+The session keeps running when you switch to another app or press Back
+(Android shows a "Connected to ..." notification; the first time, the app
+asks to be allowed notifications). Tap the notification or the board in the
+list to get back to it; end it with Disconnect, in the keys row or on the
+notification. If the board stops answering for about a minute (power off,
+reset), the app says "no answer from the board".
 
 Characters are one byte each (Latin-1), like `edit`: å, ä and ö typed on the
 phone are saved as one byte, and a UTF-8 file from a PC shows its å as two

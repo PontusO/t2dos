@@ -98,12 +98,30 @@ class SessionTest {
 
     @Test fun silentBoardReported() {               // power cut or reset while idle: no bytes ever come back
         val ss = ServerSocket(0); val ev = Events()
+        val t0 = System.currentTimeMillis()
         Session("127.0.0.1", ss.localPort, null, 80, 24, ev, idleMs = 300).start()
         val s = ss.accept(); ss.close()
         s.getOutputStream().write(HELLO); s.getOutputStream().flush()
-        assertTrue(ev.done.await(3, TimeUnit.SECONDS))
+        assertTrue(ev.done.await(4, TimeUnit.SECONDS))
         assertEquals("no answer from the board", ev.reason)
+        val ms = System.currentTimeMillis() - t0
+        assertTrue("gave up after $ms ms: three probes go unanswered first", ms >= 1100)
         s.close()
+    }
+
+    @Test fun lateAnswerKeepsIt() {                 // a WiFi hiccup: only the second probe is answered
+        val ss = ServerSocket(0); val ev = Events()
+        val se = Session("127.0.0.1", ss.localPort, null, 80, 24, ev, idleMs = 300)
+        se.start()
+        val s = ss.accept(); ss.close()
+        Thread {
+            val inp = s.getInputStream(); val o = s.getOutputStream(); var last = 0; var probes = 0
+            try { while (true) { val c = inp.read(); if (c < 0) break
+                if (last == 253 && c == 6) { probes++; if (probes % 3 == 2) { o.write(byteArrayOf(-1, -4, 6)); o.flush() } }
+                last = c } } catch (_: Exception) {}
+        }.start()
+        assertTrue("closed: ${ev.reason}", !ev.done.await(2500, TimeUnit.MILLISECONDS))
+        se.close(); s.close()
     }
 
     @Test fun answeringBoardStaysOpen() {           // telnetd answers IAC DO 6 with IAC WONT 6

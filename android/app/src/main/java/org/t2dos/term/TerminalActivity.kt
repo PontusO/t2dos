@@ -2,7 +2,9 @@ package org.t2dos.term
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -15,7 +17,12 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 
-/** One board's console: the terminal, the extra-keys row and, after a disconnect, a Reconnect bar. */
+/**
+ * One board's console: the terminal, the extra-keys row and, after a disconnect, a Reconnect bar.
+ * The session itself lives in [Sessions] (kept running by [SessionService]): leaving this screen
+ * keeps it open, coming back attaches to it again.  Disconnect (in the keys row or the
+ * notification) ends it.
+ */
 class TerminalActivity : Activity() {
     private lateinit var board: Board
     private lateinit var term: TerminalView
@@ -23,7 +30,12 @@ class TerminalActivity : Activity() {
     private lateinit var barText: TextView
     private lateinit var ctrlButton: Button
     private var password: String? = null
-    private var session: Session? = null
+    private var session: Session? = null      // the session shown, while it is Sessions.current
+    private val viewer = object : Session.Listener {
+        override fun changed() { if (shown()) term.outputArrived() }
+        override fun closed(reason: String) { runOnUiThread { if (shown()) disconnected(reason) } }
+    }
+    private fun shown() = session != null && Sessions.current?.session === session
 
     override fun onCreate(saved: Bundle?) {
         super.onCreate(saved)
@@ -52,10 +64,37 @@ class TerminalActivity : Activity() {
         }
         root.setOnApplyWindowInsetsListener { v, insets -> padForBars(v, insets, ime = true); insets }   // keyboard shrinks the terminal
         setContentView(root)
+        SessionService.install(this)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)   // for the "connected" notification; works without it
 
+        val open = Sessions.current
+        if (open != null && open.board.id == board.id) {      // still open from before: show it again
+            password = open.password
+            show(open.session)
+            open.closedReason?.let { disconnected(it) }
+            SessionService.refresh(this)
+            return
+        }
         val sealed = board.secret
         password = sealed?.let { Secret.open(it) }
         if (password != null) connect() else askPassword(sealed != null)
+    }
+
+    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(code, perms, results)
+        if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) SessionService.refresh(this)   // post it now
+    }
+
+    override fun onStart() { super.onStart(); Sessions.attach(viewer) }
+    override fun onStop() { Sessions.detach(viewer); super.onStop() }
+
+    private fun show(se: Session) {
+        session = se
+        term.session = se
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        bar.visibility = View.GONE
+        if (hasWindowFocus()) term.showKeyboard()
     }
 
     private fun askPassword(couldNotOpen: Boolean) {
@@ -82,18 +121,8 @@ class TerminalActivity : Activity() {
 
     private fun connect() {
         if (term.width == 0) { term.post { connect() }; return }
-        session?.close()
-        bar.visibility = View.GONE
         val (c, r) = term.gridFor(term.width, term.height)
-        val se = Session(board.host, board.port, password, c, r, object : Session.Listener {
-            override fun changed() = term.outputArrived()
-            override fun closed(reason: String) = runOnUiThread { disconnected(reason) }
-        })
-        session = se
-        term.session = se
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        se.start()
-        if (hasWindowFocus()) term.showKeyboard()
+        show(Sessions.connect(board, password, c, r).session)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {      // the keyboard can only open once the window has focus
@@ -132,6 +161,7 @@ class TerminalActivity : Activity() {
         add("PgDn") { term.sendKey(Key.PGDN) }
         add("Del") { term.sendKey(Key.DEL) }
         add("^C") { session?.send(byteArrayOf(3)) }
+        add("Disconnect") { Sessions.disconnect(); finish() }
         return HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) }
     }
 
@@ -141,11 +171,6 @@ class TerminalActivity : Activity() {
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-    override fun onDestroy() {
-        session?.close()
-        super.onDestroy()
-    }
 
     companion object { const val EXTRA_BOARD = "board" }
 }
