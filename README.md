@@ -1044,11 +1044,11 @@ telnetd on port 23
 telnetd on port 23, 192.168.1.77 logged in
 ```
 
-On the phone, connect to the board's address (shown by `wifi`) and port in
-telnet mode (in JuiceSSH or ConnectBot, pick the telnet connection type; a
-plain TCP terminal app shows a few stray characters at the start and echoes
-every key twice). After `T2DOS password:` and the password, press Enter for
-a prompt.
+On the phone, use the T2DOS Terminal app (below), or any telnet app:
+connect to the board's address (shown by `wifi`) and port in telnet mode (in
+JuiceSSH or ConnectBot, pick the telnet connection type; a plain TCP
+terminal app shows a few stray characters at the start and echoes every key
+twice). After `T2DOS password:` and the password, press Enter for a prompt.
 
 How it behaves:
 
@@ -1066,7 +1066,38 @@ How it behaves:
   at the password prompt one more.
 - Telnet is not encrypted: the password and everything typed cross the
   network in plain text. Use it on a network you trust.
+- `exit` in the session logs it out (`[logged out]`); the shell starts again
+  for USB.
 - The recovery prompt and the kernel's own messages are on USB only.
+
+#### T2DOS Terminal (Android)
+
+`android/` is a small terminal app made for this board: free, no account, no
+outside libraries. It knows exactly the screen codes T2DOS sends, so the
+shell, `edit` and BASIC's screen programs work, and it tells the board its
+window size (rotate the phone or show the keyboard and `edit` redraws).
+
+Build it on the PC (Android SDK and a full JDK 17 or newer) and install it
+on a phone with USB debugging on:
+
+```sh
+cd android
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Add a board with its address and port; its password can be saved (encrypted
+with the phone's key store) and is then typed for you, once per connection.
+Tap the screen for the keyboard. The row above it has Esc, Ctrl (tap once
+for the next key, twice to lock it), Tab, the arrows, Home, End, PgUp, PgDn,
+Del and ^C. Pinch to change the font size, drag down to scroll back through
+the shell's output, long-press to paste. When the board ends the session
+the last screen stays, with the reason and a Reconnect button.
+
+Characters are one byte each (Latin-1), like `edit`: å, ä and ö typed on the
+phone are saved as one byte, and a UTF-8 file from a PC shows its å as two
+odd characters. `python3 tools/check_android.py` runs the app's tests,
+including one that logs in to the real shell under qemu and uses `edit`.
 
 ### Development
 
