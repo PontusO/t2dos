@@ -1213,6 +1213,8 @@ int trimframe(int fa, int sz) {
   while (e >= 0 && lkind[e] == L_DEL) e = e - 1;
   if (e < 0 || !preins(e, "pop\t{")) return 0;
   pop = lpool + ltext[e];
+  k = strlen(pop);
+  if (k < 3 || strcmp(pop + k - 3, "pc}")) return 0;   // only the return, never a pop of a value
   nl = 0; i = e - 1;
   while (i >= 0 && nl < 8 && (lkind[i] == L_DEL || lkind[i] == L_LAB)) {
     if (lkind[i] == L_LAB) { labs[nl] = llab[i]; nl = nl + 1; }
@@ -1231,7 +1233,7 @@ int trimframe(int fa, int sz) {
 int promote() {
   int i; int k; int n; int w; int d; int best; int bw; int sh; char *t; char *rn;
   if (!slotw) { slotw = malloc(512 * 4); pdep = malloc(16400 * 4); }
-  npro = 0;
+  npro = 0; nfpro = 0;
   if (phold < 0) return 0;
   i = 0; while (i < 512) { if (slotk[i]) slotw[i] = -1; else slotw[i] = 0; i = i + 1; }
   i = 0; while (i <= nlines) { pdep[i] = 0; i = i + 1; }
