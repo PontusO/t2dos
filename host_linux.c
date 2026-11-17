@@ -188,6 +188,53 @@ void *nt_alloc(int n) {
 }
 void nt_free(void *p) { if (p) { nt_used -= *(int *)((char *)p - 8); free((char *)p - 8); } }
 #include "kernel/netfs.c"
+
+// ---- telnetd: kernel/telnetd.c over POSIX sockets.  The setting lives until host_linux exits.
+static int td_lfd = -1, td_port;
+int td_accept(void) {
+  struct pollfd p = { td_lfd, POLLIN, 0 };
+  if (td_lfd < 0 || poll(&p, 1, 0) != 1) return -1;
+  return accept(td_lfd, 0, 0);
+}
+int td_recv(int h, void *b, int n) {
+  struct pollfd p = { h, POLLIN, 0 };
+  if (poll(&p, 1, 0) != 1) return 0;
+  int r = recv(h, b, n, 0); return r > 0 ? r : -1;
+}
+int td_send(int h, const void *b, int n) { return nt_send(h, b, n); }
+int td_room(int h) { struct pollfd p = { h, POLLOUT, 0 }; return poll(&p, 1, 0) == 1 && (p.revents & POLLOUT) ? 4096 : 0; }
+void td_close(int h) { close(h); }
+void td_peer(int h, char *ip, int sz) {
+  struct sockaddr_in a; socklen_t l = sizeof a;
+  if (getpeername(h, (struct sockaddr *)&a, &l) || !inet_ntop(AF_INET, &a.sin_addr, ip, sz)) strcpy(ip, "?");
+}
+void td_note(const char *m) { char b[128]; int l = snprintf(b, sizeof b, "\n%s\n", m); write(1, b, l); }
+unsigned td_millis(void) { return nt_millis(); }
+#include "kernel/telnetd.c"
+static int k_telnetd(int port, const char *pw, char *ip) {
+  if (port == -1) { if (ip) strcpy(ip, td_live_ip()); return td_port ? td_port | TELNETD_LISTENING | (td_live() ? TELNETD_LIVE : 0) : 0; }
+  if (port == 0) { td_stop("telnetd stopped"); if (td_lfd >= 0) close(td_lfd); td_lfd = -1; td_port = 0; return 0; }
+  if (port < 0 || port > 65535 || !pw || !*pw || strlen(pw) > TD_PASSMAX) return TELNETD_BADARG;
+  if (port != td_port) {             // a new port: a new listener, the live session stays
+    int fd = socket(AF_INET, SOCK_STREAM, 0), one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = {0}; a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = INADDR_ANY;
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 2)) { close(fd); return TELNETD_NOSAVE; }
+    if (td_lfd >= 0) close(td_lfd);
+    td_lfd = fd; td_port = port;
+  }
+  td_start(pw);
+  return 0;
+}
+// the console: stdin, and the telnet session when telnetd is on
+static int con_getc(void) {
+  for (;;) {
+    td_flush(); td_poll();
+    if (td_avail()) return td_getc();
+    if (td_lfd < 0 || kbhit()) { unsigned char c; if (read(0, &c, 1) != 1) exit(0); return c; }
+    struct pollfd p = { 0, POLLIN, 0 }; poll(&p, 1, 20);
+  }
+}
+static int con_kbhit(void) { td_flush(); td_poll(); return kbhit() || td_avail(); }
 static int nfs_owner[NFS_NFD] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 static int nfs_dir_owner[4] = { -1, -1, -1, -1 };
 // a rename that is not inside one mount (SD and a mount, or two mounts): copy, then remove the
@@ -226,6 +273,7 @@ static int k_write(int fd, const char *buf, int n) {
   if (fd == 1) fd = stdout_fd;
   if (nfs_fd(fd) >= 0) return nfs_write(nfs_fd(fd), buf, n);
   if (fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS) return pipe_write(pfd_find(fd), buf, n);
+  if (fd == 1) { for (int i = 0; i < n; i++) td_putc(buf[i]); td_flush(); }
   return write(fd, buf, n);
 }
 
@@ -240,15 +288,15 @@ int sys(int num, int n, int *argv) {
     case SYS_exec: return run_bin((char *)A(0), A(1), (char **)A(2));
     case SYS_millis: return millis_();
     case SYS_sleep: usleep(A(0) * 1000); return 0;
-    case SYS_sysinfo: return A(0) == INFO_CONSOLE ? 80 | 24 << 16 : A(0) == INFO_PREEMPTS ? 0 : 8 << 20;
+    case SYS_sysinfo: return A(0) == INFO_CONSOLE ? (td_size() ? td_size() : 80 | 24 << 16) : A(0) == INFO_PREEMPTS ? 0 : 8 << 20;
     case SYS_spawn: return SPAWN_UNSUPPORTED;   // background jobs are a board feature
     case SYS_yield: return 0;                   // one task on the host: nothing else to run
     case SYS_jobs: return 0;                    // no background jobs
     case SYS_kill: return -1;                   // no such running job
     case SYS_reboot: return -1;                 // a board feature
     case SYS_putchar: { char c = A(0); k_write(1, &c, 1); return c; }
-    case SYS_getchar: { unsigned char c; if (read(0, &c, 1) != 1) exit(0); return c; }
-    case SYS_kbhit: return kbhit();
+    case SYS_getchar: return con_getc();
+    case SYS_kbhit: return con_kbhit();
     case SYS_conctl: return 0;
     case SYS_redirect: { int old = stdout_fd; stdout_fd = A(0) ? A(0) : 1; return old; }
     case SYS_open: { const char *in = (const char *)A(0); int fl = A(1);
@@ -283,6 +331,7 @@ int sys(int num, int n, int *argv) {
         pipes[i].total_read += cnt;
         return cnt; }
       if (nfs_fd(fd) >= 0) return nfs_read(nfs_fd(fd), buf, cnt);
+      if (fd == 0 && td_lfd >= 0) { int i = 0; while (i < cnt) { buf[i++] = con_getc(); if (!con_kbhit()) break; } return i; }
       return read(fd, buf, cnt); }
     case SYS_write: { int fd = A(0), cnt = A(2); const char *buf = (const char *)A(1);
       return k_write(fd, buf, cnt); }
@@ -354,6 +403,7 @@ int sys(int num, int n, int *argv) {
     case SYS_net_status: return NET_UP;
     case SYS_wifi_save: return A(0) ? -1 : 0;   // no key store on the host; nothing to forget
     case SYS_wifi_saved: return 0;
+    case SYS_telnetd: return k_telnetd(A(0), (const char *)A(1), (char *)A(1));
     case SYS_net_ip: return (int)ipbuf;
     case SYS_connect: return sock_connect((char *)A(0), A(1));
     case SYS_send: { int r = send(A(0), (void *)A(1), A(2), MSG_NOSIGNAL); return r > 0 ? r : -1; }  // a closed peer: -1, not SIGPIPE

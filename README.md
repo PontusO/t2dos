@@ -1018,6 +1018,56 @@ waits for one incoming connection first. Ctrl-] quits.
 /> nc -l 5000
 ```
 
+#### telnetd
+
+```
+telnetd on [port]
+telnetd off
+telnetd
+```
+
+Lets you use the console from another device over WiFi, for example a phone
+with a telnet app, after it gives a password. `on` asks for the password
+twice (1 to 32 characters, not shown) and starts listening on `port`
+(default 23). The setting is kept in `/etc/telnetd`, encrypted like
+`/etc/wifi` (so it needs the same key store), and comes back at boot.
+`off` stops it, ends the session and forgets the setting. `telnetd` alone
+shows the status. Running `telnetd on` again changes the password or the
+port without ending the session.
+
+```
+/> telnetd on
+password:
+again:
+telnetd on port 23
+/> telnetd
+telnetd on port 23, 192.168.1.77 logged in
+```
+
+On the phone, connect to the board's address (shown by `wifi`) and port in
+telnet mode (in JuiceSSH or ConnectBot, pick the telnet connection type; a
+plain TCP terminal app shows a few stray characters at the start and echoes
+every key twice). After `T2DOS password:` and the password, press Enter for
+a prompt.
+
+How it behaves:
+
+- There is still one console: the session shares it with USB. Output goes to
+  both, keys from either reach the running program, and the window size is
+  the phone's while it is logged in (`edit` uses it). The USB side shows a
+  line when someone logs in, fails to, or disconnects.
+- One session at a time. A new login takes over from the old one, so a phone
+  that dropped off the WiFi does not lock you out. While one connection is
+  at the password prompt, others are turned away.
+- Each connection gets three tries, 2 s apart, and 60 s in all; after three
+  wrong passwords nobody can log in for 5 s.
+- Ctrl-C works as on USB (the telnet "interrupt" command too).
+- The session takes one of the board's 5 TCP connections, and a connection
+  at the password prompt one more.
+- Telnet is not encrypted: the password and everything typed cross the
+  network in plain text. Use it on a network you trust.
+- The recovery prompt and the kernel's own messages are on USB only.
+
 ### Development
 
 `cc`, `as`, `ld`, `ar`, `nm` and `objdump` are described in

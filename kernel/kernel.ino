@@ -19,6 +19,7 @@
 #include "ramfs.h"
 #include "netfs.h"
 #include "netfs_fs.h"
+#include "telnetd.h"
 #include <hardware/irq.h>
 #include <hardware/structs/timer.h>
 
@@ -120,6 +121,7 @@ struct Console {
   virtual int kbhit() = 0;
   virtual int peek() = 0;          // the next byte without taking it, -1 if none
   virtual void ctl(int cmd, int a, int b) {}
+  virtual void flush() {}          // sends what putc kept back
   virtual int width() { return 80; }
   virtual int height() { return 24; }
 };
@@ -129,16 +131,49 @@ struct SerialConsole : Console {
   int getc() override { while (!Serial.available()) { k_wait(); } return Serial.read(); }
   int kbhit() override { return Serial.available(); }
   int peek() override { return Serial.available() ? Serial.peek() : -1; }
-  void ctl(int cmd, int a, int b) override {
-    if (cmd == CON_CLEAR) Serial.print("\033[2J\033[H");
-    else if (cmd == CON_GOTO) Serial.printf("\033[%d;%dH", b + 1, a + 1);
-    else if (cmd == CON_COLOR) Serial.printf("\033[%d;%dm", 30 + (a & 7), 40 + (b & 7));
+  void ctl(int cmd, int a, int b) override { char e[24]; Serial.print(ansi(cmd, a, b, e)); }
+  // the escape sequence for a conctl() command, "" for one the terminal does not do
+  static const char *ansi(int cmd, int a, int b, char *e) {
+    if (cmd == CON_CLEAR) return "\033[2J\033[H";
+    if (cmd == CON_GOTO) { snprintf(e, 24, "\033[%d;%dH", b + 1, a + 1); return e; }
+    if (cmd == CON_COLOR) { snprintf(e, 24, "\033[%d;%dm", 30 + (a & 7), 40 + (b & 7)); return e; }
+    return "";
   }
+};
+static SerialConsole serial_console;
+
+// USB serial plus the telnet session while one is logged in (telnetd.c, see telnetd_service):
+// output goes to both, keys come from either, and the window size is the session's.
+static void telnetd_service();
+struct SharedConsole : Console {
+  void putc(int c) override { serial_console.putc(c); td_putc(c); }
+  int getc() override {              // what kbhit counted comes first, without waiting (fg_break)
+    if (Serial.available()) return Serial.read();
+    if (td_avail()) return td_getc();
+    td_flush();
+    for (;;) {
+      if (Serial.available()) return Serial.read();
+      telnetd_service();
+      if (td_avail()) return td_getc();
+      k_wait();
+    }
+  }
+  int kbhit() override { td_flush(); telnetd_service(); return Serial.available() + td_avail(); }
+  int peek() override { if (Serial.available()) return Serial.peek(); telnetd_service(); return td_peek(); }
+  void ctl(int cmd, int a, int b) override {
+    char e[24]; const char *s = SerialConsole::ansi(cmd, a, b, e);
+    Serial.print(s);
+    while (*s) td_putc(*s++);
+    td_flush();
+  }
+  void flush() override { td_flush(); }
+  int width() override { int k = td_size(); return k ? k & 0xffff : 80; }
+  int height() override { int k = td_size(); return k ? k >> 16 : 24; }
 };
 
 // A display + keyboard driver implements Console the same way; register it in setup().
-static SerialConsole serial_console;
-static Console *con = &serial_console;
+static SharedConsole shared_console;
+static Console *con = &shared_console;
 
 // ============================================================ memory
 static void *big_alloc(size_t n) {       // PSRAM first, SRAM as fallback
@@ -229,6 +264,61 @@ extern "C" void *nt_alloc(int n) {
   return rp2040.getFreeHeap() >= 65536 + n ? malloc(n) : nullptr;
 }
 extern "C" void nt_free(void *p) { free(p); }
+
+// telnetd's transport (see telnetd.h): its own listener and connections (the live session, one
+// logging in, and one being turned away), outside the programs' socket table; the handle is the
+// index in td_clients.  The listener starts once WiFi is up (it is tried again every second).
+#define TD_CONNS 3
+#define TELNETD_FILE "/etc/telnetd"
+#define TELNETD_AAD "T2T1"
+static WiFiServer *td_server; static int td_port; static uint32_t td_tried;
+static WiFiClient td_clients[TD_CONNS]; static bool td_used[TD_CONNS];
+extern "C" int td_accept(void) {
+  if (!td_server) return -1;
+  WiFiClient c = td_server->accept(); if (!c) return -1;
+  for (int h = 0; h < TD_CONNS; h++) if (!td_used[h]) {
+    td_clients[h] = c; td_used[h] = true;
+    td_clients[h].setNoDelay(true); td_clients[h].setTimeout(2000);   // a stuck phone holds the console 2 s at most
+    return h;
+  }
+  c.stop(); return -1;
+}
+extern "C" int td_recv(int h, void *b, int n) {
+  if (h < 0 || h >= TD_CONNS || !td_used[h]) return -1;
+  WiFiClient &c = td_clients[h];
+  if (!c.available()) return c.connected() ? 0 : -1;
+  int r = c.read((uint8_t *)b, n);
+  return r > 0 ? r : 0;
+}
+extern "C" int td_send(int h, const void *b, int n) {
+  if (h < 0 || h >= TD_CONNS || !td_used[h]) return -1;
+  WiFiClient &c = td_clients[h]; int done = 0;
+  while (done < n) {
+    if (!c.connected()) return -1;
+    int w = c.write((const uint8_t *)b + done, n - done);
+    if (w <= 0) return -1;
+    done += w;
+  }
+  return n;
+}
+extern "C" int td_room(int h) { return h >= 0 && h < TD_CONNS && td_used[h] ? td_clients[h].availableForWrite() : 0; }
+extern "C" void td_close(int h) { if (h >= 0 && h < TD_CONNS && td_used[h]) { td_clients[h].stop(); td_used[h] = false; sock_closed_at = millis(); } }
+extern "C" void td_peer(int h, char *ip, int sz) { strlcpy(ip, h >= 0 && h < TD_CONNS ? td_clients[h].remoteIP().toString().c_str() : "?", sz); }
+extern "C" void td_note(const char *m) { Serial.printf("\r\n%s\r\n", m); }
+extern "C" unsigned td_millis(void) { return millis(); }
+// from the console's getc and kbhit: starts the listener when it can, then runs the sessions
+static void telnetd_service() {
+  if (!td_port) return;
+  if (!td_server && millis() - td_tried >= 1000) {
+    td_tried = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      td_server = new WiFiServer(td_port); td_server->begin();
+      if (!(bool)*td_server) { delete td_server; td_server = nullptr; }
+    }
+  }
+  td_poll();
+}
+static void telnetd_listen_stop() { if (td_server) { td_server->stop(); delete td_server; td_server = nullptr; } td_tried = millis() - 1000; }
 // mounts what /etc/mount names (host[:port], then the remote dir), without asking the server
 static void netfs_boot() {
   File f = fsys->open("/etc/mount", "r"); if (!f) return;
@@ -296,6 +386,50 @@ static int wifi_load(char *ssid, char *pass) {
   return 1;
 }
 
+// The telnetd setting: /etc/telnetd is "T2T1" and a vault-sealed port (2 bytes) and password.
+static int telnetd_store(int port, const char *pw) {
+  int lp = strlen(pw);
+  uint8_t plain[2 + TD_PASSMAX], sealed[4 + 2 + TD_PASSMAX + VAULT_OVERHEAD];
+  plain[0] = port & 255; plain[1] = port >> 8; memcpy(plain + 2, pw, lp);
+  memcpy(sealed, TELNETD_AAD, 4);
+  int n = vault_seal(plain, 2 + lp, TELNETD_AAD, sealed + 4);
+  memset(plain, 0, sizeof plain);
+  if (n < 0) return -1;
+  if (!is_dir("/etc")) fsys->mkdir("/etc");
+  File f = fsys->open(TELNETD_FILE, "w"); if (!f) return -1;
+  bool ok = (int)f.write(sealed, n + 4) == n + 4; f.close();
+  return ok ? 0 : -1;
+}
+// the saved port, with the password in pw (TD_PASSMAX + 1 bytes); 0 if none can be read
+static int telnetd_load(char *pw) {
+  File f = fsys->open(TELNETD_FILE, "r"); if (!f) return 0;
+  uint8_t sealed[4 + 2 + TD_PASSMAX + VAULT_OVERHEAD + 1], plain[2 + TD_PASSMAX + 1];
+  int n = f.read(sealed, sizeof sealed); f.close();
+  if (n < 4 + VAULT_OVERHEAD + 3 || n > 4 + 2 + TD_PASSMAX + VAULT_OVERHEAD || memcmp(sealed, TELNETD_AAD, 4)) return 0;
+  int m = vault_open(sealed + 4, n - 4, TELNETD_AAD, plain);
+  if (m < 3 || m > 2 + TD_PASSMAX) { memset(plain, 0, sizeof plain); return 0; }
+  memcpy(pw, plain + 2, m - 2); pw[m - 2] = 0;
+  int port = plain[0] | plain[1] << 8;
+  memset(plain, 0, sizeof plain);
+  return strlen(pw) == (size_t)(m - 2) ? port : 0;
+}
+// SYS_telnetd (see sys.h)
+static int k_telnetd(int port, const char *pw) {
+  if (port == -1) {
+    if (pw) strcpy((char *)pw, td_live_ip());
+    return td_port ? td_port | (td_server ? TELNETD_LISTENING : 0) | (td_live() ? TELNETD_LIVE : 0) : 0;
+  }
+  if (port == 0) {
+    td_stop("telnetd stopped"); telnetd_listen_stop(); td_port = 0;
+    return fsys->exists(TELNETD_FILE) && !fsys->remove(TELNETD_FILE) ? TELNETD_NOSAVE : 0;
+  }
+  if (port < 0 || port > 65535 || !pw || !*pw || strlen(pw) > TD_PASSMAX) return TELNETD_BADARG;
+  if (telnetd_store(port, pw) < 0) return TELNETD_NOSAVE;
+  if (port != td_port) { telnetd_listen_stop(); td_port = port; }   // the live session stays
+  td_start(pw);
+  return 0;
+}
+
 // ============================================================ named pipes
 static bool is_pipe_fd(int fd) { return fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS; }
 // a resolved path's pipe name (the part after /pipe/), or nullptr if it is not under /pipe/
@@ -348,7 +482,7 @@ static bool fg_break() {
 // preemption tick), where the kernel holds nothing the program's exit would leave behind.
 static void brk_check() {
   if (cur != tasks || cur->nest < 0 || !cur->procs[cur->nest].brk || !fg_break()) return;
-  con->putc('^'); con->putc('C'); con->putc('\n');
+  con->putc('^'); con->putc('C'); con->putc('\n'); con->flush();
   Proc *p = &cur->procs[cur->nest];
   p->exit_code = EXIT_BREAK; longjmp(p->jb, 1);
 }
@@ -462,7 +596,7 @@ static int k_read(int fd, char *buf, int n) {
 }
 static int k_write(int fd, const char *buf, int n) {
   if (fd == 1) fd = stdout_fd;
-  if (fd == 1) { for (int i = 0; i < n; i++) con->putc(buf[i]); return n; }
+  if (fd == 1) { for (int i = 0; i < n; i++) con->putc(buf[i]); con->flush(); return n; }
   if (is_pipe_fd(fd)) return pipe_write(fd, buf, n);
   if (fd >= SOCK_FD) return sock_send(fd, buf, n);
   if (fd < 2 || fd >= MAX_FD || !fds[fd]) return -1;
@@ -564,7 +698,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_kill: return k_kill(A(0));
     case SYS_reboot: {        // close every file so the filesystem is consistent, let the console drain
       for (int i = 2; i < MAX_FD; i++) if (fds[i]) { fds[i].close(); fds[i] = File(); }
-      Serial.flush(); delay(100);
+      td_stop("rebooting"); Serial.flush(); delay(100);
       if (A(0) == 1) rp2040.rebootToBootloader(); else rp2040.reboot();
       return -1;
     }
@@ -671,6 +805,7 @@ extern "C" int sys(int num, int n, int *argv) {
         if (!server) return -1;           // its owner ended meanwhile
       } }
     case SYS_sock_avail: { WiFiClient *c = sock_of(A(0)); return c ? c->available() : -1; }
+    case SYS_telnetd: return k_telnetd(A(0), (const char *)A(1));
     case SYS_ping: { if (WiFi.status() != WL_CONNECTED) return -3;
       IPAddress ip; if (WiFi.hostByName((const char *)A(0), ip, 5000) != 1) return -2;
       strlcpy((char *)A(1), ip.toString().c_str(), 16);
@@ -708,7 +843,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_ceil: return fw(ceilf(wf(A(0))));
     case SYS_fmod: return fw(fmodf(wf(A(0)), wf(A(1))));
   }
-  con->putc('\n'); Serial.printf("kernel: bad syscall %d\r\n", num);
+  con->putc('\n'); con->flush(); Serial.printf("kernel: bad syscall %d\r\n", num);
   PROC.exit_code = -1; longjmp(PROC.jb, 1);
   #undef A
 }
@@ -1128,6 +1263,9 @@ void setup() {
   if (saved == 1) { Serial.printf("wifi: joining %s\r\n", ssid); WiFi.mode(WIFI_STA); WiFi.begin(ssid, pass); }
   else if (saved < 0) Serial.println("wifi: /etc/wifi cannot be opened (saved on another board, or damaged)");
   memset(pass, 0, sizeof pass);
+  char tpw[TD_PASSMAX + 1];
+  if (mounted && (td_port = telnetd_load(tpw))) { td_start(tpw); Serial.printf("telnetd: port %d\r\n", td_port); }
+  memset(tpw, 0, sizeof tpw);
 }
 
 void loop() {

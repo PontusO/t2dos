@@ -64,7 +64,7 @@ root/lib/sys.h: sys.h
 root/lib/math.h: lib/math.h
 	@mkdir -p root/lib && cp lib/math.h root/lib/
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
-host: host_linux.c sys.h
+host: host_linux.c sys.h kernel/netfs.c kernel/netfs.h kernel/telnetd.c kernel/telnetd.h
 	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static -lm
 # Reference compiler: gcc build of compiler/cc.c at the commit in build/ref/COMMIT (byte-identity reference)
 ref:

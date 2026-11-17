@@ -22,7 +22,7 @@ enum {
   // network. Socket fds are 100+ and also work with read()/write()/close().
   SYS_net_join = 80, SYS_net_status = 81, SYS_net_ip = 82,
   SYS_connect = 83, SYS_send = 84, SYS_recv = 85, SYS_listen = 86, SYS_accept = 87, SYS_sock_avail = 88,
-  SYS_wifi_save = 89, SYS_wifi_saved = 90, SYS_ping = 91,
+  SYS_wifi_save = 89, SYS_wifi_saved = 90, SYS_ping = 91, SYS_telnetd = 92,
   // board
   SYS_gpio_mode = 96, SYS_gpio_write = 97, SYS_gpio_read = 98, SYS_analog_read = 99, SYS_pwm_write = 100,
   SYS_i2c_write = 101, SYS_i2c_read = 102, SYS_spi_transfer = 103, SYS_delay_us = 104,
@@ -56,6 +56,14 @@ enum { PIN_INPUT = 0, PIN_OUTPUT = 1, PIN_INPUT_PULLUP = 2 };
 
 // net_status() results
 enum { NET_DOWN = 0, NET_CONNECTING = 1, NET_UP = 2 };
+// telnetd(port, password): lets one telnet session at a time share the console with USB, after
+// it gives the password (1..32 bytes).  The board saves both in /etc/telnetd, encrypted like
+// /etc/wifi, and starts it again at boot (host_linux keeps them until it exits).  telnetd(0, 0)
+// stops it, ends the session and forgets the setting.  0, or TELNETD_BADARG for a bad port or
+// password, TELNETD_NOSAVE if it cannot be saved (nothing changes then).  telnetd(-1, ip)
+// returns the status: the port (0 when off) | TELNETD_LISTENING | TELNETD_LIVE, and copies the
+// live session's address into ip (48 bytes) if ip is not 0.
+enum { TELNETD_BADARG = -1, TELNETD_NOSAVE = -2, TELNETD_LISTENING = 0x10000, TELNETD_LIVE = 0x20000 };
 // jobs() states
 enum { JOB_RUNNING = 1, JOB_DONE = 2 };
 // spawn() errors
