@@ -1187,6 +1187,47 @@ int reglist(char *mn, char *last) {        // "mn\t{r4, .., r7, last}" with the 
   ls(last); ls("}"); lend();
   return 0;
 }
+// -O, after promote(): a cheaper entry and exit.  The frame reservation (movw/movt r1 at line fa,
+// then sub.w sp, sp, r1) of sz bytes becomes nothing or one sub sp, #sz.  With no frame, sp equals
+// r7 at the exit, so mov sp, r7 goes, a return that branches to the exit pops right there, and a
+// function that never reads r7 (no parameters, nothing promoted) does not set it up.
+int trimframe(int fa, int sz) {
+  int i; int e; int nl; int k; int nor7; char *pop; int labs[8];
+  if (pnum(fa, "movw\tr1, #") != (sz & 65535) || pnum(fa + 1, "movt\tr1, #") != ((sz >> 16) & 65535)
+    || !isins(fa + 2, "sub.w\tsp, sp, r1")) return 0;
+  if (sz > 0) {
+    if (sz > 508) return 0;
+    pset(fa); ls("sub\tsp, #"); ls(dec(sz)); lend(); pdel(fa + 1); pdel(fa + 2);
+    return 0;
+  }
+  pdel(fa); pdel(fa + 1); pdel(fa + 2);
+  nor7 = !npro && !nfpro;
+  i = 0;
+  while (i < nlines) {
+    if (isins(i, "mov\tsp, r7")) pdel(i);
+    else if (r7ref(i)) nor7 = 0;
+    i = i + 1;
+  }
+  if (nor7) { i = 0; while (i < nlines) { if (isins(i, "mov\tr7, sp")) pdel(i); i = i + 1; } }
+  e = nlines - 1;                            // the exit: labels, then the pop of pc (no vpop)
+  while (e >= 0 && lkind[e] == L_DEL) e = e - 1;
+  if (e < 0 || !preins(e, "pop\t{")) return 0;
+  pop = lpool + ltext[e];
+  nl = 0; i = e - 1;
+  while (i >= 0 && nl < 8 && (lkind[i] == L_DEL || lkind[i] == L_LAB)) {
+    if (lkind[i] == L_LAB) { labs[nl] = llab[i]; nl = nl + 1; }
+    i = i - 1;
+  }
+  i = 0;
+  while (i < e) {
+    if (lkind[i] == L_BR && lcond[i] < 0) {
+      k = 0; while (k < nl && labs[k] != llab[i]) k = k + 1;
+      if (k < nl) { pset(i); ls(pop); lend(); }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
 int promote() {
   int i; int k; int n; int w; int d; int best; int bw; int sh; char *t; char *rn;
   if (!slotw) { slotw = malloc(512 * 4); pdep = malloc(16400 * 4); }
@@ -2911,7 +2952,7 @@ int parse_global() {
       ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
       i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
-      if (optim) { prepro = 1; peep(); prepro = 0; promote(); }
+      if (optim) { prepro = 1; peep(); prepro = 0; promote(); trimframe(frame_at, sz); }
       flush();
       npro = 0; phold = -1;
       // restore shadowed symbols

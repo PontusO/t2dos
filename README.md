@@ -2131,6 +2131,13 @@ where it fits that instruction (16 to 31 sixteenths times a power of two from
 1/8 to 16, either sign). `mandel` (below) runs 5 times as fast as without
 `-O`.
 
+`-O` also trims each function's entry and exit. A function with no stack
+locals reserves no frame (one `sub sp, #N` instead of three instructions when
+it has a small one), returns from the middle with its `pop {..., pc}` right
+there instead of jumping to the end, and, when it has no parameters either,
+does not set up r7 at all. BASIC runs every statement through small functions
+like that, so this is what most of its calls look like.
+
 Without `-O` the output is exactly what it always was. On the board, with all
 programs built with `-O`:
 
