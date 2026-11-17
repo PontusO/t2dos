@@ -308,7 +308,10 @@ Rules for jobs:
 
 ### Line editing and history
 
-- Backspace erases the last character, Ctrl-C discards the line.
+- Left and Right move the cursor in the line, and typing inserts there.
+  Home and End (or Ctrl-A and Ctrl-E) jump to the start and the end.
+  Backspace erases the character before the cursor, Del the one under it.
+  Enter runs the whole line wherever the cursor is; Ctrl-C discards it.
 - Up and Down scroll through the last 16 command lines. A recalled line can
   be edited before pressing Enter. Down past the newest line brings back what
   you had started typing.

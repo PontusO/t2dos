@@ -40,22 +40,34 @@ int hist_add(char *s) {
   hcount++;
   return 1;
 }
-// the next key; an escape sequence comes back as 'A' + 256 (Up), 'B' + 256 (Down) or 0 (others)
+// the next key; an escape sequence comes back as its final letter + 256: 'A' Up, 'B' Down,
+// 'C' Right, 'D' Left, 'H' Home, 'F' End, 'P' Del (ESC [ 1~/7~ Home, 4~/8~ End, 3~ Del), else 0
 int waitkey(int ms) { int t; t = millis(); while (!kbhit()) { if (millis() - t > ms) return -1; } return getchar(); }
 // keys read while a script checked for Ctrl-C, kept for the next line
 char kq[64]; int kqh; int kqn;
 int getkey() {
-  int c;
+  int c; int n;
   if (kqn) { c = kq[kqh]; kqh = (kqh + 1) % 64; kqn--; }
   else c = getchar();
   if (c != 27) return c;
   c = waitkey(50);
   if (c != '[' && c != 'O') return 0;
   c = waitkey(50);
-  while (c >= 0 && (c < 64 || c > 126)) c = waitkey(50);    // parameters, up to the final byte
-  if (c == 'A' || c == 'B') return c + 256;
+  n = 0;
+  while (c >= '0' && c <= '9') { n = n * 10 + c - '0'; c = waitkey(50); }
+  while (c >= 0 && (c < 64 || c > 126)) c = waitkey(50);    // other parameters, up to the final byte
+  if (c == '~') {
+    if (n == 1 || n == 7) return 'H' + 256;
+    if (n == 4 || n == 8) return 'F' + 256;
+    if (n == 3) return 'P' + 256;
+    return 0;
+  }
+  if (c == 'A' || c == 'B' || c == 'C' || c == 'D' || c == 'H' || c == 'F') return c + 256;
   return 0;
 }
+// line editing on screen: print buf[from, to), move the cursor back n places
+int show(char *buf, int from, int to) { while (from < to) { putchar(buf[from]); from++; } return 0; }
+int back(int n) { while (n > 0) { putchar(8); n--; } return 0; }
 // replace the len characters on screen and in buf with s
 int retype(char *buf, int len, char *s) {
   while (len) { printf("\b \b"); len--; }
@@ -175,24 +187,40 @@ int complete(char *buf, int len, int max, int again) {
 }
 
 int readline(char *buf, int max) {
-  int len; int c; int h; int tabs;
+  int len; int c; int h; int tabs; int cur; int i;
   len = 0; h = hcount;                 // h: the history line shown, hcount = the line being typed
-  tabs = 0;
+  tabs = 0; cur = 0;                   // cur: the cursor's place in buf
   while (1) {
     c = getkey();
+    if (c == 9 || c == 'A' + 256 || c == 'B' + 256) { show(buf, cur, len); cur = len; }   // these work at the end
     if (c == 9) {                      // a second Tab that adds nothing lists the matches
       c = complete(buf, len, max, tabs);
-      tabs = c == len; len = c;
+      tabs = c == len; len = c; cur = len;
       continue;
     }
     tabs = 0;
     if (c == '\r' || c == '\n') { buf[len] = 0; putchar('\n'); hist_add(buf); return len; }
-    if (c == 8 || c == 127) { if (len) { len--; printf("\b \b"); } }
+    if (c == 8 || c == 127) {          // Backspace: the character before the cursor
+      if (cur > 0) {
+        i = cur - 1; while (i < len - 1) { buf[i] = buf[i + 1]; i++; }
+        cur--; len--; putchar(8); show(buf, cur, len); putchar(' '); back(len - cur + 1);
+      }
+    }
+    else if (c == 'P' + 256) {         // Del: the character at the cursor
+      if (cur < len) {
+        i = cur; while (i < len - 1) { buf[i] = buf[i + 1]; i++; }
+        len--; show(buf, cur, len); putchar(' '); back(len - cur + 1);
+      }
+    }
+    else if (c == 'D' + 256) { if (cur > 0) { cur--; putchar(8); } }
+    else if (c == 'C' + 256) { if (cur < len) { putchar(buf[cur]); cur++; } }
+    else if (c == 'H' + 256 || c == 1) { back(cur); cur = 0; }               // Home, ^A
+    else if (c == 'F' + 256 || c == 5) { show(buf, cur, len); cur = len; }   // End, ^E
     else if (c == 3) { buf[0] = 0; putchar('\n'); return -1; }
     else if (c == 'A' + 256) {         // Up: an older line
       if (h > 0) {
         if (h == hcount) { buf[len] = 0; strcpy(draft, buf); }
-        h--; len = retype(buf, len, hist[(hfirst + h) % HIST]);
+        h--; len = retype(buf, len, hist[(hfirst + h) % HIST]); cur = len;
       }
     }
     else if (c == 'B' + 256) {         // Down: a newer line, then back to what was typed
@@ -200,9 +228,13 @@ int readline(char *buf, int max) {
         h++;
         if (h == hcount) len = retype(buf, len, draft);
         else len = retype(buf, len, hist[(hfirst + h) % HIST]);
+        cur = len;
       }
     }
-    else if (c >= 32 && c < 256 && len < max - 1) { buf[len++] = c; putchar(c); }
+    else if (c >= 32 && c < 256 && len < max - 1) {   // insert at the cursor
+      i = len; while (i > cur) { buf[i] = buf[i - 1]; i--; }
+      buf[cur] = c; len++; show(buf, cur, len); cur++; back(len - cur);
+    }
   }
 }
 

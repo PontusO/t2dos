@@ -1,0 +1,30 @@
+T2DOS shell, type help
+/> echo wrldorld
+world
+/> cho oneecho one
+one
+/> cho twoecho two
+two
+/> cho threeecho three
+three
+/> cho fourecho four
+four
+/> echo fifive
+five
+/> echo siecho six
+six
+/> echo seXvenven 
+seven
+/> echo eiXghtght 
+eight
+/> echo ninne
+nine
+/> echo tenecho ten
+ten
+/> echo eleven
+eleven
+/> echo hist
+hist
+/> echo draftaft          echo hist
+hist
+/> exit

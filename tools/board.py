@@ -80,7 +80,14 @@ class Board:
         data = local if isinstance(local, bytes) else open(local, 'rb').read()
         self.s.reset_input_buffer()
         self._write(b'put %s %d\r' % (remote.encode(), len(data)))
-        time.sleep(0.5)
+        # send the bytes only once put.bin is receiving: if the command was missed, the shell
+        # would read the file as typed commands (and make files with junk names)
+        want = b'receiving %d bytes' % len(data)
+        got = b''; t0 = time.time()
+        while want not in got and time.time() - t0 < 5.0:
+            got += self.s.read(4096)
+        if want not in got:
+            raise BoardError('put %s: the board did not start receiving (got %r); nothing was sent' % (remote, got[-120:]))
         for i in range(0, len(data), 512):
             self._write(data[i:i + 512])
             time.sleep(0.01)
