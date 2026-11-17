@@ -303,7 +303,13 @@ int sys(int num, int n, int *argv) {
     case SYS_putchar: { char c = A(0); k_write(1, &c, 1); return c; }
     case SYS_getchar: return con_getc();
     case SYS_kbhit: return con_kbhit();
-    case SYS_conctl: return 0;
+    case SYS_conctl: {                          // the board's SerialConsole::ansi codes, to stdout and the session
+      char e[24]; e[0] = 0;
+      if (A(0) == CON_CLEAR) strcpy(e, "\033[2J\033[H");
+      else if (A(0) == CON_GOTO) snprintf(e, sizeof e, "\033[%d;%dH", A(2) + 1, A(1) + 1);
+      else if (A(0) == CON_COLOR) snprintf(e, sizeof e, "\033[%d;%dm", 30 + (A(1) & 7), 40 + (A(2) & 7));
+      if (e[0]) k_write(1, e, strlen(e));
+      return 0; }
     case SYS_redirect: { int old = stdout_fd; stdout_fd = A(0) ? A(0) : 1; return old; }
     case SYS_open: { const char *in = (const char *)A(0); int fl = A(1);
       { char rp[300]; const char *pn = pipe_path(in, rp, sizeof rp); if (pn) { int i = find_pipe(pn); if (i < 0) return -1;

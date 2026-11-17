@@ -196,6 +196,22 @@ def stop_check(con, host, port):
         pass
 
 
+def edit_check(con, host, port):
+    """conctl codes reach the session; edit redraws at a new size without a key, and still saves."""
+    c = Client(host, port); c.login('edit')
+    c.send(bytes([IAC, SB, 31, 0, 100, 0, 30, IAC, SE]))
+    c.send('/tmp/tdctl.bin\r\n')
+    c.r.wait(b'\x1b[4;3H\x1b[31;44mctl\r\n', name='conctl reaches the session')
+    c.send('edit /tmp/rs.txt\r\n')
+    c.r.wait(b'\x1b[30;1H\x1b[7m', 5, 'edit status line at row 30')          # 100x30
+    c.send(bytes([IAC, SB, 31, 0, 60, 0, 20, IAC, SE]))                       # no key pressed
+    c.r.wait(b'\x1b[20;1H\x1b[7m', 2, 'edit redraws at row 20')
+    c.send('abc'); time.sleep(0.3); c.send(bytes([19])); time.sleep(0.3); c.send(bytes([24]))   # type, ^S, ^X
+    c.r.wait(b'/> ', 5, 'edit quit'); c.close()
+    time.sleep(0.3)
+    con.type('cat /tmp/rs.txt\r'); con.r.wait(b'abc', name='edit saved after the resize')
+
+
 class PcConsole:
     def __init__(self):
         self.p = subprocess.Popen(['qemu-arm', os.path.join(ROOT, 'host_linux'), '-r', os.path.join(ROOT, 'root'), '/bin/sh.bin'],
@@ -207,16 +223,20 @@ class PcConsole:
 
 
 SIZE_C = os.path.join(ROOT, 'tests', 'telnetd', 'size.c')
+CTL_C = os.path.join(ROOT, 'tests', 'telnetd', 'ctl.c')
 
 
 def pc_main():
     os.makedirs(os.path.join(ROOT, 'root', 'tmp'), exist_ok=True)
     subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
                     os.path.join(ROOT, 'root', 'tmp', 'tdsize.bin'), SIZE_C], check=True, cwd=ROOT)
+    subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+                    os.path.join(ROOT, 'root', 'tmp', 'tdctl.bin'), CTL_C], check=True, cwd=ROOT)
     s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
     con = PcConsole()
     try:
         scenario(con, '127.0.0.1', port, '127.0.0.1')
+        edit_check(con, '127.0.0.1', port)
         stop_check(con, '127.0.0.1', port)
         con.type('exit\r')
     finally:

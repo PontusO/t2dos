@@ -12,13 +12,14 @@
 // The window size comes from the terminal (cursor position report), else 80x24.
 #include "sys.h"
 
-enum { K_UP = 1000, K_DOWN, K_RIGHT, K_LEFT, K_HOME, K_END, K_PGUP, K_PGDN, K_DEL, K_NONE };
+enum { K_UP = 1000, K_DOWN, K_RIGHT, K_LEFT, K_HOME, K_END, K_PGUP, K_PGDN, K_DEL, K_NONE, K_RESIZE };
 
 char *b; int cap; int gs; int ge;      // gap buffer: text is b[0..gs) followed by b[ge..cap)
 int cur; int want;                     // cursor offset in the text, preferred display column
 int top; int left;                     // offset of the first line shown, first column shown
 int H; int rows; int cols;             // screen height, text rows (H - 1), screen width
 int dirty; int quitarm;
+int csz;                               // the console size sysinfo() gave last (width | height << 16)
 int mark;                              // the mark's text offset, -1 when there is none
 char *clip; int clen; int ccap;        // the cut/copy buffer
 int cliplines;                         // 1 when the last ^K/^C took a whole line (not a block)
@@ -171,6 +172,7 @@ int letterkey(int c) {
 }
 int getkey() {                         // ESC [ x, ESC O x, ESC [ n ~, ESC [ n ; m x
   int c; int n;
+  while (!kbhit()) { if (sysinfo(INFO_CONSOLE) != csz) return K_RESIZE; sleep(20); }   // a telnet client resized
   c = getchar();
   if (c != 27) return c;
   c = waitkey(50);
@@ -192,7 +194,7 @@ int getkey() {                         // ESC [ x, ESC O x, ESC [ n ~, ESC [ n ;
 
 int term_size() {                      // move far down-right, ask where the cursor ended up
   int c; int r; int k;
-  k = sysinfo(INFO_CONSOLE); cols = k & 65535; H = k >> 16;
+  k = sysinfo(INFO_CONSOLE); csz = k; cols = k & 65535; H = k >> 16;
   if (cols < 20) cols = 80;
   if (H < 4) H = 24;
   csi("999;999H"); csi("6n"); flush();
@@ -366,6 +368,13 @@ int main(int argc, char **argv) {
   while (1) {
     draw();
     k = getkey();
+    if (k == K_RESIZE) {                  // not a key: take the new size and repaint everything
+      csz = sysinfo(INFO_CONSOLE); cols = csz & 65535; H = csz >> 16;
+      if (cols < 20) cols = 80;
+      if (H < 4) H = 24;
+      rows = H - 1; left = 0; csi("2J");
+      continue;
+    }
     if (k != 24 && k != 17) quitarm = 0;
     if (k != K_NONE) msg[0] = 0;
     if (k == 24 || k == 17) {             // ^X ^Q

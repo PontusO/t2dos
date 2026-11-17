@@ -1102,7 +1102,10 @@ edit file
 `edit` is a full-screen editor for an ANSI/VT100 terminal such as `screen`.
 It reads the window size from the terminal (80x24 if it cannot), and uses
 the alternate screen, so the shell's output comes back when it quits. A new
-file is created when you save.
+file is created when you save. When a telnet client changes its window size
+(rotating a phone, showing its keyboard), `edit` redraws at the new size;
+other full-screen programs should do the same by watching
+`sysinfo(INFO_CONSOLE)`.
 
 ### Keys
 
