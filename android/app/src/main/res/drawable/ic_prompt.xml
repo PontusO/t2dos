@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A "/>_" prompt in green on the dark background (108dp adaptive icon, safe zone 66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#FF4EC96B" android:strokeWidth="5" android:strokeLineCap="round"
+        android:pathData="M38,66 L48,42" />
+    <path android:strokeColor="#FF4EC96B" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M54,44 L64,54 L54,64" />
+    <path android:strokeColor="#FFD0D0D0" android:strokeWidth="5" android:strokeLineCap="round"
+        android:pathData="M68,66 L78,66" />
+</vector>
