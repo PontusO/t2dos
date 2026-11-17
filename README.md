@@ -2141,7 +2141,7 @@ like that, so this is what most of its calls look like.
 Without `-O` the output is exactly what it always was. On the board, with all
 programs built with `-O`:
 
-- `examples/basic/bench.bas`: 285,000 statements per second instead of 185,500
+- `examples/basic/bench.bas`: 305,000 statements per second instead of 185,500
 - the programs in `/bin` are about 31% smaller (494 KB instead of 711 KB)
 - `cc` compiling `cc.c` takes about as long as before. Compiling is a small
   part of a board build; the rest is reading and writing files. With `/tmp`
@@ -2160,18 +2160,18 @@ NAME` for one, `--opt "FLAGS"` to compare other flags). On the board:
 
 | benchmark | plain ms | `-O` ms | speedup |
 |---|---|---|---|
-| crc | 519 | 213 | 2.44x |
-| dispatch | 483 | 290 | 1.67x |
-| fib | 446 | 313 | 1.42x |
-| interp | 1093 | 701 | 1.56x |
-| list | 921 | 529 | 1.74x |
-| loop | 748 | 243 | 3.08x |
-| mandel | 475 | 87 | 5.46x |
-| matmul | 470 | 227 | 2.07x |
-| sieve | 964 | 341 | 2.83x |
-| sort | 554 | 233 | 2.38x |
-| strings | 476 | 170 | 2.80x |
-| total | 7149 | 3347 | 2.14x |
+| crc | 520 | 200 | 2.60x |
+| dispatch | 491 | 261 | 1.88x |
+| fib | 447 | 257 | 1.74x |
+| interp | 1097 | 705 | 1.56x |
+| list | 931 | 528 | 1.76x |
+| loop | 743 | 257 | 2.89x |
+| mandel | 479 | 86 | 5.57x |
+| matmul | 474 | 225 | 2.11x |
+| sieve | 981 | 358 | 2.74x |
+| sort | 561 | 236 | 2.38x |
+| strings | 473 | 178 | 2.66x |
+| total | 7197 | 3291 | 2.19x |
 
 `make OPT=-O` builds every program with `-O`. A `cc` built with `-O` gives
 the same output as the plain one, and `cc -O` on the board writes the same
