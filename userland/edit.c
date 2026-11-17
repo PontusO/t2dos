@@ -208,6 +208,14 @@ int term_size() {                      // move far down-right, ask where the cur
 }
 
 // ------------------------------------------------------------------ commands
+int resized() {                        // getkey said K_RESIZE: take the console's new size
+  csz = sysinfo(INFO_CONSOLE); cols = csz & 65535; H = csz >> 16;
+  if (cols < 20) cols = 80;
+  if (H < 4) H = 24;
+  rows = H - 1; left = 0;
+  return 0;
+}
+
 int save() {
   int fd; int w; int n;
   fd = open(fname, OPEN_WRITE);
@@ -241,7 +249,7 @@ int run_bas() {
   out("\r\nPress any key");
   if (code != 0) { out(" (exit "); outn(code); out(")"); }
   flush();
-  getkey();
+  while (getkey() == K_RESIZE) resized();   // a resize is not the key asked for
   return 1;
 }
 
@@ -251,6 +259,7 @@ int prompt(char *label) {              // edit findbuf on the status line; 1 = E
   while (1) {
     gotoxy(rows, 0); csi("0m"); csi("K"); out(label); out(findbuf); flush();
     c = getkey();
+    if (c == K_RESIZE) { resized(); csi("2J"); draw(); continue; }
     if (c == 13 || c == 10) return 1;
     if (c == 27 || c == 3 || c == 24 || c == 7) return 0;
     if ((c == 127 || c == 8) && n > 0) { n--; findbuf[n] = 0; }
@@ -368,13 +377,7 @@ int main(int argc, char **argv) {
   while (1) {
     draw();
     k = getkey();
-    if (k == K_RESIZE) {                  // not a key: take the new size and repaint everything
-      csz = sysinfo(INFO_CONSOLE); cols = csz & 65535; H = csz >> 16;
-      if (cols < 20) cols = 80;
-      if (H < 4) H = 24;
-      rows = H - 1; left = 0; csi("2J");
-      continue;
-    }
+    if (k == K_RESIZE) { resized(); csi("2J"); continue; }   // not a key: repaint everything at the new size
     if (k != 24 && k != 17) quitarm = 0;
     if (k != K_NONE) msg[0] = 0;
     if (k == 24 || k == 17) {             // ^X ^Q

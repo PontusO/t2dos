@@ -125,6 +125,14 @@ class ScreenTest {
         assertEquals("l2", s.historyRowText(0)); assertEquals("l1", s.historyRowText(1))
     }
 
+    @Test fun resizeInAltKeepsShellLines() {       // rotate while edit is open: the shell's newest lines survive
+        val s = scr(10, 6); s.f("l1\r\nl2\r\nl3\r\nl4\r\nl5\r\n/> ")
+        s.f("${E}[?1049h"); s.resize(10, 3); s.f("${E}[?1049l")
+        assertEquals("l4", s.rowText(0)); assertEquals("l5", s.rowText(1)); assertEquals("/>", s.rowText(2))
+        assertEquals(Pair(2, 3), s.cur())
+        assertEquals("l3", s.historyRowText(0)); assertEquals("l1", s.historyRowText(2))
+    }
+
     @Test fun versionMoves() {
         val s = scr(); val v = s.version; s.f("x"); assertTrue(s.version > v)
     }

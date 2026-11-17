@@ -20,9 +20,10 @@ object Keys {
      */
     fun text(s: String, ctrl: Boolean): ByteArray {
         val o = ByteArrayOutputStream(s.length)
-        for (ch in s) {
+        for ((i, ch) in s.withIndex()) {
             val c = ch.code
             when {
+                ch == '\n' && i > 0 && s[i - 1] == '\r' -> {}          // CR LF (pasted Windows text) is one Enter
                 ctrl && ch in 'a'..'z' -> o.write(c - 'a'.code + 1)
                 ctrl && ch in 'A'..'Z' -> o.write(c - 'A'.code + 1)
                 ch == '\n' || ch == '\r' -> o.write(13)

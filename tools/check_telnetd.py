@@ -206,6 +206,13 @@ def edit_check(con, host, port):
     c.r.wait(b'\x1b[30;1H\x1b[7m', 5, 'edit status line at row 30')          # 100x30
     c.send(bytes([IAC, SB, 31, 0, 60, 0, 20, IAC, SE]))                       # no key pressed
     c.r.wait(b'\x1b[20;1H\x1b[7m', 2, 'edit redraws at row 20')
+    c.send(bytes([6])); c.r.wait(b'find: ', 2, 'find prompt')                  # ^F, then a resize at its prompt
+    time.sleep(0.3); c.r.wait(b'', name='mark')
+    c.send(bytes([IAC, SB, 31, 0, 70, 0, 22, IAC, SE])); time.sleep(1.0)
+    with c.r.lock: got = len(c.r.buf)
+    if got > 3000: fail('the find prompt sent %d bytes in 1 s after a resize' % got)
+    c.r.wait(b'\x1b[22;1H', 2, 'find prompt moved to row 22')
+    c.send(bytes([27])); c.r.wait(b'\x1b[22;1H\x1b[7m', 2, 'status line at row 22 after find')
     c.send('abc'); time.sleep(0.3); c.send(bytes([19])); time.sleep(0.3); c.send(bytes([24]))   # type, ^S, ^X
     c.r.wait(b'/> ', 5, 'edit quit'); c.close()
     time.sleep(0.3)

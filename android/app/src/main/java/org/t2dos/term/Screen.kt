@@ -165,11 +165,14 @@ class Screen(cols: Int, rows: Int, val reply: (ByteArray) -> Unit) {
     fun resize(newCols: Int, newRows: Int) {
         if (newCols == cols && newRows == rows) return
         val shift = maxOf(0, cursorRow - (newRows - 1))
-        for (s in 0 until shift) { if (!altScreen) { history.addFirst(main[s]); if (history.size > HISTORY) history.removeLast() } }
-        main = remap(main, if (altScreen) 0 else shift, newCols, newRows)
+        // the main screen keeps the row its cursor is on (the saved one while the alternate screen is up)
+        val mainShift = if (altScreen) maxOf(0, savedRow - (newRows - 1)) else shift
+        for (s in 0 until mainShift) { history.addFirst(main[s]); if (history.size > HISTORY) history.removeLast() }
+        main = remap(main, mainShift, newCols, newRows)
         alt = remap(alt, if (altScreen) shift else 0, newCols, newRows)
         cols = newCols; rows = newRows
         cursorRow = (cursorRow - shift).coerceIn(0, rows - 1); cursorCol = cursorCol.coerceIn(0, cols - 1)
+        if (altScreen) savedRow -= mainShift
         savedRow = savedRow.coerceIn(0, rows - 1); savedCol = savedCol.coerceIn(0, cols - 1)
         wrapPending = false
         version++

@@ -96,6 +96,45 @@ class SessionTest {
         se.close(); s.close()
     }
 
+    @Test fun silentBoardReported() {               // power cut or reset while idle: no bytes ever come back
+        val ss = ServerSocket(0); val ev = Events()
+        Session("127.0.0.1", ss.localPort, null, 80, 24, ev, idleMs = 300).start()
+        val s = ss.accept(); ss.close()
+        s.getOutputStream().write(HELLO); s.getOutputStream().flush()
+        assertTrue(ev.done.await(3, TimeUnit.SECONDS))
+        assertEquals("no answer from the board", ev.reason)
+        s.close()
+    }
+
+    @Test fun answeringBoardStaysOpen() {           // telnetd answers IAC DO 6 with IAC WONT 6
+        val ss = ServerSocket(0); val ev = Events()
+        val se = Session("127.0.0.1", ss.localPort, null, 80, 24, ev, idleMs = 300)
+        se.start()
+        val s = ss.accept(); ss.close()
+        Thread {
+            val inp = s.getInputStream(); val o = s.getOutputStream(); var last = 0
+            try { while (true) { val c = inp.read(); if (c < 0) break
+                if (last == 253 && c == 6) { o.write(byteArrayOf(-1, -4, 6)); o.flush() }
+                last = c } } catch (_: Exception) {}
+        }.start()
+        assertTrue("closed: ${ev.reason}", !ev.done.await(1500, TimeUnit.MILLISECONDS))
+        se.close(); s.close()
+    }
+
+    @Test fun staleBracketNotReason() {
+        val ev = Events(); val (_, s) = open(null, ev)
+        s.getOutputStream().write("\r\n[exit 1, 12 ms]\r\n/> ".toByteArray()); s.getOutputStream().flush()
+        Thread.sleep(200)
+        s.setSoLinger(true, 0); s.close()
+        assertTrue(ev.done.await(2, TimeUnit.SECONDS))
+        assertTrue(ev.reason, ev.reason != "[exit 1, 12 ms]")
+    }
+
+    @Test fun reasonOnlyAtTheEnd() {
+        assertEquals("[logged out]", Session.reasonFrom("x\r\n[logged out]\r\n"))
+        assertEquals(null, Session.reasonFrom("\r\n[exit 1, 12 ms]\r\n/> "))
+    }
+
     @Test fun cannotConnect() {
         val ss = ServerSocket(0); val port = ss.localPort; ss.close()
         val ev = Events()

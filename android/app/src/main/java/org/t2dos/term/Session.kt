@@ -4,6 +4,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 
 /**
@@ -15,6 +16,7 @@ import java.util.concurrent.Executors
 class Session(
     private val host: String, private val port: Int, private val password: String?,
     cols: Int, rows: Int, private val listener: Listener,
+    private val idleMs: Int = 10000,
 ) {
     interface Listener {
         fun changed()                       // the screen changed (called on the session thread)
@@ -36,16 +38,25 @@ class Session(
 
     private fun run() {
         var error: String? = null
+        var clean = false
         try {
             val s = Socket()
             s.connect(InetSocketAddress(host, port), 5000)
             s.tcpNoDelay = true
+            s.soTimeout = idleMs
             sock = s; out = s.getOutputStream()
             val inp = s.getInputStream()
             val buf = ByteArray(4096)
+            var probing = false
             while (!ended) {
-                val n = inp.read(buf)
-                if (n < 0) break
+                val n = try { inp.read(buf) } catch (e: SocketTimeoutException) {
+                    // quiet for idleMs: ask the board for an answer (telnetd answers IAC DO 6 with
+                    // IAC WONT 6); quiet again after that means it is gone (power cut, reset)
+                    if (probing) { error = "no answer from the board"; break }
+                    probing = true; send0(byteArrayOf(-1, -3, 6)); continue
+                }
+                probing = false
+                if (n < 0) { clean = true; break }
                 val data = synchronized(telnet) { telnet.receive(buf, 0, n) }
                 if (data.isEmpty()) continue
                 synchronized(screen) { screen.feed(data) }
@@ -56,7 +67,7 @@ class Session(
         } catch (e: IOException) {
             error = e.message ?: e.javaClass.simpleName
         }
-        finish(error)
+        finish(error, clean)
     }
 
     private fun remember(data: ByteArray) {
@@ -75,8 +86,9 @@ class Session(
         if (asks) { triedPassword = true; send(Keys.text(password, false) + byteArrayOf(13)) }
     }
 
-    private fun finish(error: String?) {
-        val reason = reasonFrom(tail.toString()) ?: error ?: "connection closed"
+    private fun finish(error: String?, clean: Boolean) {
+        // the board's own last words only when it closed the connection itself
+        val reason = (if (clean) reasonFrom(tail.toString()) else null) ?: error ?: "connection closed"
         val first = synchronized(this) { val f = !closedSent; closedSent = true; f }
         ended = true
         try { sock?.close() } catch (_: IOException) {}
@@ -114,12 +126,13 @@ class Session(
     }
 
     companion object {
-        private val BRACKET = Regex("""\r\n\[([^\]\r\n]{1,100})\]\r\n""")
+        private val BRACKET = Regex("""\r\n\[([^\]\r\n]{1,100})\]\r\n$""")
 
-        /** What to show when the board closes: its last [message], or a refusal it printed. */
+        /** What to show when the board closes: the [message] or refusal it ended with, else null. */
         fun reasonFrom(tail: String): String? {
-            BRACKET.findAll(tail).lastOrNull()?.let { return "[" + it.groupValues[1] + "]" }
-            for (m in listOf("try again later", "another login is in progress")) if (tail.contains(m)) return m
+            BRACKET.find(tail)?.let { return "[" + it.groupValues[1] + "]" }
+            val t = tail.trimEnd()
+            for (m in listOf("try again later", "another login is in progress")) if (t.endsWith(m)) return m
             return null
         }
     }

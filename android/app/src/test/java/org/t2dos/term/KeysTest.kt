@@ -33,5 +33,6 @@ class KeysTest {
         assertArrayEquals(b(13), Keys.text("\n", false))
         assertArrayEquals(b("ls -l"), Keys.text("ls -l", false))
         assertArrayEquals(b(9), Keys.text("\t", false))
+        assertArrayEquals(b('a'.code, 13, 'b'.code), Keys.text("a\r\nb", false))   // pasted Windows text: one Enter
     }
 }
