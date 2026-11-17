@@ -15,7 +15,7 @@ android {
     testOptions {
         unitTests.all { test ->
             // the end-to-end test reads these (tools/check_android.py sets them)
-            listOf("T2DOS_E2E_PORT", "T2DOS_E2E_PASS").forEach { k -> System.getenv(k)?.let { test.environment(k, it) } }
+            listOf("T2DOS_E2E_PORT", "T2DOS_E2E_PASS", "T2DOS_E2E_LAST").forEach { k -> System.getenv(k)?.let { test.environment(k, it) } }
             test.testLogging { events("passed", "skipped", "failed"); showStandardStreams = false }
         }
     }
