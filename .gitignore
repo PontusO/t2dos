@@ -12,3 +12,5 @@ __pycache__/
 # scratch: cc -S dumps and test builds run from the repo root (tools use root/tmp too)
 /matmul.s
 /root/tmp/
+# scratch notes for the current task (see AGENTS.md)
+/notes/

@@ -6,19 +6,28 @@ T2DOS is a single-tasking, flat-memory, DOS-class OS for the RP2350. The kernel 
 
 ## Working within the context window
 
-The window is small; spend it on the task, not on dumping files.
+The context is compacted at about 262K tokens and only a summary survives. Everything
+you read or print stays in the window until then, so keep it small.
 
+  - Find code with `grep -n` first, then read at most ~60 lines around the hit.
+    Don't re-read code you already read this round unless it changed.
+  - Cap command output: `| head -40`, `| tail -20` or a narrow grep; for suites show
+    only the end, e.g. `make check 2>&1 | tail -20`. Never print whole assembly files:
+    write them with `cc -S -o out.s` and `grep -n` / `sed -n 'A,Bp'` the function.
+  - Make code changes with the edit tool, one change at a time; `git diff <file>`
+    shows what you changed. Don't restore a backup and re-apply patches through a
+    script on every try.
   - Build `cc.c` with gcc while debugging. Debug output goes in `#ifdef CC_DEBUG`
     blocks using `fprintf(stderr, ...)`, built with `-DCC_DEBUG`; remove them before
     committing. Never leave stdout probes in loop passes: a matmul inner loop prints
     thousands of lines. Prefer gdb (`-O0 -g`) with narrow breakpoints.
-  - Make code changes with the edit tool, one change at a time. Don't restore a backup
-    and re-apply patches through a script on every try.
-  - Never print whole assembly files: `grep -n` or `sed -n 'A,Bp'` the function you
-    care about. Pipe check output through `head -50` / `tail -15` or a narrow grep.
-  - Don't re-read code you already read this round unless it changed.
-  - When you find something important mid-task, write it to `docs/NOTES-<topic>.md`
-    so it survives compaction; fold what matters into code comments before finishing.
+  - After each change run one quick, targeted check (the triage table below says
+    which); run the full suites only once it passes.
+  - Keep findings in `docs/NOTES-<topic>.md` as you go: goal, current hypothesis,
+    what is ruled out, next step. After a compaction, read it first and do not
+    re-investigate what it marks settled. Fold what matters into code comments or
+    the commit message before finishing; `/notes/` (gitignored) is there if you
+    want a throwaway file instead.
 
 ## Board safety
 
