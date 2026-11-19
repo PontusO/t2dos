@@ -2,17 +2,34 @@
 
 This file provides guidance to LLM's when working with code in this repository.
 
-T2DOS is a single-tasking, flat-memory, DOS-class OS for the RP2350. The kernel is an Arduino sketch; everything else (shell, tools, and the toolchain itself: `cc`, `as`, `ld`, `ar`, `nm`, `objdump`) is a binary built by that toolchain and loaded from the SD card. README.md has the user-facing details (bootstrapping, network protocol, language subset).
+T2DOS is a single-tasking, flat-memory, DOS-class OS for the RP2350. The kernel is an Arduino sketch; everything else (shell, tools, and the toolchain itself: `cc`, `as`, `ld`, `ar`, `nm`, `objdump`) is a binary built by that toolchain and loaded from the SD card. README.md has the user-facing details (bootstrapping, network protocol, language subset). Session conduct, current state and handover notes live in `docs/HANDOVER.md`; feature designs in `docs/superpowers/specs/`.
 
 ## Working within the context window
-  - `cc.c` is built with gcc while debugging, so put debug output in `#ifdef LICM_DEBUG` blocks
-    using `fprintf(stderr, ...)` and build with `-DLICM_DEBUG`. Remove them before committing.
-  - Make code changes with the edit tool, one change at a time. Don't restore a backup and
-    re-apply patches through a script on every try.
-  - Limit command output: pipe through `head -50` or a narrow `grep`, and never print whole
-    assembly files.
+
+The window is small; spend it on the task, not on dumping files.
+
+  - Build `cc.c` with gcc while debugging. Debug output goes in `#ifdef CC_DEBUG`
+    blocks using `fprintf(stderr, ...)`, built with `-DCC_DEBUG`; remove them before
+    committing. Never leave stdout probes in loop passes: a matmul inner loop prints
+    thousands of lines. Prefer gdb (`-O0 -g`) with narrow breakpoints.
+  - Make code changes with the edit tool, one change at a time. Don't restore a backup
+    and re-apply patches through a script on every try.
+  - Never print whole assembly files: `grep -n` or `sed -n 'A,Bp'` the function you
+    care about. Pipe check output through `head -50` / `tail -15` or a narrow grep.
   - Don't re-read code you already read this round unless it changed.
-  - When you find something important, write it to `docs/licm-notes.md` so it survives compaction.
+  - When you find something important mid-task, write it to `docs/NOTES-<topic>.md`
+    so it survives compaction; fold what matters into code comments before finishing.
+
+## Board safety
+
+The board is one serial port: only one program may hold `/dev/ttyACM*` at a time.
+
+  - Never kill the user's `screen` session. A busy (or hung) port means stop and ask.
+    `tools/board.py` takes its port from `$T2DOS_PORT`, else the first iLabs RP2350
+    entry under `/dev/serial/by-id/`.
+  - Board runs (`--board`, `--selfhost`, `bench.py --board`) need the user's go-ahead.
+  - Bad encodings can hang the board: disassemble new codegen (`cc -S`, or
+    `build/host/objdump`) before running it there.
 
 ## Build and test
 
@@ -24,9 +41,53 @@ make host       # build the Linux/ARM kernel harness (needs arm-linux-gnueabihf-
 make clean
 ```
 
-Single checks: `python3 tools/check_asm.py [--corpus | --objdump-corpus | --diff N]`, `python3 tools/check_link.py --pc|--board`, `python3 tools/check_ref.py` (every single-file program must come out byte-identical to `build/ref/cc`; programs with run-before-main init code are excluded and checked by behaviour), `python3 tools/check_basic.py --pc|--board [--only NAME]` (BASIC cases in `tests/basic/NAME.bas` + `.out`, last line `exit N`, optional `.in`, `.args`, `.env`; `--pc` builds a native gcc -m32 interpreter via `basic/pcsys.c` and also runs every case under AddressSanitizer, which is the real leak check; `--board` compares output exactly and adds board-only key cases), `python3 tools/check_sh.py --pc` (shell cases in `tests/sh/`: `NAME.in` is typed into `sh.bin` under qemu, the output must equal `NAME.out`; the `.sh` files there run as `/tmp/sh/NAME.sh`), `python3 tools/check_toolchain.py --pc|--board|--selfhost`, `python3 tools/check_net.py --pc` (wifi -s, rcd, rls, get, send under qemu against a local `fileserver.py`; the default server and remote directory live in `/etc/remote`), `python3 tools/check_jobs.py --build|--board` (background jobs and pipes; board only, since `host_linux` returns `SPAWN_UNSUPPORTED` for spawn; it checks free PSRAM is unchanged). `check_ref.py` also excludes sources that use the newer builtins (spawn, yield, jobs, kill, mkpipe), because the reference cc predates them. The GNU oracle is `~/.arduino15/packages/rp2040/tools/pqt-gcc/*/bin/arm-none-eabi-{as,objdump}`.
+Run `make` before any board test and `make ref` before `check_ref.py`; both fail
+confusingly otherwise. Each checker's flags are in its own docstring
+(`python3 tools/check_X.py` with no args prints it).
 
-Kernel (iLabs CPico 2350, arduino-pico core `rp2040:rp2040`). The sketch includes `sys.h` from the repo root, so pass it as an include path. The `flash=` option gives 1 MB to the kernel and 7 MB to the LittleFS fallback used when no SD card mounts:
+Triage - what you changed, what to run:
+
+| change | PC check | board check |
+|---|---|---|
+| `cc.c` codegen (no `-O` path touched) | `check_ref.py` (byte identity), `compiler/tests/test*.c` vs gcc | `check_toolchain.py --selfhost` |
+| anything in `cc/as/ld/binutils` | `make check`, `bench.py --pc` | `--board`, `--selfhost` |
+| `as` encodings | `check_asm.py --diff N` (GNU oracle below) | |
+| `ld` / objects / archives | `check_link.py --pc` | `check_link.py --board` |
+| `objdump` | `check_asm.py --objdump-corpus` | |
+| kernel / `host_linux.c` | `check_sh.py --pc`, `check_net.py --pc` | their `--board` variants (ask first) |
+| jobs / pipes / spawn | (host_linux returns SPAWN_UNSUPPORTED) | `check_jobs.py --build|--board` |
+| BASIC | `check_basic.py --pc` (also runs ASan leak checks) | `check_basic.py --board` |
+| `-O` pass | plain and `-O` builds must agree behaviorally: compiler tests, BASIC cases under qemu, `bench.py --pc`; `make OPT=-O` toolchain must rebuild itself identically | `--selfhost` |
+
+`bench.py --pc|--board` builds every `tests/bench/*.c` plain and with `-O`, checks
+each `check` line against a native gcc build, and prints times and sizes: the
+correctness-plus-speed one-liner for compiler work. gcc-vs-cc timing only exists
+under qemu (gcc builds are armhf/glibc; the board cannot run them). The GNU oracle
+is `~/.arduino15/packages/rp2040/tools/pqt-gcc/*/bin/arm-none-eabi-{as,objdump}`.
+
+Testing means running binaries under qemu-arm with `host_linux`, which implements the
+same syscall contract as the kernel against a root directory (default `./root`):
+
+```sh
+printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin       # drive the shell
+compiler/cc -o root/bin/test.bin compiler/tests/test.c && qemu-arm ./host_linux -r root /bin/test.bin
+```
+
+A fresh `host_linux` that segfaults at startup is a stale or bad build (`make host`),
+not your code. In this sandbox it may not start at all; direct `.bin` runs still work.
+`compiler/tests/*.c` exercise the language subset; test.c returns 42, test4.c onward
+are standard C so gcc builds them natively for reference output (only pointer `sizeof`
+differs). On-board testing goes over the serial console (`put name size` + raw bytes,
+`hexdump file`); `tools/board.py` wraps it (`put`, `run`, `fetch`, `expect_gcc`). If
+the board hangs and sits on the switchable USB hub, power-cycle with exactly
+`uhubctl -l 3-1.4 -p 4 -a cycle -d 3` (no other hub or port); the command right after
+is often misread as no answer. `check_toolchain.py --selfhost` is the self-hosting
+fixed point: the board cc rebuilds cc, as, ld, ar, nm, objdump byte-identically to
+the PC builds. `tools/fileserver.py dir [port]` (default 7777) is the PC side of the
+`get`/`send`/`rls` network tools.
+
+Kernel flashing (iLabs CPico 2350, arduino-pico core `rp2040:rp2040`; the sketch
+includes `sys.h` from the repo root):
 
 ```sh
 FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
@@ -34,44 +95,83 @@ arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$P
 arduino-cli upload  --fqbn $FQBN -p /dev/ttyACMx --input-dir build/kernel
 ```
 
-On the Challenger 2350 WiFi/BLE use `FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted` and add `--library third_party/ESPHost` to the compile (the ESP32-C6 runs ESP-Hosted-FG; the default `esp_at` build has no WiFi driver; arduino-pico 6.2.0's bundled ESPHost hangs in the GPIO IRQ once WiFi is up, and kernel.ino `#error`s without the patched copy). A Raspberry Pi Debug Probe may be attached: use arduino-pico's `pqt-openocd` with `-c "set USE_CORE 0" -f target/rp2350.cfg` (SMP resume fails) and `pqt-gcc`'s `arm-none-eabi-gdb`; gdb `detach` leaves the core halted, so `resume` through OpenOCD's telnet port 4444. Timers pause while a core is debug-halted (TIMER DBGPAUSE).
-
-`kernel/vault.cpp` holds the key for `wifi -k` (AES-128-GCM via BearSSL): a random key in OTP page 60 rows 0xf00-0xf07 plus marker row 0xf08, written once on first use (the Challenger with USB serial B63788AFE9874C9D has one since 2026-11-11), soft-locked with `OTP_SW_LOCK60` after boot. Never write any other OTP row. `/etc/wifi` holds the sealed SSID and password; the kernel joins it in `setup()`.
-
-If the kernel hangs hard (USB serial stops accepting input), the 1200-baud reset no longer works: the board must be reset or put in BOOTSEL by hand, then `build/kernel/kernel.ino.uf2` can be copied to the `RP2350` drive. Reflashing keeps the flash filesystem.
-
-On-board testing goes over the serial console: `put name size` followed by raw bytes uploads a file, `hexdump file` reads one back. `tools/board.py` wraps this (`put`, `run`, `fetch`, `expect_gcc` to compare a test's output with gcc's). If the board hangs and it is on the switchable USB hub, power-cycle it with exactly `uhubctl -l 3-1.4 -p 4 -a cycle -d 3` (no other hub or port); the first command afterwards is often misread as no answer. Never kill the user's `screen` session; a busy port means stop and ask. `python3 tools/check_toolchain.py --selfhost` is the board self-hosting fixed point: the board `cc` rebuilds `cc`, `as`, `ld`, `ar`, `nm`, `objdump` byte-identically to the PC builds.
-
-There is no test runner. Testing means running binaries under qemu-arm with `host_linux`, which implements the same syscall contract as the board kernel against a root directory (default `./root`):
-
-```sh
-printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin       # drive the shell
-compiler/cc -o root/bin/test.bin compiler/tests/test.c && qemu-arm ./host_linux -r root /bin/test.bin
-```
-
-`compiler/tests/*.c` exercise the supported language subset; run them after compiler changes. test.c returns 42; test4.c onwards are standard C, so `gcc` builds them natively for the reference output (only `sizeof` of pointers differs). Also check that every existing userland binary still compiles byte-identically when a change should not affect it, and disassemble new codegen (`cc -S`, or `build/host/objdump`) before running it on the board: a bad encoding can hang the board.
-
-**Self-hosting check** (the key regression test for `cc.c` and the tools): rebuild them with the toolchain's own `.bin`s and confirm the result is byte-identical to the PC build (`check_toolchain.py --selfhost` on the board). Note `cc` resolves includes relative to the current directory, `-I` and `/lib`.
-
-`tools/fileserver.py dir [port]` (default 7777) is the PC side of the `get`/`send`/`rls` network tools.
+On the Challenger 2350 WiFi/BLE use `FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted` and add `--library third_party/ESPHost` (the default `esp_at` build has no WiFi driver; the core's bundled ESPHost hangs in the GPIO IRQ once WiFi is up, so the patched copy is required). A hard hang that stops accepting serial input needs a manual reset or BOOTSEL and a `.uf2` copy; reflashing keeps the flash filesystem. `kernel/vault.cpp` (wifi -k, AES-128-GCM) uses OTP page 60 rows 0xf00-0xf08 only: never write any other OTP row.
 
 ## Architecture
 
-- **One ABI, four places.** `sys.h` defines syscall numbers, flags and structs. Adding or changing a syscall means updating all of:
+- **One ABI, four places.** `sys.h` defines syscall numbers, flags and structs. Adding
+  or changing a syscall means updating all of, or it works on PC and hangs the board:
   1. `sys.h` (numbers are frozen; add new ones in the gaps of their group),
-  2. the builtin name/number string in `cc.c` `main()` (and the list there of builtins returning `char *`); `as`, `ld` and the binutils use the same builtins,
+  2. the builtin name/number string in `cc.c` `main()` (and the list there of builtins
+     returning `char *`); `as`, `ld` and the binutils use the same builtins,
   3. the dispatch `switch` in `kernel/kernel.ino`,
   4. the dispatch `switch` in `host_linux.c`.
-- **`compiler/cc.c`, `assembler/as.c`, `linker/ld.c`, `binutils/*.c` and `lib/t2obj.c` must stay inside the subset the committed `cc` compiles** (bootstrap rule), because they rebuild themselves on the board. No floats, initializers, function pointers, unsigned/short, 2-D arrays or multi-line macros in `cc.c`; the subset still lacks `static`, `const`, do-while, goto, `sizeof expr`, user variadic functions, long long and struct assignment (rejected). Style there is deliberately primitive (`p = p + 1`, assignments separate from declarations, all functions return `int`) for the same reason. `#include <...>` is ignored by `cc`; libc calls in `cc.c` map onto the syscall builtins. When adding a language feature, don't use it in `cc.c` itself in the same change (an older `cc` must still build it); the escape handling in `next()` uses numeric values for this reason.
-- **Toolchain pipeline:** `cc` writes GNU unified-syntax Thumb-2 assembly; `as` turns it into a T2DOS object (`"T2OB"`, see `lib/t2obj.h`), `ld` links objects and `ar` archives (`"T2AR"`, only needed members are linked) into the `.bin`. `cc` is also the driver (`-S`, `-c`, `-l`/`-L`, mixed `.c`/`.s`/`.o`/`.a` inputs; temporaries in `/tmp`): on the board it `exec`s `/bin/as.bin` and `/bin/ld.bin`, on the PC it runs `build/host/as`/`ld` (or `$T2_TOOLS`). Encodings live only in `as`; its accepted forms must assemble to the same bytes as GNU `as` and reject what GNU rejects (`check_asm.py --diff`). `objdump`'s text must equal GNU objdump's.
-- **Code model rule:** no absolute addresses. A data symbol's value is its data offset (used against `r9`), a text symbol's its code offset. T2DOS pseudo-instructions: `fnaddr rd, sym` (PC-relative function address), `movw.16`, `.t2init` (run-before-main function; `ld` builds the stub `push {r4,lr}; bl init...; pop.w {r4,lr}; b.w main`). `cc` picks each data reference's form (`addw` below 4 KB, `movw.16` below 64 KB, else `movw`/`movt`) from the linked offset: the driver tracks where `ld` will put each file's data (`dbase`); `-S`/`-c` use the long form unless `-mshort-data` (then `ld` range-checks); `extern` references always use `movw`/`movt`.
-- **Floats** are 32-bit and live in `r0` as their bit pattern like an int; only arithmetic, comparisons and conversions move them through `s0`/`s1` (see `cvt`, `fpair`, `relop`, `test0`). Literals are decoded in `fl_parse` with integer bignum arithmetic, because `cc.c` cannot use float itself. The kernel enables the FPU (CPACR) in `setup()`. With `-O`, `promote()` keeps float locals and parameters in s16-s31 (callee-saved, `vpush`/`vpop` around the frame) and the s-register rules (`peep_fmov`, `peep_fpush`, `sdead`) let FPU instructions use them and s0-s15 directly; a value in s0-s15 never lives across a label, a branch or a call, in the plain code or in those rules' output, and `sdead()` relies on that. s16-s31 must survive everything a program can call: `ctx_switch` saves them, and `run_loaded` restores them after the child returns, because a child that ends by `exit()` longjmps past its own `vpop` and newlib's `longjmp` restores no FPU register (`tests/jobs/fexec.c` checks it).
-- **Compiler design:** single pass, no AST. The tokenizer (`next`), a preprocessor (`#include`, object and function-like `#define`, `#if`/`#ifdef`), the expression parser (`expr`, precedence climbing) and `stmt` append assembly lines to a per-function buffer; branches refer to `.L<n>` labels, and `lastload` counts lines to drop for `lvalue()`'s rollback. The buffer is written when the function ends. With `-O`, `peep()` first rewrites the buffer (fixed patterns; any rewrite that changes a register or the flags checks with `dead()`/`fdead()` that the old value is never read, following branches). Without `-O` the output must stay byte-identical (`check_ref`); `make OPT=-O` builds everything with it, and an `-O` change is checked by comparing plain and `-O` builds' behaviour (compiler tests, every BASIC case under qemu, `check_asm --corpus`) and by the `-O` toolchain rebuilding itself identically.
-- **Calling convention / code model:** `r7` frame pointer, `r8` = kernel `sys()` entry, `r9` = data base, all args on the stack left to right (first arg deepest), caller pops, result in `r0`. The kernel side sees `sys(num, nargs, argv)` where `argv[nargs-1]` is the first argument (hence the `A(i)` macro in both kernels).
-- **Binary format:** `"T2CC"`, then code size, data size, a reserved 0, entry offset (all 32-bit LE), then code bytes, then data bytes. Loaded by `run_bin` in `host_linux.c` and the loader in `kernel.ino`.
-- **Kernel memory model:** program code goes in SRAM; data, the 256 KB stack and `malloc` go in PSRAM. PSRAM shares the QSPI controller with flash, so nothing may touch PSRAM while flash is written: that is why `sys_entry` switches syscalls onto the SRAM `kstack`. Program `malloc`s are tracked per `Proc`, zeroed on allocation (`cc` depends on that) and freed on exit. `/tmp` is a RAM filesystem in PSRAM (`kernel/ramfs.cpp`, an `fs::FSImpl`): `fs_for(path)` sends `/tmp` and `/tmp/...` there, everything else to `fsys`; `k_rename` copies through an SRAM buffer between the two; writes stop at `TMP_MARGIN` (1 MB) of free PSRAM; contents are lost at reset. `check_toolchain.py --board` checks it (`check_ramtmp`).
-- **Tasks (program code preempted, kernel not):** `tasks[0]` is the foreground; up to 4 background jobs (`cmd &`, `spawn`) each get an 8 KB SRAM kernel stack. `ctx_switch` saves r4-r11, lr and d8-d15. All switches go through `k_yield()`/`k_wait()`, reached from getchar, kbhit, sleep, recv, accept, pipe waits, kill and yield, and from preemption: a TIMER1 alarm-0 IRQ every 10 ms at the lowest priority (`preempt_isr`/`preempt_tick`; SysTick belongs to arduino-pico's cycle counter) checks that the stacked PC is inside `procs[nest].code` (code_size), the IT/ICI bits are clear and another task can run (or the task is killed, or it is the foreground with `Proc.brk` on), then rewrites the return PC to `preempt_tramp`, which saves r0-r4, r12, lr, APSR, s0-s15 and FPSCR on the program stack, moves to `t2_sys_sp` and calls `k_yield()`. So only one task is ever in the kernel, and kernel code (syscalls, arduino-pico, LittleFS, lwIP) is never preempted. Never add a switch point inside a file, flash or WiFi call (PSRAM/flash sharing and LittleFS are not reentrant). Per-task globals (`t2_sys_sp`, cwd, stdout_fd, nest/procs, the printf buffer) are swapped on every switch, so new per-program kernel state must join that swap. Cleanup on task end goes by owner (fd_owner, sock_owner, listener owner, pipes). Named pipes live under `/pipe/` (fds 200 and up, 512-byte buffer, 8 pipes, a message ends at writer close, a generation counter kills stale fds); Ctrl-C ends a foreground pipe wait and other keys typed meanwhile go to a 64-byte type-ahead ring. Ctrl-C also ends a foreground program that computes or sleeps (`brk_check` from `preempt_yield` and `SYS_sleep`, exit `EXIT_BREAK` 130) unless it called `conctl(CON_BREAK, 0, 0)`; sh, edit, basic, put and nc do, since they use the byte. A new program reading raw console bytes must do the same, and a new put.bin must be on the board before a kernel that breaks. Never declare a local `n` inside `sys()`: the `A(i)` macro uses sys()'s `n`. `userland/demosrv.c` is the reference background server.
-- **BASIC (`basic/`):** QBasic-style interpreter, `root/bin/basic.bin`. It compiles the whole file to bytecode at load (static types, load-time errors) and runs a VM (`vm.c`) with a tagged value stack, a control stack (FOR/GOSUB/CALL frames) and an output-target stack for `PRINT #`. It yields and polls keys every 1024 ops. `mem_alloc` is the only allocator and keeps a 64 KB PSRAM margin. cc accepts only one `-I`, so the Makefile builds it with `-I basic`. The maths built-ins (syscalls 112-130, `lib/math.h`) are typed TFLOAT in cc; user syscalls start at 131. `edit` runs `.bas` files with Ctrl-R.
-- **printf/sprintf and string/memory helpers run kernel-side**, so the format subset (`%[-][0][width][.prec]d u x c s f e g %%`, the float as its 32-bit pattern) is whatever `kernel.ino` and `host_linux.c` implement; keep them in sync.
-- **Includes:** `#include "x"` resolves relative to the *current directory*, then the `-I` dir, then `/lib`. The Makefile runs from the repo root with `-I lib`, so userland programs pick up the top-level `sys.h` and `lib/net.c`. Don't add a copy of `sys.h` under `userland/`; there must be one ABI header.
-- **`root/`** is the SD card image. `root/bin`, `root/lib` and `root/src/*` are build output (gitignored); copy `root/` to the card.
+- **Bootstrap rule.** `compiler/cc.c`, `assembler/as.c`, `linker/ld.c`, `binutils/*.c`
+  and `lib/t2obj.c` must stay inside the subset the committed `cc` compiles, because
+  they rebuild themselves on the board. No floats, initializers, function pointers,
+  unsigned/short, 2-D arrays or multi-line macros in `cc.c`; the subset still lacks
+  `static`, `const`, do-while, goto, `sizeof expr`, user variadic functions, long long
+  and struct assignment (rejected). Style is deliberately primitive (`p = p + 1`,
+  assignments separate from declarations, all functions return `int`). When in doubt,
+  compile your change with the committed cc and `build/ref/cc`: they are the parsers
+  of record. `#include <...>` is ignored by `cc`; libc calls in `cc.c` map onto the
+  syscall builtins. Don't use a new language feature in `cc.c` in the same change that
+  adds it (an older `cc` must still build it).
+- **Toolchain pipeline:** `cc` writes GNU unified-syntax Thumb-2 assembly; `as` turns
+  it into a T2DOS object (`"T2OB"`, see `lib/t2obj.h`), `ld` links objects and `ar`
+  archives (`"T2AR"`, only needed members are linked) into the `.bin`. `cc` is also the
+  driver (`-S`, `-c`, `-l`/`-L`, mixed inputs; temporaries in `/tmp`): on the board it
+  `exec`s `/bin/as.bin` and `/bin/ld.bin`, on the PC it runs `build/host/as`/`ld` (or
+  `$T2_TOOLS`; cc resolves that path relative to the current directory, so a stale
+  `/tmp/build/host` can shadow it). Encodings live only in `as`; its accepted forms
+  must match GNU as byte-for-byte and reject what GNU rejects (`check_asm.py --diff`);
+  `objdump`'s text must equal GNU objdump's.
+- **Code model rule:** no absolute addresses. A data symbol's value is its data offset
+  (used against `r9`), a text symbol's its code offset. T2DOS pseudo-instructions:
+  `fnaddr rd, sym`, `movw.16`, `.t2init` (run-before-main; `ld` builds the stub). `cc`
+  picks each data reference's form (`addw` < 4 KB, `movw.16` < 64 KB, else movw/movt)
+  from the linked offset via the driver's `dbase` tracking; `-S`/`-c` use the long form
+  unless `-mshort-data`; `extern` references always use movw/movt.
+- **Calling convention:** `r7` frame pointer, `r8` = kernel `sys()` entry, `r9` = data
+  base, all args on the stack left to right (first arg deepest), caller pops, result in
+  `r0`. Kernel side: `sys(num, nargs, argv)` with `argv[nargs-1]` the first argument
+  (the `A(i)` macro; never declare a local `n` inside `sys()`).
+- **Binary format:** `"T2CC"`, then code size, data size, a reserved 0, entry offset
+  (all 32-bit LE), then code bytes, then data bytes. Loaded by `run_bin` in
+  `host_linux.c` and the loader in `kernel.ino`.
+- **Compiler design:** single pass, no AST: tokenizer (`next`), preprocessor, `expr`,
+  `stmt` append assembly lines to a per-function buffer (`.L<n>` labels; `lastload`
+  counts lines for `lvalue()`'s rollback); the buffer is written when the function
+  ends. With `-O`: `peep()` rewrites the buffer (every rewrite that changes a register
+  or flags checks `dead()`/`fdead()`), then `licm_loops()` hoists invariant address
+  math (see `docs/superpowers/specs/2026-11-19-cc-licm-design.md`), then `peep()` again
+  so hoisted pairs fold, then `promote()` and `trimframe()`. Without `-O` the output
+  must stay byte-identical (`check_ref`). Floats are 32-bit in `r0` as their bit
+  pattern; only arithmetic/comparisons/conversions move them through `s0`/`s1`; with
+  `-O`, `promote()` keeps float locals and parameters in s16-s31 (callee-saved; a value
+  in s0-s15 never lives across a label, branch or call, which `sdead()` relies on).
+- **Kernel memory model:** program code in SRAM; data, the 256 KB stack and `malloc`
+  in PSRAM. PSRAM shares the QSPI controller with flash: nothing may touch PSRAM while
+  flash is written (hence the SRAM `kstack` in `sys_entry`). Program mallocs are per
+  `Proc`, zeroed on allocation (`cc` depends on that) and freed on exit. `/tmp` is a
+  PSRAM RAM filesystem (`kernel/ramfs.cpp`): writes stop at `TMP_MARGIN` (1 MB) free;
+  contents lost at reset; checked by `check_toolchain.py --board` (`check_ramtmp`).
+- **Tasks:** program code is preempted, kernel code never is. Foreground + up to 4
+  jobs; all switches go through `k_yield()`/`k_wait()` (getchar, kbhit, sleep, recv,
+  accept, pipe waits, kill, and the 10 ms preemption alarm in `preempt_isr`). Never add
+  a switch point inside a file, flash or WiFi call (LittleFS is not reentrant). New
+  per-program kernel state must join the per-task swap list (`t2_sys_sp`, cwd,
+  stdout_fd, procs, printf buffer). Ctrl-C ends a foreground program via `brk_check`
+  unless it called `conctl(CON_BREAK, 0, 0)`; anything reading raw console bytes must.
+  Details of `preempt_tramp`, pipes and the type-ahead ring: comments in `kernel.ino`.
+- **BASIC (`basic/`):** QBasic-style bytecode interpreter, `root/bin/basic.bin`; VM in
+  `vm.c`, yields every 1024 ops, `mem_alloc` is the only allocator (64 KB PSRAM
+  margin). cc accepts one `-I`, so it builds with `-I basic`. Maths built-ins are
+  syscalls 112-130 (`lib/math.h`, TFLOAT); user syscalls start at 131.
+- **printf/sprintf and string/memory helpers run kernel-side**, so the format subset is
+  whatever `kernel.ino` and `host_linux.c` implement; keep them in sync.
+- **Includes:** `#include "x"` resolves relative to the *current directory*, then the
+  `-I` dir, then `/lib`. The Makefile runs from the repo root with `-I lib`, so
+  userland picks up the top-level `sys.h` and `lib/net.c`. Never add a second `sys.h`.
+- **`root/`** is the SD card image. `root/bin`, `root/lib` and `root/src/*` are build
+  output (gitignored); copy `root/` to the card.
