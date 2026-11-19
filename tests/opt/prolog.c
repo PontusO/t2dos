@@ -28,6 +28,12 @@ int clocals(int n) {                     // two locals, no calls: frame stays (r
   a = n + 1; b = a * 2;
   return b - n;
 }
+int rec(int n) {                           // self-recursion: the accumulator lives across
+  int a;                                   // the call, the shifted argument does not
+  if (n <= 0) return 0;
+  a = rec(n / 2);
+  return a + n;
+}
 float cfext(float x);
 float cfloat(float x) {                  // float local: vpush/vpop keep the frame pointer
   float y;
@@ -41,6 +47,6 @@ int cret(int n) {                        // early return: trimframe copies the p
 int main() {
   int a; int b; int c; int d; float e;
   a = csc(4); b = cleaf(5); c = cmixed(3); d = clocals(6); e = cfloat(1.5);
-  printf("check %d %d %d %d %d\n", a, b, c, d, (int)e);   // gcc reference pins the numbers
+  printf("check %d %d %d %d %d %d\n", a, b, c, d, (int)e, rec(9));   // gcc reference pins the numbers
   return 0;
 }

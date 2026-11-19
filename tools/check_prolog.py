@@ -44,7 +44,7 @@ def main():
     subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog.s'), SRC],
                    check=True, cwd=ROOT)
     f = funcs(open(os.path.join(WORK, 'prolog.s')).read())
-    for name in ('csc', 'cleaf', 'cmixed', 'clocals', 'cfloat', 'cret', 'main'):
+    for name in ('csc', 'cleaf', 'cmixed', 'rec', 'clocals', 'cfloat', 'cret', 'main'):
         if name not in f: fail('no function %s in prolog.s' % name)
 
     # calllive(): a promoted register must stay saved when its value is live across a call.
@@ -59,6 +59,11 @@ def main():
     # every call - while s (accumulator) and i (counter, re-read after ext returns) stay.
     if f.get('cmixed', [])[:1] != ['push\t{r4, r5, r7, lr}']:
         fail('cmixed push list changed: %r' % f.get('cmixed', [])[:1])
+    # rec: self-recursion. Only one slot is promotable (the argument n), and it is read
+    # after the recursive call - so it keeps its register. The accumulator lives in a
+    # peep-created stack slot, which promote() never touches. One callee-saved reg today.
+    if f.get('rec', [])[:1] != ['push\t{r4, r7, lr}']:
+        fail('rec push list changed: %r' % f.get('rec', [])[:1])
     # Snapshot of cleaf: a call-free function must not change at all (has_calls gate).
     # Snapshot of cleaf: a call-free function must not change at all (has_calls gate).
     if 'cleaf' in f and cleaf_shape(f['cleaf']) != CLEAF: fail('cleaf changed: %r' % f['cleaf'])
@@ -70,7 +75,7 @@ def main():
                     os.path.join(WORK, 'prolog_stub.o')], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/prolog.bin'],
                          capture_output=True, cwd=ROOT, timeout=30).stdout
-    if out != b'check 9 16 3 8 6\n': fail('prolog.bin printed %r' % out)
+    if out != b'check 9 16 3 8 6 16\n': fail('prolog.bin printed %r' % out)
 
     if bad: print('%d failed' % bad); return 1
     print('ok: prolog')
