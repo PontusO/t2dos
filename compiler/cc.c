@@ -497,8 +497,8 @@ int opinfo(int i) {
 int *dvis; int dstamp;
 int dead(int reg, int i, int depth) {
   int t; int k; int j; int a; int c;
-  if (depth < 2) dstamp = dstamp + 1;       // every top-level query gets fresh visit marks;
-  if (depth > 40) return 0;                 // recursion (depth >= 2) shares the parent's stamp
+  if (!depth) dstamp = dstamp + 1;          // one stamp per query: recursion (and calllive's
+  if (depth > 40) return 0;                 // depth-1 asks) shares the parent's visit marks
   while (i < nlines) {
     k = lkind[i];
     if (k == L_LAB) { if (dvis[i] == dstamp) return 1; dvis[i] = dstamp; i = i + 1; }
