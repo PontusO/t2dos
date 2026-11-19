@@ -6,8 +6,9 @@ T2DOS is a single-tasking, flat-memory, DOS-class OS for the RP2350. The kernel 
 
 ## Working within the context window
 
-The context is compacted at about 262K tokens and only a summary survives. Everything
-you read or print stays in the window until then, so keep it small.
+The context is compacted at about 200K tokens (opencode reserves a buffer against the
+262K window) and only a summary survives. Everything you read or print stays in the
+window until then, so keep it small.
 
   - Find code with `grep -n` first, then read at most ~60 lines around the hit.
     Don't re-read code you already read this round unless it changed.
