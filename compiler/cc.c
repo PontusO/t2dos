@@ -497,8 +497,8 @@ int opinfo(int i) {
 int *dvis; int dstamp;
 int dead(int reg, int i, int depth) {
   int t; int k; int j; int a; int c;
-  if (!depth) dstamp = dstamp + 1;
-  if (depth > 40) return 0;
+  if (depth < 2) dstamp = dstamp + 1;       // every top-level query gets fresh visit marks;
+  if (depth > 40) return 0;                 // recursion (depth >= 2) shares the parent's stamp
   while (i < nlines) {
     k = lkind[i];
     if (k == L_LAB) { if (dvis[i] == dstamp) return 1; dvis[i] = dstamp; i = i + 1; }
@@ -1231,6 +1231,76 @@ int trimframe(int fa, int sz) {
   }
   return 0;
 }
+// calllive(): does a value this frame slot holds ever live across a call?  A callee-saved
+// register only pays for itself when it does: bl clobbers everything past r0-r3, so a slot
+// whose every value dies before (or at) each call loses nothing by staying in its frame
+// word.  promote() asks this while selecting, before it rewrites any line, so dropping a
+// slot needs no undo.  The unit is the SLOT VALUE, not a register: a store writes one
+// (born), the next store overwrites it (dies), and every load in between reads it.  A
+// value born at s that some load at e reads keeps the slot when a call lies on any path
+// from s to e - cl_reach answers reachability (fallthrough, forward branch targets, and a
+// loop's back edge covering s: fib's parameter is read again after every recursive call),
+// and the linear window in cl_between_call covers calls on all those paths at once.
+// Unknown instruction forms keep the slot; an unknown r7 use makes promote() bail anyway.
+// Call-free functions are exempt wholesale (has_calls): nothing dies at a call that never
+// happens, and their shapes stay exactly as promote() made them today.
+int has_calls;
+int iscall(int i) {
+  char *t;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (!strncmp(t, "bl\t", 3)) return 1;
+  if (!strncmp(t, "blx\t", 4)) return strncmp(t + 4, "r8", 2);   // blx r8 is a syscall
+  return 0;
+}
+int cl_reach(int s, int e) {                  // can control flow get from line s to line e?
+  int i; int k;                               // (s <= e assumed). Forward: fallthrough and
+  if (e <= s) return 1;                       // forward branch targets. Backward: a value
+  i = nx(s);                                  // written in a loop body is read again next
+  while (i < nlines && i <= e) {              // round when the loop's back edge covers s -
+    if (lkind[i] == L_BR) {                   // licm's shape, read from inside outward. A
+      k = labat(llab[i]);                     // return on the way stops fallthrough; a loop
+      if (k >= 0 && k != i) {                 // that falls out at its end never re-enters,
+        if (k <= e && k > i) return 1;        // so only heads at or above s carry a value up.
+        if (k < i && k <= s) return 1;
+      }
+    }
+    else if (lkind[i] == L_INS) { opinfo(i); if (opkind == 2) return 0; }   // a return stops it
+    i = nx(i);
+  }
+  if (i > e) return 1;                        // fell through to e
+  return 0;
+}
+int calllive(int slot) {
+  int i; int j; char *t;
+  if (!has_calls) return 1;
+  i = 0;
+  while (i < nlines) {                        // an unknown form might be a call: all or nothing
+    if (lkind[i] == L_INS) { opinfo(i); if (opkind == 4) return 1; }
+    i = i + 1;
+  }
+  j = 0;                                      // birth of the value currently in the slot:
+  i = 0;                                      // entry until the first store writes one
+  while (i < nlines) {
+    if (r7ref(i) == 2) return 1;              // unknown r7 form: promote() bails anyway
+    if (r7ref(i) != 1 || slotix(rfoff) != slot) { i = i + 1; continue; }
+    t = lpool + ltext[i];
+    if (t[0] == 's') j = i;                   // a store: this value is born here
+    else if (cl_between_call(j, i)) return 1; // a load reads the value born at j, and a call
+    i = i + 1;                                // lies between on some path
+  }
+  return 0;                                   // no value of this slot ever crosses a call
+}
+int cl_between_call(int s, int e) {           // any call from line s to line e on some path?
+  int i;
+  if (!cl_reach(s, e)) return 0;            // unreachable: nothing lives that way
+  i = s + 1;                                  // reachable: the linear window covers the
+  while (i < nlines && i <= e) {              // straight path and any swept loop body alike
+    if (iscall(i)) return 1;
+    i = i + 1;
+  }
+  return 0;
+}
 int promote() {
   int i; int k; int n; int w; int d; int best; int bw; int sh; char *t; char *rn;
   if (!slotw) { slotw = malloc(512 * 4); pdep = malloc(16400 * 4); }
@@ -1238,6 +1308,8 @@ int promote() {
   if (phold < 0) return 0;
   i = 0; while (i < 512) { if (slotk[i]) slotw[i] = -1; else slotw[i] = 0; i = i + 1; }
   i = 0; while (i <= nlines) { pdep[i] = 0; i = i + 1; }
+  has_calls = 0; i = 0;
+  while (i < nlines) { if (iscall(i)) has_calls = 1; i = i + 1; }
   i = 0;
   while (i < nlines) {                      // a branch back to label t makes lines t..i a loop
     if (lkind[i] == L_BR) { k = labat(llab[i]); if (k >= 0 && k < i) { pdep[k] = pdep[k] + 1; pdep[i + 1] = pdep[i + 1] - 1; } }
@@ -1267,6 +1339,7 @@ int promote() {
     while (i < 512) {
       w = slotw[i];
       if (i >= 258 && w > 0) w = w - 1;     // a parameter costs a load in the prologue
+      if (w > 0 && !calllive(i)) w = 0;      // dead at every call: no register for it
       if (slotf[i] && (nfpro >= 16 || (i - 256) * 4 > 900)) w = 0;   // vldr reaches 1020
       if (!slotf[i] && npro >= 5) w = 0;
       if (w > bw) { bw = w; best = i; }
