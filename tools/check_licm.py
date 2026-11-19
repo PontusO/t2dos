@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Check cc -O's loop-invariant code motion (tests/opt/licm.c): the shapes of the assembly
-and the program's output under qemu.  Needs `make` and `make host`.
+"""check_licm.py: cc -O's loop-invariant code motion (tests/opt/licm.c): the shapes of the
+assembly and the program's output under qemu.  Needs `make` and `make host`.
 
   check_licm.py      prints `ok: licm` and exits 0 when every check passes
+
+licm_torture.c is the fail-closed half: loops whose guards must reject a hoist (a body
+branch that re-enters the test, a call in the loop) sit beside loops that must hoist, and
+its output must equal gcc's.  A miscompile shows up there as a wrong number.
 """
 import os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'tests', 'opt', 'licm.c')
+TORTURE = os.path.join(ROOT, 'tests', 'opt', 'licm_torture.c')
 WORK = os.path.join(ROOT, 'root', 'tmp')
 bad = 0
 
@@ -39,6 +44,16 @@ def loop_body(body):
         if re.match(r'b(?:\.\w+)?\t' + lab + r'$', body[n]):
             return body[start:n]
     return body[start:]
+
+
+def run(name):
+    """build root/tmp/name.bin with -O and run it under qemu; its stdout"""
+    cc = os.path.join(ROOT, 'compiler', 'cc')
+    src = SRC if name == 'licm' else TORTURE
+    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, name + '.bin'), src],
+                   check=True, cwd=ROOT)
+    return subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/%s.bin' % name],
+                          capture_output=True, cwd=ROOT, timeout=60).stdout
 
 
 def main():
@@ -88,9 +103,28 @@ def main():
             if re.search(r'\brB\b', l):
                 fail('%s emits the placeholder register: %r' % (name, l))
 
-    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm.bin'), SRC], check=True, cwd=ROOT)
-    out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/licm.bin'], capture_output=True, cwd=ROOT, timeout=30).stdout
+    out = run('licm')
     if out != b'44 297 33\n': fail('licm.bin printed %r' % out)
+
+    # licm_torture.c: the guards' own cases. reentry's exit branches below the outer head,
+    # so licm() must refuse its loops; callloop makes a call every round. Both sit beside
+    # loops that hoist, and the printed sums must equal gcc's for -O and plain builds alike.
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm_torture.s'), TORTURE],
+                   check=True, cwd=ROOT)
+    t = funcs(open(os.path.join(WORK, 'licm_torture.s')).read())
+    for name, body_ in t.items():
+        for l in body_:
+            if re.search(r'\brB\b', l):
+                fail('torture %s emits the placeholder register: %r' % (name, l))
+    want = b'108 105 84 189 140 112\n'
+    out = run('licm_torture')
+    if out != want: fail('licm_torture.bin printed %r' % out)
+    subprocess.run([cc, '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm_torture_p.bin'), TORTURE],
+                   check=True, cwd=ROOT)
+    out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/licm_torture_p.bin'],
+                         capture_output=True, cwd=ROOT, timeout=60).stdout
+    if out != want: fail('plain licm_torture.bin printed %r' % out)
+
     if bad: print('%d failed' % bad); return 1
     print('ok: licm')
     return 0
