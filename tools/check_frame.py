@@ -41,6 +41,14 @@ def main():
     leaf, small, big, early, noret = f['leaf'], f['small'], f['big'], f['early'], f['noret']
     for name, body in (('leaf', leaf), ('noret', noret)):
         if 'mov\tr7, sp' in body or 'mov\tsp, r7' in body: fail('%s keeps the frame pointer: %r' % (name, body))
+        if body[:1] != ['push\t{lr}']: fail('%s is not the minimal frameless entry: %r' % (name, body[:1]))
+    # framed: the crash witness of the frameless ruling. It reads its parameter with
+    # [r7, #off], so its frame stays even though a frameless leaf shares the stack:
+    # push {lr} there would shift every incoming word by one and the read would see lr.
+    fb = f['framed']
+    if fb[:1] != ['push\t{r7, lr}']: fail('framed lost its frame: %r' % fb[:1])
+    if 'mov\tr7, sp' not in fb or not any(l == 'pop\t{r7, pc}' for l in fb):
+        fail('framed entry/exit bookkeeping: %r' % fb)
         if any(l.startswith('movt\tr1, #0') for l in body[:4]) or 'sub.w\tsp, sp, r1' in body:
             fail('%s still reserves an empty frame: %r' % (name, body))
     if 'sub.w\tsp, sp, r1' in small or not any(re.match(r'sub\tsp, #\d+$', l) for l in small):
@@ -84,7 +92,7 @@ def main():
             fail('amem reads the frame through a promoted register: %r' % l)
     subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'frame.bin'), SRC], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/frame.bin'], capture_output=True, cwd=ROOT, timeout=30).stdout
-    if out != b'1 18 7 5 3 11 14 0 94 29\n': fail('frame.bin printed %r' % out)
+    if out != b'1 18 7 5 3 11 14 0 94 29 18\n': fail('frame.bin printed %r' % out)
     if bad: print('%d failed' % bad); return 1
     print('ok: frame')
     return 0

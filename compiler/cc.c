@@ -1264,6 +1264,56 @@ int fl_list(int i, char *t, char *mn, char *last) {   // push/pop line t without
   ls(last); ls("}"); lend();
   return 0;
 }
+// 1 if any line in [a, b) (L_DEL lines skipped) reads or writes r7 or sp beyond what
+// fl_r7 excuses. frameless() calls it only for the tail past the exit pop: the buffer
+// holds ONE function, and lines before the entry push are its own entry sequence (or
+// already deleted), so there is nothing else to see outside fa-3..e except code after
+// the return - which a linked .s can add, running in the CALLER's frame with r7/sp of
+// its own accord.
+int fl_outside(int a, int b) {
+  int i;
+  if (a < 0) a = 0; if (b > nlines) b = nlines;
+  if (a >= b) return 0;
+  i = a;
+  while (i < b) {
+    if (lkind[i] == L_INS) {
+      opinfo(i);                            // read the globals before any call clobbers
+      if (opmask & 8192 || oprd == 13) return 1;   // them: fl_r7 calls r7ref and friends
+      opinfo(i);
+      if (fl_r7(i)) return 1;
+    }
+    else if (lkind[i] == L_BR && lcond[i] < 0)     // an unconditional branch past the exit
+      return 1;                               // reaches lines this linear scan skips
+    i = nx(i);
+  }
+  return 0;
+}
+// 1 if line i forces the frame (or needs no rewrite). opinfo's globals do NOT survive
+// calls (fl_pc_end, fl_r7 and friends run opinfo themselves), so every test reads them
+// immediately after its own opinfo. The entry push and a pop of pc are exempted by the
+// caller; the reservation trio at fa..fa+2 is trimframe's own work and always allowed.
+int fl_excused(char *t) {                   // the entry/exit bookkeeping lines verbatim:
+  return !strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7");   // the two sp moves cc
+}                                           // itself emits (push/pop have their own rules)
+int fl_frame(int i, int fa) {
+  char *t;
+  t = lpool + ltext[i];
+  if (i >= fa - 3 && i <= fa + 2)           // the frame reservation trio at fa..fa+2
+    return 0;                               // (trimframe's own work: always allowed)
+  opinfo(i);
+  if (opkind == 4) return 1;                // unknown form: it might read anything
+  if (!strncmp(t, "push\t{", 6))             // a push with r7 (beyond the entry push the
+    return inregs(t + 6, "r7");             // caller exempted) saves what the frame holds
+  if (!strncmp(t, "pop\t{", 5))              // the caller exempted pops of pc; any other
+    return 1;                               // pop restores a saved r7: the frame stays
+  if (fl_excused(t))                         // mov r7,sp and mov sp,r7 are our own book-
+    return 0;                               // keeping: deleted by the rewrite below
+  opinfo(i);                                // fl_r7's helpers clobbered the globals, so
+  if (opmask & 8192 || oprd == 13)          // re-read them: a line that moves sp for
+    return 1;                               // another reason (a linked .s: add sp,
+  return fl_r7(i)                           // r7, #4) keeps the frame too. Then any
+    || (!strncmp(t, "vpush", 5) && !strncmp(t, "vpop", 4));   // other r7 use keeps it;
+}                                           // vpush/vpop moved sp and are caught above
 int frameless(int fa, int sz) {
   int i; int e; char *t;
   if (phold < 0 || npro || nfpro) return 0; // promote parked a value in r4-r11 or an s
@@ -1289,15 +1339,17 @@ int frameless(int fa, int sz) {
   while (i <= e) {                          // that exit. The entry push at fa-3 and the
     if (lkind[i] == L_INS) {                // exit pop of pc are exempt: they are rewritten
       t = lpool + ltext[i];                 // below once the scan is through
-      if (i != fa - 3 && !fl_pc_end(i) && fl_r7(i)) return 0;   // pops of pc: fl_list strips them
-      opinfo(i);
-      if (opkind == 4) return 0;            // unknown form: it might read anything
-      if (i < fa || i > fa + 2)             // a sub of sp outside the reservation trio at
-        if (!strncmp(t, "sub\tsp", 6) || !strncmp(t, "sub.w\tsp", 8)) return 0;   // fa..fa+2:
-                                            // struct arg space (the trio is trimframe's)
+      if (i != fa - 3 && !fl_pc_end(i)) {   // pops of pc: fl_list strips them
+        if (fl_frame(i, fa)) return 0;      // one test per line: opinfo's globals do not
+                                            // survive the helpers, so nothing reads them
+                                            // across a call here
+      }
     }
     i = nx(i);
   }
+  if (fl_outside(e + 1, nlines)) return 0;  // a linked .s can leave code after the exit
+                                            // pop: it runs in the caller's frame and
+                                            // reads the caller's r7/sp
   npro = 0;                                 // fl_list rebuilds the two lists without r7
   i = 0;                                    // (and without them if nothing else is saved:
   while (i < nlines) {                      // push {lr} / pop {pc})
@@ -1374,17 +1426,17 @@ int iscall(int i) {
 }
 int cl_reach(int s, int e) {                  // can control flow get from line s to line e?
   int i; int k;                               // (s <= e assumed). Forward: fallthrough and
-  if (e <= s) return 1;                       // forward branch targets. Backward: a value
-  i = nx(s);                                  // written in a loop body is read again next
-  while (i < nlines && i <= e) {              // round when the loop's back edge covers s -
-    if (lkind[i] == L_BR) {                   // licm's shape, read from inside outward. A
-      k = labat(llab[i]);                     // return on the way stops fallthrough; a loop
-      if (k >= 0 && k != i) {                 // that falls out at its end never re-enters,
-        if (k <= e && k > i) return 1;        // so only heads at or above s carry a value up.
-        if (k < i && k <= s) return 1;
-      }
-    }
-    else if (lkind[i] == L_INS) { opinfo(i); if (opkind == 2) return 0; }   // a return stops it
+  if (e <= s) return 1;                       // branch targets - a conditional branch also
+  i = nx(s);                                  // falls through, only an unconditional one or
+  while (i < nlines && i <= e) {              // a return ends the straight path. Backward:
+    if (lkind[i] == L_BR) {                   // a value written in a loop body is read again
+      k = labat(llab[i]);                     // next round when the loop's back edge covers
+      if (k < 0) return 1;                    // s - licm's shape, read from inside outward.
+      if (k <= e && k > i) return 1;          // A return on the way stops fallthrough; a
+      if (k < i && k <= s) return 1;          // loop that falls out at its end never
+      if (lcond[i] < 0) { i = nx(i); continue; }   // re-enters, so only heads at or above s
+    }                                         // carry a value up. An unresolvable target
+    else if (lkind[i] == L_INS) { opinfo(i); if (opkind == 2) return 0; }   // reaches: sure
     i = nx(i);
   }
   if (i > e) return 1;                        // fell through to e

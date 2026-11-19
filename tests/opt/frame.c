@@ -2,6 +2,11 @@
 #include "sys.h"
 int g;
 int leaf() { g = g + 1; return g; }                  // no parameters, no locals: no frame pointer
+int framed(int n) { return n + 1; }                  // reads its parameter with [r7, #off]: the
+                                                     // frame stays even when a frameless leaf
+                                                     // sits next to it on the same stack (the
+                                                     // crash witness of the frameless ruling:
+                                                     // drop r7 here and the read sees leaf's lr)
 int small(int n) { char buf[16]; int i; i = 0; while (i < 16) { buf[i] = n + i; i++; } return buf[15]; }   // sub sp, #N
 int big() { char b[1000]; b[999] = 7; return b[999]; }   // over 508 bytes: the long form stays
 int early(int x) { if (x < 2) return x; return early(x - 1) + 1; }   // the early return pops on the spot
@@ -49,12 +54,12 @@ int fearly(float x) {                                // float locals and an earl
   return (int)y;
 }
 int main() {
-  int a; int b; int c; int d; float e; float fx; int p; int q; int r; int t;
-  a = leaf(); b = small(3); c = big(); d = early(5); noret();
+  int a; int b; int c; int d; float e; float fx; int p; int q; int r; int t; int f;
+  a = leaf(); b = small(3); c = big(); d = early(5); noret(); f = framed(17);
   e = fpm(1.5, 3, 2.5);                               // (1.5*2 + 3*(4+1.5)) - 4.0 = 12.0
   fx = fpint(2);                                     // 2+3+4+5 = 14.0
   p = fpm(1.5, 3, 2.5) > e; q = plarge(1, 2, 3, 4, 5, 6, 7); r = amem(1);   // 0, 26, 60
   t = fearly(1.25) + 2 * fearly(0.25);               // 7 + 2*2 = 11
-  printf("%d %d %d %d %d %d %d %d %d %d\n", a, b, c, d, g, (int)e, (int)fx, p, q + r + bigprom(1), (int)fmany(0.5));   // 1 18 7 5 3 11 14 0 94 29
+  printf("%d %d %d %d %d %d %d %d %d %d %d\n", a, b, c, d, g, (int)e, (int)fx, p, q + r + bigprom(1), (int)fmany(0.5), f);   // 1 18 7 5 3 11 14 0 94 29 18
   return 0;
 }
