@@ -1,6 +1,7 @@
 # cc -O: call-aware prologue and epilogue optimization
 
-Date: 2026-11-20. Status: approved approach, this document is the design.
+Date: 2026-11-20. Status: implemented on branch cc-prologue (see Rulings below
+and `.superpowers/sdd/2026-11-20-cc-prologue-opt/progress.md` for the task log).
 
 ## Intent and why
 
@@ -71,8 +72,25 @@ half without touching the calling convention.
 
 ## Design
 
-Pass order becomes: `prepro=1; peep(); licm_loops(); prepro=0; peep(); promote();
-trimframe(); csave(); frameless()`. Both new passes are -O only.
+Pass order became: `prepro=1; peep(); licm_loops(); prepro=0; peep(); promote();
+frameless(); trimframe()`. Both new passes are -O only. The implementation folded
+csave into promote() as calllive(): a slot is only worth a register when its value
+survives no call, checked with the existing dead() liveness instead of a second pass
+that would have to undo promote's rewrites. frameless() runs after promote() and
+before trimframe(), so it sees the exit pop before trimframe copies it to the early
+returns (multi-exit functions keep their frame).
+
+Rulings that changed the design while building:
+
+  - ANY `[r7, #off]` read keeps the frame. A frameless entry saves one word less
+    (`push {lr}` than `push {r7, lr}`), so once any function in a call chain drops
+    r7, the caller's frame pointer and the callee no longer see the same words -
+    an incoming parameter read names the wrong word. Witness: leaf + early return
+    crashed under qemu (tests/opt/frame.c). The spec's "frameless with promoted
+    slots" case therefore never fires; promote() parking a value in r4-r11 or an
+    s register, or a vpush/vpop pair, also keeps the frame.
+  - trimframe's copied pop of pc in the body (multi-exit) blocks frameless: the
+    copy happens after frameless scans.
 
 ### csave(): drop callee-saved registers that never survive a call
 
@@ -165,3 +183,13 @@ function with no r7 readers left.
   r7 - correct, their slots need a base; making them sp-relative is future work.
 - Marking in code comments: cite this spec from csave()/frameless() headers, as licm
   cites its own.
+
+## Results (branch cc-prologue)
+
+`bench.py --pc`: total 271 -> 155 ms (1.75x), fib 28 -> 23 ms, every check line
+equal to the native gcc build. `bench.py --board`: total 7190 -> 3546 ms (2.03x),
+fib 446 -> 262 ms, "output equal to gcc" for all 11 benchmarks.
+
+fib keeps its frame: `n` is live across both calls so calllive() leaves it in r4,
+and the parameter load reads r7. The remaining fib gap is the spill pair and needs
+the register allocation of approach 2.
