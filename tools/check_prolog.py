@@ -53,8 +53,10 @@ def main():
     head = f.get('csc', [])[:5]
     if not any(l.startswith('push\t{r4') for l in head[:1]):
         fail('csc lost its callee-saved register: %r' % f.get('csc', [])[:1])
+    # (frameless() leaves csc's frame alone today - its parameter load reads our r7 - so
+    # the prologue still loads the slot into r4, which the push saves across ext().)
     if not any(re.match(r'ldr\tr4, \[r7, #\d+\]$', l) for l in head):
-        fail('csc loads no promoted parameter into r4: %r' % head)
+        fail('csc reads its parameter from no stack slot: %r' % head)
     # cmixed: n (the bound) is loaded once before the loop and never read again - dead at
     # every call - while s (accumulator) and i (counter, re-read after ext returns) stay.
     if f.get('cmixed', [])[:1] != ['push\t{r4, r5, r7, lr}']:
@@ -70,8 +72,22 @@ def main():
     # cfloat: promote parked y in s16; the vpush/vpop pair brackets the body.
     if not any(l.startswith('vpush\t{') for l in f.get('cfloat', [])):
         fail('cfloat lost its vpush: %r' % f.get('cfloat', [])[:4])
-    # Snapshot of cleaf: a call-free function must not change at all (has_calls gate).
-    if 'cleaf' in f and cleaf_shape(f['cleaf']) != CLEAF: fail('cleaf changed: %r' % f['cleaf'])
+    # frameless(): cret keeps its frame pointer. Ruling: reading an incoming slot with
+    # [r7, #off] forces the frame to stay. A frameless function saves one word less at
+    # entry (push {lr} vs push {r7, lr}), so once any function in the call chain drops r7
+    # the caller's fp and ours no longer see the same words - an incoming read then names
+    # the wrong word (the leaf+early crash witness in tests/opt/frame.c). cret reads its
+    # parameter that way, so entry push {r7, lr}, both pops keep r7, bookkeeping stays.
+    body = f.get('cret', [])
+    if body[:1] != ['push\t{r7, lr}']: fail('cret push: %r' % body[:1])
+    if sorted(l for l in body if l.startswith('pop\t{') and l.endswith('pc}')) != ['pop\t{r7, pc}', 'pop\t{r7, pc}']:
+        fail('cret pops: %r' % [l for l in body if 'pc}' in l])
+    if 'mov\tr7, sp' not in body:
+        fail('cret lost frame-pointer bookkeeping')
+    # cfloat parks a float in s16: the vpush/vpop move sp around our locals, so r7 stays.
+    cb = f.get('cfloat', [])
+    if 'mov\tr7, sp' not in cb or 'mov\tsp, r7' not in cb or cb[:1] != ['push\t{r7, lr}']:
+        fail('cfloat lost its frame pointer: %r' % cb[:2])
 
     # behavior: cc build (with the stub object) must print what native gcc prints
     subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],

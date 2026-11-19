@@ -1167,7 +1167,8 @@ int r7ref(int i) {
   if (!strncmp(t, "subw\t", 5)) v = -v;      // subw rX, r7, #N: the address r7 - N
   rfoff = v; rfplain = 0;
   if (*u == ']' && !u[1] && (!strncmp(t, "ldr\tr", 5) || !strncmp(t, "str\tr", 5)) && t[5] >= '0' && t[5] <= '3'
-    && !strncmp(t + 6, ", [r7, #", 8)) rfplain = 1;
+    && u > t + 6 && !strncmp(t + 6, ", [r7, #", 8)) rfplain = 1;   // (a plain word read or
+                                                            // write of a frame slot)
   return 1;
 }
 int r7shift(int i, int off) {               // line i with its r7 offset (rfoff, positive) now off
@@ -1179,7 +1180,7 @@ int r7shift(int i, int off) {               // line i with its r7 offset (rfoff,
   ls(t); lend();
   return 0;
 }
-int reglist(char *mn, char *last) {        // "mn\t{r4, .., r7, last}" with the promoted registers
+int reglist(char *mn, char *last) {         // "mn\t{r4, .., r7, last}" with the promoted registers
   int k;
   ls(mn); ls("\t{");
   k = 0; while (k < npro && k < 3) { ls(regnm(k)); ls(", "); k = k + 1; }
@@ -1192,6 +1193,124 @@ int reglist(char *mn, char *last) {        // "mn\t{r4, .., r7, last}" with the 
 // then sub.w sp, sp, r1) of sz bytes becomes nothing or one sub sp, #sz.  With no frame, sp equals
 // r7 at the exit, so mov sp, r7 goes, a return that branches to the exit pops right there, and a
 // function that never reads r7 (no parameters, nothing promoted) does not set it up.
+// frameless(): -O, after promote() and before trimframe(). When nothing between entry and
+// exit reads r7 (calllive leaving every slot unpromoted is what makes this common), the
+// frame pointer buys nothing: delete mov r7, sp / mov sp, r7 and take r7 out of the save
+// lists. sp itself must then stand still between entry and exit, so any sub of sp (a
+// by-value struct argument's space), any vpush/vpop (they move sp), and any instruction
+// form opinfo does not know all keep the frame. promote parked a value in a register with
+// a load at phold? Those lines read r7 too - but they sit inside the hold area, between
+// the frame setup and the first body line, and their value dies against r7 before any
+// other line reads it: a load of [r7, #off] needs no frame pointer of its own once sp
+// stands still (the caller's r7 is at the same place as ours was). So the scan runs from
+// after the hold area to the exit pop of pc. trimframe runs after this and copies the
+// rewritten pop into the branches that jump straight to the exit.
+int inregs(char *t, char *nm) {              // "r7" among the registers of a push/pop list
+  int n;                                    // ("{r4, r7, lr}" and friends), whole words only
+  int k; char *u;
+  n = strlen(nm); u = t;
+  while (*u) {
+    if (!strncmp(u, nm, n)) {
+      k = 0; while (k < n && u[k] == nm[k]) k = k + 1;
+      if (k == n && !idchar(u[n])) return 1;
+    }
+    u = u + 1;
+  }
+  return 0;
+}
+int fl_pc_end(int i) {                      // line i is a pop of pc: the exit (a value pop
+  char *t;                                  // ends in rX} and is not one)
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  return !strncmp(t, "pop\t{", 5) && !strcmp(t + strlen(t) - 3, "pc}");
+}
+int fl_r7(int i) {                          // line i needs the frame pointer: it reads r7,
+  char *t;                                  // moves sp with vpush/vpop, or is a push/pop
+  int k;                                    // that saves or restores r7. A value spill
+  if (lkind[i] != L_INS) return 0;          // (push {r0} / pop {r1}) and a builtin's save
+  t = lpool + ltext[i];                     // (push {r4}) do not mention r7
+  k = r7ref(i);                             // FIRST: it excuses the exact entry and exit
+  if (k == 0) return 0;                     // forms (push {r7, lr}, mov r7,sp, mov sp,r7,
+                                            // pop {r7, pc}) as well as lines without r7.
+  if (!strncmp(t, "push\t{", 6))             // A push with r7 AND registers (promote grew
+    return !(!strcmp(t + 6, "r7, lr}"));    // it) is a save the frame still needs: bail.
+  if (!strncmp(t, "pop\t{", 5))              // A pop of pc is an exit form (trimframe's
+    return !fl_pc_end(i);                   // copied return included): fl_list strips its
+                                            // r7 below; any other list keeps the frame
+                                            // Any [r7, #off] keeps the frame: once any
+                                            // function in the call chain goes frameless it
+                                            // saves one word less, so the caller's r7 and
+                                            // ours no longer see the same words - an
+                                            // incoming read names the wrong word
+  if (!strncmp(t, "vpush", 5) || !strncmp(t, "vpop", 4)) return 1;   // they move sp
+  return 1;                                 // any [r7, #off] or unknown r7 use: with our
+                                            // frame pointer gone r7 holds the caller's fp,
+                                            // a different base - the line would name a
+                                            // different word
+}
+int fl_list(int i, char *t, char *mn, char *last) {   // push/pop line t without r7: the
+  char *u; int first;                       // promoted registers left with npro = 0, so
+  pset(i); ls(mn); ls("\t{");               // the list is whatever remains (lr or pc plus
+  u = t; while (*u != '{') u = u + 1;       // any builtin's r4). lr/pc is always last:
+  u = u + 1; first = 1;                     // emit it when the rest is done
+  while (*u && *u != '}') {
+    if (u[0] == 'r' && u[1] >= '0' && u[1] <= '9') {
+      if (u[1] != '7') { if (!first) ls(", "); ls("r"); lpool[lppos] = u[1]; lppos = lppos + 1; first = 0; }
+      u = u + 2;
+    }
+    else u = u + 1;
+  }
+  if (!first) ls(", ");
+  ls(last); ls("}"); lend();
+  return 0;
+}
+int frameless(int fa, int sz) {
+  int i; int e; char *t;
+  if (phold < 0 || npro || nfpro) return 0; // promote parked a value in r4-r11 or an s
+                                            // register: its load at phold reads OUR r7, the
+                                            // stripped save list no longer protects the
+                                            // register, and vpush/vpop move sp. Such a
+                                            // function keeps its frame pointer; calllive()
+                                            // is what drives npro to 0 for the functions
+                                            // whose values no callee-saved register survives
+                                            // a call in
+  t = lpool + ltext[fa - 3];                          // the entry sequence as emitted: push
+  if (strncmp(t, "push\t{", 6) || !inregs(t + 6, "lr")) return 0;   // r7/lr (or the reglist
+                                                     // promote grew it into), (vpush), mov r7,sp
+  e = nlines - 1;                           // the exit: trimframe's own test - the last
+  while (e >= 0 && lkind[e] == L_DEL) e = e - 1;   // live line, a pop of pc, or no rewrite
+  if (e < 0 || !fl_pc_end(e)) return 0;
+  i = nx(fa - 3);                           // an earlier pop of pc is trimframe's copied
+  while (i < e) {                           // return: more than one exit keeps the frame
+    if (fl_pc_end(i)) return 0;             // (the copy happens after this pass)
+    i = nx(i);
+  }
+  i = fa - 3;                               // the decisive range: from the entry push to
+  while (i <= e) {                          // that exit. The entry push at fa-3 and the
+    if (lkind[i] == L_INS) {                // exit pop of pc are exempt: they are rewritten
+      t = lpool + ltext[i];                 // below once the scan is through
+      if (i != fa - 3 && !fl_pc_end(i) && fl_r7(i)) return 0;   // pops of pc: fl_list strips them
+      opinfo(i);
+      if (opkind == 4) return 0;            // unknown form: it might read anything
+      if (i < fa || i > fa + 2)             // a sub of sp outside the reservation trio at
+        if (!strncmp(t, "sub\tsp", 6) || !strncmp(t, "sub.w\tsp", 8)) return 0;   // fa..fa+2:
+                                            // struct arg space (the trio is trimframe's)
+    }
+    i = nx(i);
+  }
+  npro = 0;                                 // fl_list rebuilds the two lists without r7
+  i = 0;                                    // (and without them if nothing else is saved:
+  while (i < nlines) {                      // push {lr} / pop {pc})
+    if (lkind[i] == L_INS) {
+      t = lpool + ltext[i];
+      if (!strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7")) pdel(i);
+      else if (i == fa - 3 && inregs(t + 6, "r7")) fl_list(i, t, "push", "lr");
+      else if (fl_pc_end(i) && inregs(t + 5, "r7")) fl_list(i, t, "pop", "pc");
+    }
+    i = i + 1;
+  }
+  return 0;
+}
 int trimframe(int fa, int sz) {
   int i; int e; int nl; int k; int nor7; char *pop; int labs[8];
   if (pnum(fa, "movw\tr1, #") != (sz & 65535) || pnum(fa + 1, "movt\tr1, #") != ((sz >> 16) & 65535)
@@ -3407,7 +3526,7 @@ int parse_global() {
       ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
       i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
-      if (optim) { prepro = 1; peep(); licm_loops(); prepro = 0; peep(); promote(); trimframe(frame_at, sz); }
+      if (optim) { prepro = 1; peep(); licm_loops(); prepro = 0; peep(); promote(); frameless(frame_at, sz); trimframe(frame_at, sz); }
       flush();
       npro = 0; phold = -1;
       // restore shadowed symbols
