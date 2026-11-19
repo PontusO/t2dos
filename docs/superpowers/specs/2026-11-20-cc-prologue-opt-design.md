@@ -2,6 +2,9 @@
 
 Date: 2026-11-20. Status: implemented on branch cc-prologue (see Rulings below
 and `.superpowers/sdd/2026-11-20-cc-prologue-opt/progress.md` for the task log).
+Selfhost note: the board's plain cc reproduces the PC's PLAIN build byte for byte
+(182157, md5 a5e626..); `check_toolchain.py --selfhost` against an `OPT=-O` root/bin
+differs by design - run it with plain builds, or add `-O` to its cc command.
 
 ## Intent and why
 
