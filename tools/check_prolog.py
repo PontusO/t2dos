@@ -64,7 +64,12 @@ def main():
     # peep-created stack slot, which promote() never touches. One callee-saved reg today.
     if f.get('rec', [])[:1] != ['push\t{r4, r7, lr}']:
         fail('rec push list changed: %r' % f.get('rec', [])[:1])
-    # Snapshot of cleaf: a call-free function must not change at all (has_calls gate).
+    # cret: trimframe copies the epilogue pop into the branch that targets the exit label.
+    if sum(1 for l in f.get('cret', []) if l == 'pop\t{r7, pc}') < 2:
+        fail('cret lost its copied return: %r' % f.get('cret', []))
+    # cfloat: promote parked y in s16; the vpush/vpop pair brackets the body.
+    if not any(l.startswith('vpush\t{') for l in f.get('cfloat', [])):
+        fail('cfloat lost its vpush: %r' % f.get('cfloat', [])[:4])
     # Snapshot of cleaf: a call-free function must not change at all (has_calls gate).
     if 'cleaf' in f and cleaf_shape(f['cleaf']) != CLEAF: fail('cleaf changed: %r' % f['cleaf'])
 
