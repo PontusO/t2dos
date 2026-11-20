@@ -4,8 +4,13 @@ int g;
 #ifdef NATIVE
 int ext(int a) { return a + 1; }         // reference build links the stubs
 float cfext(float x) { return x + 0.25; }
+int stublea(int a, int b) { int v[4]; int i; v[0] = a; for (i = 1; i < 4; i++) v[i] = v[i - 1] + b; return v[3]; }
 #endif
 int ext(int a);                          // prototype only: forces real calls
+int ext(int a);                          // prototype only: forces real calls
+int stublea(int a, int b);               // linked from prolog_stub.o: keeps its frame under
+                                         // -O (locals bail sprel), the framed half of the
+                                         // mixed-chain witness cmix below
 int csc(int n) {                         // s live across the call: its register stays saved
   int s;
   s = n;
@@ -44,12 +49,15 @@ int cret(int n) {                        // early return: trimframe copies the p
   if (n > 0) return 7;
   return ext(n);
 }
+int cmix(int n) {                        // mixed chain: sprel converts this caller (the
+  return stublea(n, 1) + stublea(n, 2);  // second call re-reads the param below the first
+}                                        // call's result save), stublea keeps its frame
 int csys(char *p, int n) {               // a real syscall (the read builtin): the kernel
   return read(0, p, n);                  // switches tasks inside it, so r7 must stay put
 }
 int main() {
-  int a; int b; int c; int d; float e;
-  a = csc(4); b = cleaf(5); c = cmixed(3); d = clocals(6); e = cfloat(1.5);
-  printf("check %d %d %d %d %d %d\n", a, b, c, d, (int)e, rec(9));   // gcc reference pins the numbers
+  int a; int b; int c; int d; int f; float e;
+  a = csc(4); b = cleaf(5); c = cmixed(3); d = clocals(6); e = cfloat(1.5); f = cmix(5);
+  printf("check %d %d %d %d %d %d %d\n", a, b, c, d, (int)e, rec(9), f);   // gcc reference pins the numbers
   return 0;
 }

@@ -66,37 +66,48 @@ def main():
     # peep-created stack slot, which promote() never touches. One callee-saved reg today.
     if f.get('rec', [])[:1] != ['push\t{r4, r7, lr}']:
         fail('rec push list changed: %r' % f.get('rec', [])[:1])
-    # cret: trimframe copies the epilogue pop into the branch that targets the exit label.
-    if sum(1 for l in f.get('cret', []) if l == 'pop\t{r7, pc}') < 2:
-        fail('cret lost its copied return: %r' % f.get('cret', []))
+    # cret: trimframe copies the epilogue pop into the branch targeting the exit label,
+    # and sprel converts the function: the parameter read frameless' old bail witness is
+    # exactly what the depth walk maps safely ([r7, #k] -> [sp, #k+sz+d-4], one word less
+    # pushed for the dropped r7). No r7 anywhere; both pops plain; the reload after
+    # bl ext sits at [sp, #4] once add sp, #4 has drained the arg window.
+    body = f.get('cret', [])
+    if body[:1] != ['push\t{lr}']: fail('cret push: %r' % body[:1])
+    if sorted(l for l in body if l.startswith('pop\t{') and l.endswith('pc}')) != ['pop\t{pc}', 'pop\t{pc}']:
+        fail('cret pops: %r' % [l for l in body if 'pc}' in l])
+    if any('r7' in l for l in body):
+        fail('cret kept r7 bookkeeping: %r' % body[:2])
     # cfloat: promote parked y in s16; the vpush/vpop pair brackets the body.
     if not any(l.startswith('vpush\t{') for l in f.get('cfloat', [])):
         fail('cfloat lost its vpush: %r' % f.get('cfloat', [])[:4])
-    # frameless(): cret keeps its frame pointer. Ruling: reading an incoming slot with
-    # [r7, #off] forces the frame to stay. A frameless function saves one word less at
-    # entry (push {lr} vs push {r7, lr}), so once any function in the call chain drops r7
-    # the caller's fp and ours no longer see the same words - an incoming read then names
-    # the wrong word (the leaf+early crash witness in tests/opt/frame.c). cret reads its
-    # parameter that way, so entry push {r7, lr}, both pops keep r7, bookkeeping stays.
-    body = f.get('cret', [])
-    if body[:1] != ['push\t{r7, lr}']: fail('cret push: %r' % body[:1])
-    if sorted(l for l in body if l.startswith('pop\t{') and l.endswith('pc}')) != ['pop\t{r7, pc}', 'pop\t{r7, pc}']:
-        fail('cret pops: %r' % [l for l in body if 'pc}' in l])
-    if 'mov\tr7, sp' not in body:
-        fail('cret lost frame-pointer bookkeeping')
     # cfloat parks a float in s16: the vpush/vpop move sp around our locals, so r7 stays.
     cb = f.get('cfloat', [])
     if 'mov\tr7, sp' not in cb or 'mov\tsp, r7' not in cb or cb[:1] != ['push\t{r7, lr}']:
         fail('cfloat lost its frame pointer: %r' % cb[:2])
-    # csys: the syscall builtin's shape. The kernel switches tasks inside sys_read/sys_write,
-    # so r7 must keep pointing at this task's frame across the call: a converted fp-free body
-    # would leave task_switch() restoring a stale pointer. sprel bails on any incoming-slot
-    # read (A1), and the syscall sequence itself moves sp (push {r0} / add sp, #4), which the
-    # screen bails on too. Pin: entry push keeps r7, bookkeeping stays, pop keeps r7.
+    # csys: the syscall builtin's shape. The kernel switches tasks inside sys_read/sys_write
+    # saving only the user sp (sys_sp) - it never reads the application's r7 - so a
+    # converted csys would be safe in principle; it keeps its frame today because the
+    # builtin's argv window (mov r2, sp and friends right where the walk must start) is
+    # outside sprel's tracked forms. Pin: entry push keeps r7, bookkeeping stays, pop keeps r7.
     cs = f.get('csys', [])
     if cs[:1] != ['push\t{r7, lr}']: fail('csys lost its frame pointer: %r' % cs[:1])
     if 'mov\tr7, sp' not in cs or not any(l == 'pop\t{r7, pc}' for l in cs):
         fail('csys entry/exit bookkeeping: %r' % cs)
+
+    # mixed chain: cmix is sprel-converted - the frameless caller's hold load reads
+    # [sp, #8] (one word less pushed: r7 dropped), and stublea, whose locals force its
+    # frame to stay, is the framed callee. The linked run below pins their agreement
+    # with the native gcc reference (19 = stublea(5,1) + stublea(5,2) = 8 + 11).
+    cm = f.get('cmix', [])
+    if cm[:1] != ['push\t{r4, lr}'] or any('r7' in l for l in cm):
+        fail('cmix is not fp-free (sprel-converted): %r' % cm[:3])
+    if not any(re.match(r'ldr\tr4, \[sp, #8\]$', l) for l in cm):
+        fail('cmix reads no converted band slot: %r' % cm[:3])
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'),
+                    '-o', os.path.join(WORK, 'prolog_stub.s'), STUB], check=True, cwd=ROOT)
+    sb = funcs(open(os.path.join(WORK, 'prolog_stub.s')).read()).get('stublea', [])
+    if 'mov\tr7, sp' not in sb or not any(re.search(r'\[r7, #', l) for l in sb):
+        fail('stublea lost its frame (mixed-chain witness broken): %r' % sb[:4])
 
     # behavior: cc build (with the stub object) must print what native gcc prints
     subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],
@@ -105,7 +116,7 @@ def main():
                     os.path.join(WORK, 'prolog_stub.o')], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/prolog.bin'],
                          capture_output=True, cwd=ROOT, timeout=30).stdout
-    if out != b'check 9 16 3 8 6 16\n': fail('prolog.bin printed %r' % out)
+    if out != b'check 9 16 3 8 6 16 19\n': fail('prolog.bin printed %r' % out)
 
     if bad: print('%d failed' % bad); return 1
     print('ok: prolog')
