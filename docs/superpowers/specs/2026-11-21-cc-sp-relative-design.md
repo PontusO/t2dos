@@ -186,8 +186,9 @@ depth-walk work (they supersede the per-line band model drafted above):
   depth d. No band/local aliasing case exists; the prescan and the
   nparams band bail were removed.
 - `sz > 0` bails (the reservation's only unwind is `mov sp, r7`, which
-  frameless deletes). Functions with frame reservations convert in a
-  future round by injecting `add sp, #sz` at the exits.
+  frameless deletes). Superseded the next round: reserved frames convert
+  since 3b-iii (`2026-11-21-cc-sz-frameless-design.md`), the exits
+  draining with `add sp, #sz`.
 
 The argpush arm of the depth walk counts at the PUSH line (`spd()` words,
 not the setup line): setup forms are unbounded (add.w's lea is not a

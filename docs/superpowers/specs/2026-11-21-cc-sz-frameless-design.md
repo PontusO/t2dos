@@ -1,6 +1,7 @@
 # cc -O: frame reservations without r7 (3b-iii)
 
-Date: 2026-11-21. Status: approved design. Follows
+Date: 2026-11-21. Status: implemented on branch cc-prologue (commits
+6954959, e6774ee); board gates below. Follows
 `2026-11-21-cc-sp-relative-design.md` (branch cc-prologue), whose Results
 left one gate up: `sprel()` bails when the function reserves a frame
 (`sz > 0`), because `mov sp, r7` at the exit is the reservation's only
@@ -58,10 +59,12 @@ the framed column of the corpus.
   `mov sp, r7` it rewrites each one to `add sp, #sz` (as/ld pick
   `add.w` past the 8-bit form). `mov r7, sp` still deletes; r7 leaves
   both register lists as today. `sz > 4095` returns 0 (frame stays).
-- `trimframe()`: where it copies an epilogue pop into a branching
-  early return, copy an immediately preceding `add sp, #N` drain too
-  (the inline copy must drain or the callee returns with sp below the
-  return slot).
+- `trimframe()`: needs NO change. Its `sz > 0` branch rewrites the entry
+  trio to `sub sp, #sz` and returns before the pop-copying code, so a
+  converted reserved-frame function never gets an inline copied pop -
+  every early return branches to the exit label, which now drains. (The
+  drain-carry drafted above is therefore moot; the copy loop must NOT
+  gain one.)
 - Screen acceptance scan: unchanged in structure; it runs with the same
   gates (the sz refusal moves into frameless' `sz > 4095` test, which
   the scan mirrors).
@@ -82,10 +85,56 @@ bench --pc 11/11, frame/prolog pins, check_basic, full-tree
 `make OPT=-O` + check_sh --pc, and the board gates (selfhost + bench
 --board) at merge, with the user's go-ahead.
 
-## Left to the builder
-- Exact helper or inline loop frameless uses to find and rewrite the
-  `mov sp, r7` lines (it already scans exits for the pop rewrite).
-- Whether the acceptance scan mirrors the `sz > 4095` test as its own
-  line or lets frameless' answer drive it; must stay one source of
-  truth.
-- Pin wording; corpus census update in the sprel spec's Results table.
+## Results (implementation, 2026-11-21)
+
+Built as designed, and the round turned out to be about the two latent
+bugs it exposed rather than about the gates.
+
+- `frameless()` rewrites each `mov sp, r7` into `add sp, #sz` with `sz`
+  the reservation size, and deletes it when `sz == 0`. `sprel()`'s gate
+  became `sz > 4095`, and the acceptance scan drives off `frameless`'
+  own answer: the screen tests `sz && !sprel_ok()` and `sz > 4095`
+  itself (one source of truth).
+- `fl_list()` copied a register name ONE digit at a time, so a promoted
+  `r10` or `r11` came out as `r1`. `as` merged the duplicate and the
+  save list silently lost those words. Harmless until now because the
+  functions that converted saved at most three core registers; matmul's
+  `mul()` promotes five and it printed `check 0`. The rewrite copies the
+  whole token.
+- The screen rejected `k < -8` on the belief that a real slot offset is
+  never below -8. It was: `small`'s `char buf[16]` sits at `[r7, #-20]`.
+  The test is now `k == -1`, which is `split()`'s answer for exactly the
+  forms sprel cannot move (`subw`/`addw`/`vstr` and the bare-register
+  r7 uses); a real slot below r7 maps through `k + sz + d - 4` like any
+  other and the existing 1020-word ldr/str window bounds it. `trimframe`
+  needed no change, as predicted.
+- `frameless()` no longer zeroes `npro`. `flush()` runs one final
+  `peep()`, and `peep_hsrc`/`peep_tohi` gate on `npro`: zeroing it
+  disabled the promoted-register merges for exactly the functions that
+  had just converted, which is why `csc`'s hold load came out as
+  `ldr r0, [sp, #16]` + `mov r4, r0` instead of one load. `trimframe`'s
+  `nor7` is the only reader left and it only decides deletion of the two
+  `mov` lines frameless has already deleted; the next function resets
+  `npro`.
+- What still keeps a frame, all pinned: array-addressed locals (`small`,
+  `big`, `amem`, `bigprom`, `huge` - their `&a` is a `subw rD, r7, #N`),
+  reservations over 4095 bytes (`huge`), float slots in memory (`fpm`,
+  `fpint`, `fmany`, `fearly`, `cfloat`), the builtin argv window
+  (`csys`, `cscreen`), and `rec`'s `str r0, [r7, #-N]` result save,
+  whose pending word the walk cannot see claimed.
+- `stublea` gained a float local: under the lifted gate a locals-only
+  body now converts, so the mixed-chain witness's framed half is held by
+  the `vstr`/`vldr` slot instead.
+
+Corpus census, functions still keeping `mov r7, sp` under `-O`
+(this round: before -> after): crc 2->1, matmul 2->1, sieve 2->1,
+strings 4->2, sh.c 43->41; the rest unchanged, and their remaining
+frames are the shapes listed above. Bench total -O size 6776 -> 6740
+bytes; `frame.c` pins the drain with its run (`1 18 7 5 3 11 14 0 94 29
+18 7`).
+
+Gates: check_ref `different: 0`; `make check` green; bench --pc 11/11
+equal to gcc; frame and prolog pins ok; check_basic 139; check_sh 5/5;
+full tree `make OPT=-O` then `make` both pass check_sh with their own
+`host_linux` (the two `root/bin` sets differ by the `-O` flag, as they
+should). Board gates follow.
