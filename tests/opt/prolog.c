@@ -8,9 +8,9 @@ int stublea(int a, int b) { int v[4]; int i; v[0] = a; for (i = 1; i < 4; i++) v
 #endif
 int ext(int a);                          // prototype only: forces real calls
 int ext(int a);                          // prototype only: forces real calls
-int stublea(int a, int b);               // linked from prolog_stub.o: keeps its frame under
-                                         // -O (locals bail sprel), the framed half of the
-                                         // mixed-chain witness cmix below
+int stublea(int a, int b);               // linked from prolog_stub.o: converts on its own
+                                         // since 3c (leas and float slot map through sp),
+                                         // the cross-object callee of the mixed chain below
 int csc(int n) {                         // s live across the call: its register stays saved
   int s;
   s = n;
@@ -49,9 +49,12 @@ int cret(int n) {                        // early return: trimframe copies the p
   if (n > 0) return 7;
   return ext(n);
 }
+int csys(char *p, int n);                // defined below: cmix calls the framed callee
 int cmix(int n) {                        // mixed chain: sprel converts this caller (the
-  return stublea(n, 1) + stublea(n, 2);  // second call re-reads the param below the first
-}                                        // call's result save), stublea keeps its frame
+  char b[4];                             // second call re-reads the param below the first
+  return stublea(n, 1) + stublea(n, 2)   // call's result save) + csys, the survivor of the
+    + csys(b, 0);                        // frame-keeping classes: a framed callee reading
+}                                        // [r7, #off] under -O (read(0, b, 0) returns 0), stublea keeps its frame
 int csys(char *p, int n) {               // a real syscall (the read builtin): the kernel
   return read(0, p, n);                  // switches tasks inside it, so r7 must stay put
 }

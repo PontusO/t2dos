@@ -67,10 +67,15 @@ def main():
         fail('cmixed push list changed: %r' % f.get('cmixed', [])[:1])
     # rec: self-recursion. Only one slot is promotable (the argument n), and it is read
     # after the recursive call - so it keeps its register. The accumulator lives in a
-    # peep-created stack slot: the result save after bl rec is the str r0, [r7, #-N]
-    # shape whose pending word the walk cannot see claimed, so rec keeps its frame.
-    if f.get('rec', [])[:1] != ['push\t{r4, r7, lr}']:
-        fail('rec push list changed: %r' % f.get('rec', [])[:1])
+    # peep-created stack slot. Since 3c rec converts: the result save after bl rec
+    # (str r0, [sp, #4] once the arg push drained) is an own-frame slot, and those keep
+    # the offset they had framed (spmap drops the -4 below r7: the reservation hangs
+    # off sp, which moved with the push list). Drains add sp, #8 at the shared exit.
+    rb = f.get('rec', [])
+    if rb[:1] != ['push\t{r4, lr}'] or any('r7' in l for l in rb):
+        fail('rec is not fp-free: %r' % rb[:2])
+    if 'add\tsp, #8' not in rb or not any(l == 'pop\t{r4, pc}' for l in rb):
+        fail('rec does not drain and return: %r' % rb[-3:])
     # cret: trimframe copies the epilogue pop into the branch targeting the exit label,
     # and sprel converts the function: the parameter read frameless' old bail witness is
     # exactly what the depth walk maps safely ([r7, #k] -> [sp, #k+sz+d-4], one word less
@@ -100,20 +105,23 @@ def main():
         fail('csys entry/exit bookkeeping: %r' % cs)
 
     # mixed chain: cmix is sprel-converted - the frameless caller's hold load reads
-    # [sp, #8] (one word less pushed: r7 dropped), and stublea, whose float slot vstr/vldr
-    # read through r7 (a form sprel cannot move), is the framed callee. The linked run
-    # below pins their agreement with the native gcc reference (19 = stublea(5,1) +
-    # stublea(5,2) = 8 + 11).
+    # [sp, #16] (one word less pushed: r7 dropped) - and csys, framed by its argv
+    # window (pinned above), is the framed callee of the chain: it reads [r7, #12]
+    # under -O. stublea (prolog_stub.o) converts on its own since 3c: its descriptor
+    # leas and float slot map through sp; it keeps the call across the object
+    # boundary as the converted-callee shape. The linked run below pins their
+    # agreement with the native gcc reference (19 = stublea(5,1) + stublea(5,2) =
+    # 8 + 11; csys adds read(0, b, 0) = 0).
     cm = f.get('cmix', [])
     if cm[:1] != ['push\t{r4, lr}'] or any('r7' in l for l in cm):
         fail('cmix is not fp-free (sprel-converted): %r' % cm[:3])
-    if not any(re.match(r'ldr\tr4, \[sp, #8\]$', l) for l in cm):
+    if not any(re.match(r'ldr\tr4, \[sp, #16\]$', l) for l in cm):
         fail('cmix reads no converted band slot: %r' % cm[:3])
     subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'),
                     '-o', os.path.join(WORK, 'prolog_stub.s'), STUB], check=True, cwd=ROOT)
     sb = funcs(open(os.path.join(WORK, 'prolog_stub.s')).read()).get('stublea', [])
-    if 'mov\tr7, sp' not in sb or not any(re.search(r'\[r7, #', l) for l in sb):
-        fail('stublea lost its frame (mixed-chain witness broken): %r' % sb[:4])
+    if any('r7' in l for l in sb) or 'add\tsp, #32' not in sb:
+        fail('stublea is not fp-free since 3c: %r' % sb[:4])
 
     # behavior: cc build (with the stub object) must print what native gcc prints
     subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],

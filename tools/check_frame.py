@@ -56,13 +56,14 @@ def main():
     if 'sub.w\tsp, sp, r1' not in big: fail('big lost its long frame reservation: %r' % big[:8])
     # A reserved frame converts since 3b-iii: add sp, #sz takes the exit's place where
     # mov sp, r7 unwound the reservation (every early return branches to the drained
-    # exit), and r7 leaves the save lists. small and big keep their frames: their &b
-    # words are lea forms (subw rD, r7, #N) that sprel cannot map - split answers -1
-    # and the screen bails on the line.
-    for name in ('small', 'big'):
+    # exit), and r7 leaves the save lists. Since 3c the lea forms convert too: the
+    # descriptor inits (subw rD, r7, #N) rewrite to addw rD, sp, #o at their line's
+    # depth, so small and big go fully fp-free.
+    for name, szw in (('small', 24), ('big', 1008)):
         body = f[name]
-        if 'mov\tr7, sp' not in body or not any(l_end_pc(l) and 'r7' in l for l in body):
-            fail('%s lost its frame pointer: %r' % (name, body[:2]))
+        if any('r7' in l for l in body): fail('%s keeps r7: %r' % (name, body[:2]))
+        if 'add\tsp, #%d' % szw not in body:
+            fail('%s never drains its reservation: %r' % (name, body[-3:]))
     # huge: sz past the 4095-byte drain window (and an unmappable lea on top): the long
     # reservation trio, r7 and the unwinding pop all stay.
     h = f['huge']
@@ -102,16 +103,23 @@ def main():
     if 'add\tsp, #8' not in f['plarge']:
         fail('plarge never drains its reservation: %r' % f['plarge'][-3:])
     # a long frame keeps the movw/movt reservation even with a promoted parameter (r4 holds n);
-    # its early return is an inline pop only when trimframe's exit-label window holds it
+    # since 3c it converts: fp-free, drained at the exit, the long entry trio untouched.
+    # Its early return is an inline pop only when trimframe's exit-label window holds it
     bp = f['bigprom']
-    if 'sub.w\tsp, sp, r1' not in bp or not any(l.startswith('ldr\tr4, [r7, #') for l in bp):
-        fail('bigprom lost its long frame or its promoted parameter: %r' % bp[:7])
+    if 'sub.w\tsp, sp, r1' not in bp or any('r7' in l for l in bp) \
+      or not any(re.match(r'add\tsp, #\d+$', l) for l in bp):
+        fail('bigprom is not a converted long frame: %r' % bp[:7])
+    if not any(re.match(r'ldr\tr4, \[sp, #\d+\]$', l) for l in bp):
+        fail('bigprom lost its promoted parameter: %r' % bp[:7])
     bps = [l for l in bp if l_end_pc(l)]
     if len(bps) not in (1, 2): fail('bigprom has %d returns: %r' % (len(bps), bp))
     # a local array's pointer word is never promoted: the frame slot keeps its lea/str init,
-    # and every read of the array goes through r7, never through a register copy of the pointer
+    # and every read of the array goes through the descriptor word, never through a promoted
+    # register copy. Since 3c amem is fp-free: the inits and reads map through sp.
     am = f['amem']
     if not any(re.match(r'str\tr\d+, \[r\d+\]$', l) for l in am[:8]): fail('amem lost its array init: %r' % am[:6])
+    if any('r7' in l for l in am): fail('amem keeps r7: %r' % am[:2])
+    if 'add\tsp, #48' not in am: fail('amem never drains its reservation: %r' % am[-3:])
     for l in am[3:]:
         if re.search(r'\[r(4|5|6|10|11|12)[,\]]', l):
             fail('amem reads the frame through a promoted register: %r' % l)

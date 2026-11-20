@@ -1247,6 +1247,86 @@ int sprewrite(int i, int new) {
   ls(t); lend();                              // the number's tail on [r7, #-8])
   return 0;
 }
+// the uniform mapping is NOT uniform in -4: the caller's dropped r7 word shifts
+// the BAND (incoming params, k > 0) one word down, but our own slots (k < 0) keep
+// the offset they had framed - the reservation hangs off sp, which moved with the
+// push list. Mixing them up parks every local 4 low; the top of the array then
+// stores over the saved lr (bigprom was that witness).
+int spmap(int k, int sz, int d) {
+  return k + sz + d - (k < 0 ? 0 : 4);
+}
+// the CONVERTED lea shape: "addw rD, sp, #N" (digits, nothing after). fl_frame's
+// sp-move test flags it: opinfo reads the SOURCE operand sp (oprd == 13) although
+// the line only READS sp and writes rD - with the frame gone that is harmless,
+// so the arm excuses the shape.
+int leasp(int i) {
+  char *t; char *u;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (strncmp(t, "addw\t", 5)) return 0;
+  u = t;
+  while (*u && strncmp(u, ", sp, #", 7)) u = u + 1;
+  if (!*u) return 0;
+  u = u + 7;
+  if (*u < '0' || *u > '9') return 0;
+  while (*u >= '0' && *u <= '9') u = u + 1;
+  return !*u;
+}
+// the shape of a convertible lea, no window test: "subw rD, r7, #N" or
+// "addw rD, r7, #N" (digits after the #, nothing after them). Acceptance already
+// ran the window (leaoff) before spconv is set, so fl_r7 can excuse on shape.
+int leaform(int i) {
+  char *t; char *u;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (strncmp(t, "subw\t", 5) && strncmp(t, "addw\t", 5)) return 0;
+  u = t;
+  while (*u && strncmp(u, ", r7, #", 7)) u = u + 1;
+  if (!*u) return 0;
+  u = u + 7;
+  if (*u < '0' || *u > '9') return 0;
+  while (*u >= '0' && *u <= '9') u = u + 1;
+  return !*u;
+}
+// the lea form: "subw rD, r7, #N" (the address of word k = -N) or "addw rD, r7, #N"
+// (k = +N). A lea line computes a WORD ADDRESS, and a word's address never moves:
+// pushes grow DOWNWARD from sp, so everything inside the reservation - and the
+// caller's band above r7 - sits at a fixed address until the exit drains. So the
+// line maps exactly like a literal read of the same word: o = k + sz + d - 4 at
+// the line's own live depth d. 1 with *o the offset when the line is one and o
+// lands in the window; 0 for the other -1 forms (vstr, bare-register r7) and for
+// an out-of-window lea - all three keep the frame.
+int leaoff(int i, int sz, int d, int *o) {
+  char *t; char *u; int v; int sgn;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (!strncmp(t, "subw\t", 5)) sgn = -1;
+  else if (!strncmp(t, "addw\t", 5)) sgn = 1;
+  else return 0;
+  u = t;
+  while (*u && strncmp(u, ", r7, #", 7)) u = u + 1;   // base operand exactly r7
+  if (!*u) return 0;
+  u = u + 7;                                          // past ", r7, #"
+  if (*u < '0' || *u > '9') return 0;
+  v = 0;
+  while (*u >= '0' && *u <= '9') { if (v > 100000) return 0; v = v * 10 + *u - '0'; u = u + 1; }
+  if (*u) return 0;                                   // trailing text: not our form
+  *o = spmap(sgn * v, sz, d);
+  return *o >= 0 && *o <= 1020;
+}
+// the rewrite: "addw rD, sp, #o" - the same word's address, measured from sp.
+// rD is the source text between the mnemonic's tab and the base operand; o is
+// non-negative (leaoff's window), so one mnemonic covers both source forms.
+int leawrite(int i, int o) {
+  char *t; char *u; char *r;
+  t = lpool + ltext[i]; r = t + 5;                    // past "subw\t" / "addw\t"
+  u = t;
+  while (strncmp(u, ", r7, #", 7)) u = u + 1;
+  pset(i); ls("addw\t");
+  while (r != u) { lpool[lppos] = *r; lppos = lppos + 1; r = r + 1; }
+  ls(", sp, #"); ls(dec(o)); lend();
+  return 0;
+}
 // the words reglist() grows the entry push with beyond its one word (r7's): every promoted
 // word saves itself - a core register among promote's npro (fl_list only ever keeps r4-r6:
 // r10 and r11 spell into the list but never encode in a narrow push, so at most 3) plus
@@ -1416,7 +1496,7 @@ int fl_argpush(int i) {
   return j < nlines && lkind[j] == L_INS && !strncmp(lpool + ltext[j], "push\t{", 6);
 }
 int sprel(int fa, int sz) {
-  int i; int e; int j; int k; int d; int mv; int ps; int na; int isbl; int nconv; char *t;
+  int i; int e; int j; int k; int d; int mv; int ps; int na; int isbl; int nconv; int o; char *t;
   spconv = 0;
   if (!isins(fa - 1, "mov\tr7, sp")) return 0;        // the prologue as flush() emits it
   if (pnum(fa, "movw\tr1, #") < 0 || pnum(fa + 1, "movt\tr1, #") < 0
@@ -1441,8 +1521,8 @@ int sprel(int fa, int sz) {
       t = lpool + ltext[i];
       if (i >= fa && i <= fa + 2) { i = nx(i); continue; }   // the reservation trio: not body
       if (phold >= 0 && i >= phold && i < phold + 21         // promote's hold loads sit right
-        && r7ref(i) == 1) {                          // after the trio and read the GROWN
-        k = split(i) + sz + d - 4;                   // incoming band. frameless drops ONE
+        && r7ref(i) == 1 && split(i) >= 0) {         // after the trio and read the GROWN
+        k = spmap(split(i), sz, d);                  // incoming band. frameless drops ONE
         if (k < 0 || k > 1020) return 0;             // word - r7's - from the entry list, so
         nconv = nconv + 1; spholdcvt = 1;            // every r7-relative literal becomes
         i = nx(i); continue;                         // k + sz + d - 4 below sp, params and
@@ -1462,8 +1542,13 @@ int sprel(int fa, int sz) {
       if (r7ref(i) == 2) return 0;                    // unknown r7 form
       k = split(i);                                   // split/r7ref parse this line only: read
       if (r7ref(i) == 1) {                            // the values right after their calls
-        if (k == -1) return 0;                        // lea subw/addw, vstr and bare-register
-                                                      // r7 forms answer -1 (split parses the
+        if (k == -1) {                                // the -1 forms: lea subw/addw convert
+          if (!leaoff(i, sz, d, &o)) return 0;        // (leaoff/leawrite: a word's ADDRESS
+            nconv = nconv + 1;                        // maps through the same k+sz+d-4 as a
+            i = nx(i); continue;                      // read of the word, at this line's
+          }                                           // depth, and the line moves nothing);
+                                                      // vstr and bare-register r7 still bail.
+                                                      // split parses the
                                                       // rest: a literal slot may sit below r7,
                                                       // an unpromoted local at [r7, #-N]: the
                                                       // window check below maps it through
@@ -1476,7 +1561,7 @@ int sprel(int fa, int sz) {
                                                       // at any spshift (any number of parked
                                                       // registers shifts band and frame by
                                                       // the same words frameless drops).
-        k = k + sz + d - 4;                           // Task 3: the line's live spill depth
+        k = spmap(k, sz, d);                          // Task 3: the line's live spill depth
         if (k < 0 || k > 1020) return 0;              // out of ldr/str/vldr's immediate window
         nconv = nconv + 1;
       }
@@ -1595,18 +1680,23 @@ int sprel(int fa, int sz) {
   while (i <= e) {                                    // rules in the same order, so every
     if (lkind[i] == L_INS && i != fa - 3) {           // read lands on its OWN live depth
       if (i >= fa && i <= fa + 2) { i = nx(i); continue; }   // the reservation trio (see above)
-      if (spholdcvt && r7ref(i) == 1)                // hold load the screen converted: the
-        { sprewrite(i, split(i) + sz + d - 4);       // same line, same depth (the walk
+      if (spholdcvt && r7ref(i) == 1 && split(i) >= 0)  // hold load the screen converted: the
+        { sprewrite(i, spmap(split(i), sz, d));      // same line, same depth (the walk
           i = nx(i); continue; }                     // repeats the screen's rules in order)
 
       t = lpool + ltext[i];
       opinfo(i); isbl = opkind == 1;
       if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7")) { i = nx(i); continue; }
       if (fl_pc_end(i) && inregs(t + 5, "r7")) { i = nx(i); continue; }   // see the screen
-      if (r7ref(i) == 1 && split(i) >= -1) {          // (r7ref answers 0 for non-instructions)
-        sprewrite(i, split(i) + sz + d - 4);          // (the depth BEFORE this line: a slot
-                                                      // read sees the words live when it runs;
-                                                      // -4 for the r7 word frameless drops)
+      if (r7ref(i) == 1 && split(i) == -1 && leaoff(i, sz, d, &o))
+        { leawrite(i, o); i = nx(i); continue; }      // the lea form: the screen's predicate,
+                                                      // the same depth, leaoff recomputes o
+      if (r7ref(i) == 1 && split(i) != -1) {          // (r7ref answers 0 for non-instructions;
+        sprewrite(i, spmap(split(i), sz, d));         // split != -1: a real slot offset, the
+                                                      // sign only says whose word it is - own
+                                                      // frame slots sit below r7. spmap drops
+                                                      // the -4 for them: only the CALLER's
+                                                      // dropped r7 word shifts the band)
       }
       else if (!strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7")) { }   // bookkeeping:
                                                       // nothing to track (the rewrite walk has
@@ -1717,9 +1807,18 @@ int fl_r7(int i) {                          // line i needs the frame pointer: i
   int k;                                    // that saves or restores r7. A value spill
   if (lkind[i] != L_INS) return 0;          // (push {r0} / pop {r1}) and a builtin's save
   t = lpool + ltext[i];                     // (push {r4}) do not mention r7. An sprel line
-  if (sprel_ok() && split(i) >= 0)          // is sp-relative already: no frame needed.
+  if (sprel_ok() && (split(i) != -1 || leaform(i)))
     return 0;                               // (fl_frame's opinfo test runs before this
-                                            // call and excuses the same lines itself)
+                                            // call and excuses the same lines itself; an
+                                            // accepted lea is one too - the conversion
+                                            // walk rewrites it to addw rD, sp, #o, which
+                                            // mentions no r7 and needs no excuse.
+                                            // split answers -1 ONLY for instruction
+                                            // lines that are not a slot read (the -2
+                                            // non-instruction answer is handled by the
+                                            // lkind test above; a real offset is a
+                                            // multiple of 4, negative for own-frame
+                                            // slots): every one of those converts)
   if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7"))   // a push that saves r7 keeps the
     return !sprel_ok();                     // frame (the entry line: fl_frame's range test
                                             // exempts it; once sprel converted, frameless
@@ -1824,9 +1923,13 @@ int fl_frame(int i, int fa) {
   opinfo(i);                                // fl_r7's helpers clobbered the globals, so
   if (opmask & 8192 || oprd == 13)          // re-read them: a line that moves sp for
     return !(sprel_ok() && (split(i) >= 0   // another reason (a linked .s: add sp,
-      || !strncmp(t, "add\tsp, #", 9)       // r7, #4) keeps the frame. A constant add
-      || !strncmp(t, "sub\bsp, #", 9)));    // or sub of sp is the call cleanup the depth
-  return fl_r7(i)                           // walk drained itself. Any other r7 use
+      || leasp(i)                           // r7, #4) keeps the frame. A constant add
+      || !strncmp(t, "add\tsp, #", 9)       // or sub of sp is the call cleanup the depth
+      || !strncmp(t, "sub\bsp, #", 9)));    // walk drained itself. A converted lea
+                                            // (addw rD, sp, #o) only READS sp: opinfo
+                                            // flags its source operand (oprd == 13)
+                                            // but nothing moves.
+  return fl_r7(i)                           // Any other r7 use
     || (!strncmp(t, "vpush", 5) && !strncmp(t, "vpop", 4));   // keeps it; vpush/vpop move
 }                                           // sp by 8 and are caught here
 int frameless(int fa, int sz) {
