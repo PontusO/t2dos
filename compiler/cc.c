@@ -1252,6 +1252,37 @@ int sprewrite(int i, int new) {
 int spshift() { int k; if (!npro && !nfpro) return 0; k = npro < 3 ? npro : 3; return 4 * (k + nfpro); }
 int inregs(char *t, char *nm);              // defined below frameless(): "r7" among the
                                            // registers of a push/pop list, whole words only
+// call_sys() (cc.c's syscall trampoline, see its emits) is a fixed line sequence: it
+// saves sp in r4, aligns sp for the kernel, runs the call and restores sp from r4. The
+// depth walk cannot follow its movs of sp, so it recognises the whole shape line for
+// line and treats it as one unit. Its net effect on sp is zero: the push {r4} pairs with
+// the pop {r4}, and the mov sp,r3 / mov sp,r4 pair cancels. The `add sp, #4n` that pops
+// the argv words lives OUTSIDE the unit (call_sys emits it after the pop), so the walk
+// never reaches it inside: its own arm claims na for those words exactly as for a bl's
+// post-call add - and if peep moved the add in front of a result save, fl_resultsave's
+// pv test still sees the add. A trampoline with no arguments ends at the pop with no add
+// at all. Anything that does not match line for line is not this shape: 0, and the
+// normal screen bails on it (a stray push {r4} counts as a spill, its unbalanced pop
+// then bails on d). The `movs rN, #imm` test is loose on purpose: only the trampoline's
+// own movs can stand here, and the kernel never touches r4 across a call (its argv
+// arrives by pointer in r2).
+int sp_syscall_save(int i) {
+  int j; char *t;
+  if (lkind[i] != L_INS || strcmp(lpool + ltext[i], "mov\tr2, sp")) return 0;
+  j = nx(i);
+  while (j < nlines && lkind[j] == L_INS) {
+    t = lpool + ltext[j];
+    if (!strcmp(t, "pop\t{r4}")) return 1;        // the restore: end of the unit
+    if ((!strncmp(t, "push\t{", 6) || !strncmp(t, "pop\t{", 5))   // a push/pop LIST that
+      && inregs(t + (t[1] == 'u' ? 6 : 5), "r4")                 // names r4 but is NOT the
+      && strcmp(t, "push\t{r4}")) return 0;       // trampoline's own save: another register
+    if (strcmp(t, "push\t{r4}") && strcmp(t, "mov\tr4, sp") && strcmp(t, "mov\tr3, sp")
+      && strncmp(t, "bic.w\tr3, r3, #7", 14) && strcmp(t, "mov\tsp, r3")
+      && strncmp(t, "movs\tr", 6) && strcmp(t, "blx\tr8") && strcmp(t, "mov\tsp, r4")) return 0;
+    j = nx(j);
+  }
+  return 0;
+}
 // line i moves sp by this much (Task 3's depth walk): a push of exactly one core
 // register +4, a pop of exactly one core register -4, add sp, #N -N. A pop or push
 // list with pc in it is not a spill (the exit pops frameless rewrites separately).
@@ -1385,10 +1416,12 @@ int sprel(int fa, int sz) {
                                                    // reservation (Task 3). The trio at
                                                    // fa..fa+2 is fl_frame's and trimframe's
                                                    // own work: always allowed
-  opinfo(fa + 3);                                    // the line right after the trio sits
-  if (opmask & 8192 || oprd == 13) return 0;         // OUTSIDE the walk below: an unknown sp
-                                                     // move there would slip past both walks
-                                                     // and leave d wrong at entry
+  if (!sp_syscall_save(fa + 3)) {                    // the line right after the trio sits
+    opinfo(fa + 3);                                  // OUTSIDE the walk below: an unknown
+    if (opmask & 8192 || oprd == 13) return 0;       // sp move there slips past both walks
+  }                                                  // and leaves d wrong at entry (the first
+                                                     // line of a function whose body opens
+                                                     // with a syscall is its mov r2, sp)
   while (i <= e) {
     if (lkind[i] == L_INS && i != fa - 3) {
       t = lpool + ltext[i];
@@ -1469,6 +1502,14 @@ int sprel(int fa, int sz) {
                                                       // pending from an earlier save stays
                                                       // live below the window (r0 dies only
                                                       // until its own add or pop claims it)
+        else if (sp_syscall_save(i)) {                // a builtin's argv window: net zero on
+          j = i;                                      // sp (see sp_syscall_save). Land just
+          while (j < nlines                           // past the pop {r4}; the `add sp, #N`
+              && strcmp(lpool + ltext[j], "pop\t{r4}")) j = nx(j);  // that pops the argv
+          i = nx(j);                                  // words is next and its own arm below
+          continue;                                   // claims na, as for a bl's post-call
+        }                                             // add (a result save peep moved after
+                                                      // the add: fl_resultsave's pv test)
         else if (strsave(i))                          // the str r0, [r7, #-N] right after a
           { ps = 1; d = d + 4; i = nx(i); continue; } // bare bl: stands for the call result
                                                       // save. The str's own slot read above
@@ -1507,7 +1548,7 @@ int sprel(int fa, int sz) {
         }                                             // callee's arg words from below sp:
         else mv = spd(i);                             // depth shrinks, newest first (the
                                                       // counted cases ran above)
-        if (mv) d = d + mv;                           // a plain spill push/pop shifts sp for
+        if (mv) { d = d + mv; i = nx(i); continue; }  // a plain spill push/pop shifts sp for
         opinfo(i);                                    // later reads. Anything else that moves
         if (opmask & 8192 || oprd == 13) return 0;    // sp - vpush, a syscall's mov sp, r3, a
         if (opkind == 4) return 0;                    // linked .s - the frameless screen bails
@@ -1555,6 +1596,11 @@ int sprel(int fa, int sz) {
           { ps = 1; d = d + 4; i = nx(i); continue; }
         if (fl_bl(i))
           { na = 0; i = nx(i); continue; }
+        if (sp_syscall_save(i))                       // the builtin's argv window: skip it
+          { j = i;                                    // exactly as the screen did (net zero:
+              while (j < nlines                       // d, ps and na unchanged; the argv pop
+                  && strcmp(lpool + ltext[j], "pop\t{r4}")) j = nx(j);  // claims na on its own
+            i = nx(j); continue; }                    // arm below
         if (fl_argpush(i))
           { if (strncmp(t, "push\t{", 6))
               { na = na + 1; if (ps) d = d + 4; }
@@ -1710,6 +1756,9 @@ int fl_frame(int i, int fa) {
     return 0;                               // (trimframe's own work: always allowed)
   opinfo(i);
   if (opkind == 4) return 1;                // unknown form: it might read anything
+  if (sprel_ok() && sp_syscall_save(i))     // a builtin's argv window converts with the
+    return 0;                               // frame: sprel's walk proved its sp moves
+                                            // cancel line for line (sp_syscall_save)
   if (!strncmp(t, "push\t{", 6))             // a push with r7 (beyond the entry push the
     return inregs(t + 6, "r7");             // caller exempted) saves what the frame holds;
   if (!strncmp(t, "pop\t{", 5))              // a value spill is balanced by its own pop - the
