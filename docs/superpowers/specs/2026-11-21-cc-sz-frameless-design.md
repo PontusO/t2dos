@@ -137,4 +137,10 @@ Gates: check_ref `different: 0`; `make check` green; bench --pc 11/11
 equal to gcc; frame and prolog pins ok; check_basic 139; check_sh 5/5;
 full tree `make OPT=-O` then `make` both pass check_sh with their own
 `host_linux` (the two `root/bin` sets differ by the `-O` flag, as they
-should). Board gates follow.
+should). Board: `check_toolchain --selfhost` rebuilt all six tools
+byte-identically and test4..12 passed; `bench --board` 11/11 equal to
+gcc on hardware, total 7227 -> 3534 ms (2.04x); `check_basic --board`
+139 cases. Moved on hardware since the 3b-ii run: strings 226 -> 201
+ms, fib 240 -> 229, matmul 232 -> 220 — matmul's `mul()` is the
+five-promotion function whose save-list rebuild the `fl_list` fix
+rescues, and its `check 4294967213` is correct on the board.
