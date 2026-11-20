@@ -1,6 +1,7 @@
 # cc -O 3d: the builtin argv window converts, without r7
 
-Date: 2026-11-21. Status: short design, awaiting approval. Follows
+Date: 2026-11-21. Status: implemented, PC and board gates green (see
+Results). Follows
 3c (`2026-11-21-cc-lea-design.md`, merged as `7f4cf88`).
 
 ## Problem
@@ -147,4 +148,9 @@ first; no em dashes.
 - Gates: `check_ref different: 0`; `make check`; bench `--pc` 11 ok;
   basic `--pc` 139; sh `--pc` 5; `build/ref/cc` builds the changed
   cc.c; whole tree `OPT=-O` then plain rebuild both `ok: 5 cases`.
-- Board gates: see below (Task 3).
+- Board gates: selfhost IDENTICAL (six tools, `ok: selfhost`); bench
+  (board) `ok: 11 benchmarks, output equal to gcc`, -O run twice:
+  3557 and 3524 ms at 6514 B both times. 3c was 3430 ms / 6690 B:
+  sizes down 176 B as expected. The ~3% time drift showed up on both
+  runs; frame removal gives no codegen reason for a hot-loop change,
+  so it is noted rather than chased. BASIC (board) `ok: 139 cases`.
