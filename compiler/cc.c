@@ -1180,6 +1180,136 @@ int r7shift(int i, int off) {               // line i with its r7 offset (rfoff,
   ls(t); lend();
   return 0;
 }
+// sprel(): -O, after promote() and before frameless(). Every frame slot is a constant
+// offset from sp once the reservation is in, so a function whose r7 uses are all plain
+// slot reads and whose body moves sp only in tracked ways rewrites them to [sp, #N] and
+// lets frameless() drop the frame pointer - even with parameters and locals (which is
+// what it used to bail on). Spec: docs/superpowers/specs/2026-11-21-cc-sp-relative-design.md.
+// All-or-nothing: the screen either passes and every slot line converts, or nothing moves.
+// The offset comes from each line's own literal, not rfoff: promote shifted those lines by
+// sh for its grown save list, and frameless shrinks that list again (a hold load at its
+// promoted [r7, #N] means the slot at N - sh, which is what the sp-relative form must be).
+int spconv;                                // 1 when sprel() made this function's slots:
+int sprel_ok() { return spconv; }          // frameless() may allow >1 exit. Sticky per
+                                           // function: reset at the next prologue below.
+// line i's own slot offset as written (subw negated), -1 if the line is not a plain
+// memory read or write of [r7, #off] (lea subw/addw, bare-register uses, vstr: no).
+// A line sprel already rewrote ([sp, #off], ldr/str/vldr only) answers its offset too:
+// fl_frame asks this to excuse the opinfo flag every [sp, #..] operand carries.
+// cc.c has no strstr; scan like r7ref does. Only a literal ", [r7, #" (or ", " plus a
+// width letter before it: str.w r0, [r7, #-8], what promote's r7shift() emits) counts:
+// the lea subw/addw forms end in ", r7, #N]" with no bracket and answer -1 here.
+int split(int i) {
+  char *t; char *u; int v; int neg; int o;
+  t = lpool + ltext[i];
+  if (!strncmp(t, "subw", 4) || !strncmp(t, "addw", 4) || !strncmp(t, "vstr", 4)) return -1;
+  u = t;                                        // find ", [r7, #" or (rewritten) ", [sp, #":
+  o = 2;                                        // the wide forms put a letter after the comma:
+  while (*u) {                                  // str.w r0, [r7, #-8] (what r7shift() emits
+    if (*u == ',' && (!strncmp(u + o, "[r7, #", 6) || !strncmp(u + o, "[sp, #", 6))) break;
+    if (*u == ',' && u[2] == 'w' && (!strncmp(u + 3, "[r7, #", 6) || !strncmp(u + 3, "[sp, #", 6))) { o = 3; break; }
+    u = u + 1;
+  }
+  if (!*u) return -1;
+  u = u + o + 6; neg = 0;                       // the offset right after "[r7, #" / "[sp, #"
+  if (*u == '-') { neg = 1; u = u + 1; }
+  v = 0;
+  while (*u >= '0' && *u <= '9') { if (v > 100000) return -1; v = v * 10 + *u - '0'; u = u + 1; }
+  return neg ? -v : v;
+}
+// line i is cc's own single-register core push/pop spill ({rX}, no r7, not a pop of pc:
+// those are the exit and the entry push's business). Task 3's depth walk uses this; A1
+// bails on every push/pop line instead.
+int spspill(char *t, int is_push) {
+  char *u;
+  if (is_push) { if (strncmp(t, "push\t{r", 7)) return 0; u = t + 7; }
+  else { if (strncmp(t, "pop\t{r", 6)) return 0; u = t + 6; }
+  return u[0] >= '0' && u[0] <= '9' && u[1] == '}' && u[2] == 0 && strcmp(u, "7}");
+}
+// the line's text with its r7 slot offset rewritten to sp-relative `new` (split's forms)
+int sprewrite(int i, int new) {
+  char *t;
+  t = lpool + ltext[i]; pset(i);              // pchg = 1: frameless' scan must see the line
+  while (strncmp(t, "r7, #", 5)) { lpool[lppos] = *t; lppos = lppos + 1; t = t + 1; }
+  ls("sp, #"); ls(dec(new)); t = t + 5;       // past "r7, #": the offset may be negative, so
+  if (*t == '-') t = t + 1;                   // skip sign and digits, not digits only (a bare
+  while (*t >= '0' && *t <= '9') t = t + 1;   // loop re-reads the '-' as a stop and duplicates
+  ls(t); lend();                              // the number's tail on [r7, #-8])
+  return 0;
+}
+// the words reglist() grows the entry push with beyond its one word (r7's): every promoted
+// word saves itself - a core register among promote's npro (fl_list only ever keeps r4-r6:
+// r10 and r11 spell into the list but never encode in a narrow push, so at most 3) plus
+// nfpro s registers. sprel() uses this to tell an un-promoted parameter read at its
+// incoming offset (8..7+4n) from one promote shifted out of it (r7shift: rfoff + sh).
+int spshift() { int k; if (!npro && !nfpro) return 0; k = npro < 3 ? npro : 3; return 4 * (k + nfpro); }
+int sprel(int fa, int sz) {
+  int i; int e; int nconv; int k; char *t;
+  spconv = 0;
+  if (!isins(fa - 1, "mov\tr7, sp")) return 0;        // the prologue as flush() emits it
+  if (pnum(fa, "movw\tr1, #") < 0 || pnum(fa + 1, "movt\tr1, #") < 0
+    || !isins(fa + 2, "sub.w\tsp, sp, r1")) return 0;   // the reservation trio (sz may be 0)
+  e = nlines - 1;
+  while (e >= 0 && lkind[e] == L_DEL) e = e - 1;       // the last live line (the pop of pc)
+  i = fa + 3; nconv = 0;                          // the trio at fa..fa+2 is fl_frame's and
+                                                  // trimframe's own work: always allowed
+  while (i <= e) {
+    if (lkind[i] == L_INS && i != fa - 3) {
+      t = lpool + ltext[i];
+      if (r7ref(i) == 2) return 0;                    // unknown r7 form
+      k = split(i);                                   // split/r7ref parse this line only: read
+      if (r7ref(i) == 1) {                            // the values right after their calls
+        if (k < -8) return 0;                         // lea subw/addw, vstr, bare-register r7
+                                                      // (they answer -1; a real slot offset is
+                                                      // never below -8: promote's r7shift has
+                                                      // moved every local to [r7, #N] with
+                                                      // N >= 0 by now)
+                                                      // a parameter read promote shifted OUT
+        if (nparams && !spshift()                     // incoming arg at [r7, #k] sits at
+            && k >= 8 && k <= 7 + 4 * nparams)        // [sp, #k+4] once frameless drops r7,
+            return 0;                                 // but a LOCAL is [sp, #k-sz+sz]: one
+                                                      // mapping cannot name both, so A1 bails
+                                                      // whenever a parameter slot is read and
+                                                      // the line's offset is in the incoming
+                                                      // argument band (a stale symbol value can
+                                                      // put an r7 use there without nparams)
+        if (nparams && spshift()                      // a parameter read promote shifted OUT
+            && k > 7 + 4 * nparams                    // of its incoming place reads a grown
+            && k - spshift() >= 8                     // save-list word now (#8 became #12 with
+            && k - spshift() <= 4 + 4 * nparams)      // one promoted register): converting it
+            return 0;                                 // would name the wrong word once
+                                                      // frameless shrinks that list again.
+        k = k + sz;                                   // Task 3 adds the line's spill depth
+        if (k < 0 || k > 1020) return 0;              // out of ldr/str/vldr's immediate window
+        nconv = nconv + 1;
+      }
+      else if (fl_pc_end(i)) {                        // an exit pop: fine, it ends at depth 0
+        opinfo(i);
+        if (opmask & 8192 || oprd == 13) return 0;    // and it must not move sp itself
+      }
+      else {                                          // no r7: spills move sp, everything else must not
+        if (fl_excused(t)) { i = nx(i); continue; }   // mov r7, sp / mov sp, r7: our own
+                                                      // bookkeeping (they move sp by r7, which
+                                                      // opinfo flags; frameless deletes them)
+        else if (!strncmp(t, "push\t{", 6)) return 0;   // A1: any spill push bails
+        if (!strncmp(t, "pop\t{", 5)) return 0;       // a value pop (A1) or an r7 restore
+        if (!strncmp(t, "add\tsp, #", 9)) return 0;   // the post-call correction (A1)
+        opinfo(i);                                    // read the globals before any helper call
+        if (opmask & 8192 || oprd == 13) return 0;    // sp moved for another reason: vpush,
+        if (opkind == 4) return 0;                    // a syscall's mov sp, r3, a linked .s
+      }
+    }
+    i = nx(i);
+  }
+  if (!nconv) return 0;                               // no slot reads: frameless already fires
+  i = fa + 3;                                         // (the screen above counted the same
+  while (i <= e) {                                    // lines: rewrite exactly those)
+    if (lkind[i] == L_INS && r7ref(i) == 1) sprewrite(i, split(i) + sz);
+    i = nx(i);
+  }
+  spconv = 1;
+  return 0;
+}
 int reglist(char *mn, char *last) {         // "mn\t{r4, .., r7, last}" with the promoted registers
   int k;
   ls(mn); ls("\t{");
@@ -1228,7 +1358,10 @@ int fl_r7(int i) {                          // line i needs the frame pointer: i
   char *t;                                  // moves sp with vpush/vpop, or is a push/pop
   int k;                                    // that saves or restores r7. A value spill
   if (lkind[i] != L_INS) return 0;          // (push {r0} / pop {r1}) and a builtin's save
-  t = lpool + ltext[i];                     // (push {r4}) do not mention r7
+  t = lpool + ltext[i];                     // (push {r4}) do not mention r7. An sprel line
+  if (sprel_ok() && split(i) >= 0)          // is sp-relative already: no frame needed.
+    return 0;                               // (fl_frame's opinfo test runs before this
+                                            // call and excuses the same lines itself)
   k = r7ref(i);                             // FIRST: it excuses the exact entry and exit
   if (k == 0) return 0;                     // forms (push {r7, lr}, mov r7,sp, mov sp,r7,
                                             // pop {r7, pc}) as well as lines without r7.
@@ -1310,20 +1443,23 @@ int fl_frame(int i, int fa) {
     return 0;                               // keeping: deleted by the rewrite below
   opinfo(i);                                // fl_r7's helpers clobbered the globals, so
   if (opmask & 8192 || oprd == 13)          // re-read them: a line that moves sp for
-    return 1;                               // another reason (a linked .s: add sp,
+    return !(sprel_ok() && split(i) >= 0);  // another reason (a linked .s: add sp,
   return fl_r7(i)                           // r7, #4) keeps the frame too. Then any
     || (!strncmp(t, "vpush", 5) && !strncmp(t, "vpop", 4));   // other r7 use keeps it;
 }                                           // vpush/vpop moved sp and are caught above
 int frameless(int fa, int sz) {
   int i; int e; char *t;
-  if (phold < 0 || npro || nfpro) return 0; // promote parked a value in r4-r11 or an s
+  if (phold < 0) return 0;                      // no prologue to strip
+  if ((npro || nfpro) && !sprel_ok()) return 0; // promote parked a value in r4-r11 or an s
                                             // register: its load at phold reads OUR r7, the
                                             // stripped save list no longer protects the
                                             // register, and vpush/vpop move sp. Such a
                                             // function keeps its frame pointer; calllive()
                                             // is what drives npro to 0 for the functions
                                             // whose values no callee-saved register survives
-                                            // a call in
+                                            // a call in. An sprel-converted function is the
+                                            // exception: its hold loads read [sp, #N] now and
+                                            // fl_list drops the parked registers with r7.
   t = lpool + ltext[fa - 3];                          // the entry sequence as emitted: push
   if (strncmp(t, "push\t{", 6) || !inregs(t + 6, "lr")) return 0;   // r7/lr (or the reglist
                                                      // promote grew it into), (vpush), mov r7,sp
@@ -1521,7 +1657,12 @@ int promote() {
     else { slotw[best] = -2 - npro; npro = npro + 1; }
   }
   if (!npro && !nfpro) return 0;
-  sh = 4 * (npro + nfpro);
+  sh = 4 * (npro + nfpro);                  // the words reglist() grows the push list by:
+                                            // promote shifts every un-promoted parameter's
+                                            // [r7, #N] load with them (its own hold loads at
+                                            // phold read the grown offsets), so this stays
+                                            // promote's business; sprel() reads each line's
+                                            // own literal instead and needs no shift here
   i = 0;
   while (i < nlines) {
     k = r7ref(i);
@@ -3578,7 +3719,7 @@ int parse_global() {
       ins("pop\t{r7, pc}");
       sz = (maxloc + 7) & -8;
       i = nlines; imm2(1, sz); ltext[frame_at] = ltext[i]; ltext[frame_at + 1] = ltext[i + 1]; nlines = i;
-      if (optim) { prepro = 1; peep(); licm_loops(); prepro = 0; peep(); promote(); frameless(frame_at, sz); trimframe(frame_at, sz); }
+      if (optim) { prepro = 1; peep(); licm_loops(); prepro = 0; peep(); promote(); sprel(frame_at, sz); frameless(frame_at, sz); trimframe(frame_at, sz); }
       flush();
       npro = 0; phold = -1;
       // restore shadowed symbols
