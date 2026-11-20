@@ -9,6 +9,9 @@ int framed(int n) { return n + 1; }                  // reads its parameter with
                                                      // drop r7 here and the read sees leaf's lr)
 int small(int n) { char buf[16]; int i; i = 0; while (i < 16) { buf[i] = n + i; i++; } return buf[15]; }   // sub sp, #N
 int big() { char b[1000]; b[999] = 7; return b[999]; }   // over 508 bytes: the long form stays
+int huge() { char b[5000]; b[4999] = 7; return b[4999]; }   // sz past the add sp, #N drain
+                                                     // window (and its &b is a lea anyway):
+                                                     // the frame and long trio stay
 int early(int x) { if (x < 2) return x; return early(x - 1) + early(x - 2); }   // reads its
                                                      // parameter again below the first call's
                                                      // spill window: sprel converts it fp-free
@@ -62,6 +65,6 @@ int main() {
   fx = fpint(2);                                     // 2+3+4+5 = 14.0
   p = fpm(1.5, 3, 2.5) > e; q = plarge(1, 2, 3, 4, 5, 6, 7); r = amem(1);   // 0, 26, 60
   t = fearly(1.25) + 2 * fearly(0.25);               // 7 + 2*2 = 11
-  printf("%d %d %d %d %d %d %d %d %d %d %d\n", a, b, c, d, g, (int)e, (int)fx, p, q + r + bigprom(1), (int)fmany(0.5), f);   // 1 18 7 5 3 11 14 0 94 29 18
+  printf("%d %d %d %d %d %d %d %d %d %d %d %d\n", a, b, c, d, g, (int)e, (int)fx, p, q + r + bigprom(1), (int)fmany(0.5), f, huge());   // 1 18 7 5 3 11 14 0 94 29 18 7
   return 0;
 }

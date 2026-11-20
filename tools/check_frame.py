@@ -63,6 +63,12 @@ def main():
         body = f[name]
         if 'mov\tr7, sp' not in body or not any(l_end_pc(l) and 'r7' in l for l in body):
             fail('%s lost its frame pointer: %r' % (name, body[:2]))
+    # huge: sz past the 4095-byte drain window (and an unmappable lea on top): the long
+    # reservation trio, r7 and the unwinding pop all stay.
+    h = f['huge']
+    if 'sub.w\tsp, sp, r1' not in h or 'mov\tr7, sp' not in h \
+      or not any(l_end_pc(l) and 'r7' in l for l in h):
+        fail('huge lost its long frame: %r' % h[:5])
     if 'mov\tr7, sp' in early or 'mov\tsp, r7' in early:
         fail('early keeps the frame: %r' % early[:4])   # converted since the depth walk:
                                                         # the second call re-reads the
@@ -93,6 +99,8 @@ def main():
     # (from the converted plarge: [sp, #N], its 8-byte reservation drained at the exit)
     if not any(re.match(r'ldr\tr\d+, \[sp, #\d+\]$', l) for l in f['plarge'][:6]):
         fail('plarge loads no parameter into a register: %r' % f['plarge'][:6])
+    if 'add\tsp, #8' not in f['plarge']:
+        fail('plarge never drains its reservation: %r' % f['plarge'][-3:])
     # a long frame keeps the movw/movt reservation even with a promoted parameter (r4 holds n);
     # its early return is an inline pop only when trimframe's exit-label window holds it
     bp = f['bigprom']
@@ -109,7 +117,7 @@ def main():
             fail('amem reads the frame through a promoted register: %r' % l)
     subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'frame.bin'), SRC], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/frame.bin'], capture_output=True, cwd=ROOT, timeout=30).stdout
-    if out != b'1 18 7 5 3 11 14 0 94 29 18\n': fail('frame.bin printed %r' % out)
+    if out != b'1 18 7 5 3 11 14 0 94 29 18 7\n': fail('frame.bin printed %r' % out)
     if bad: print('%d failed' % bad); return 1
     print('ok: frame')
     return 0
