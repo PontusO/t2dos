@@ -136,7 +136,9 @@ codegen before running it on the board.
   window class (the builtin `push {r4}` window and its `mov r2, sp`
   friends; all 33 sh survivors and all 17 get survivors show it), so
   the lea-only scope is complete: no framed function is lea-blocked
-  anymore.
+  anymore. (Superseded by 3d, `2026-11-21-cc-argv-window-design.md`:
+  the window class itself has since converted, userland 221 -> 31;
+  the survivors it names are listed there, not this class.)
 - Witness flips: `small`, `big`, `bigprom`, `amem` (frame.c) and `rec`,
   `stublea` (prolog) convert; run pins unchanged (frame.bin prints the
   same numbers, prolog.bin `check 9 16 3 8 6 16 19`). `rec`'s

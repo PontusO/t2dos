@@ -111,3 +111,40 @@ first; no em dashes.
 - Exact pin wording and the census/spec bullets, incl. the superseding
   note in the 3c spec's Results (its "all survivors argv-window"
   finding is what 3d retires).
+
+## Results
+
+- Landed as designed: `wstart/wend/nwin` recorded by the prescan's
+  window arm, `in_window(i)` membership, `fl_frame`'s excuse
+  `sprel_ok() && (sp_syscall_save(i) || in_window(i))`. The reset
+  landed at `sprel` entry next to `spconv = 0`.
+- Table size: the census found one function (sh `run_cmd`) with 65
+  windows, one over the drafted 64, so the cap is 128; nothing in the
+  tree comes close to filling that (WFULL probe: zero hits).
+- `csys` converts (`ok: prolog`); the mixed chain now pins both callee
+  shapes: converted `csys`/`stublea` plus hand-written framed `sframe`
+  (`tests/opt/prolog_stubframed.s`, assembled by the checker; its one
+  argument sits at `[r7, #8]` for the `push {r7, lr}` entry).
+- Userland census (frames = `mov r7, sp` lines at `-O`):
+  221 (3c) -> 31. sh 33->1, edit 22->9, get/rcd/rls/send/wifi 17->3
+  each, mount 20->3, rcp 26->3; every single-function tool (cat, cp,
+  ls, grep, ...) and every bench main now converts. `sh.bin -O`:
+  71621 -> 70925 bytes.
+- Survivors, named and by class (bail site in `sprel`):
+  - No-slot functions (prescan ends with `nconv == 0`: `sprel`
+    declines, and `frameless` then trips on window lines because the
+    excuse requires `sprel_ok()`): edit `down`, `sel_e`, `lineno`,
+    `is_bas`, `run_bas`, `line_end`, `paste`, `newline`; `net_save`
+    (lib/net.c, in the 7 net tools); sh `check_break`. 16 total - the
+    natural next round: a window-only function needs no slots mapped,
+    only excused.
+  - Entry screen (`fa + 3` writes sp without starting a window; here
+    promote's callee-save reservation): `net_call` (7 tools), edit
+    `getkey`. 8 total.
+  - Entry-list spill reload outside the modeled band (`ldr r4,
+    [r7, #20]` with `r4` saved by the entry `push {r4, r7, lr}`):
+    `net_recv_to` (7 tools). 7 total.
+- Gates: `check_ref different: 0`; `make check`; bench `--pc` 11 ok;
+  basic `--pc` 139; sh `--pc` 5; `build/ref/cc` builds the changed
+  cc.c; whole tree `OPT=-O` then plain rebuild both `ok: 5 cases`.
+- Board gates: see below (Task 3).
