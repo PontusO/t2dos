@@ -44,6 +44,9 @@ int cret(int n) {                        // early return: trimframe copies the p
   if (n > 0) return 7;
   return ext(n);
 }
+int csys(char *p, int n) {               // a real syscall (the read builtin): the kernel
+  return read(0, p, n);                  // switches tasks inside it, so r7 must stay put
+}
 int main() {
   int a; int b; int c; int d; float e;
   a = csc(4); b = cleaf(5); c = cmixed(3); d = clocals(6); e = cfloat(1.5);

@@ -1201,7 +1201,11 @@ int sprel_ok() { return spconv; }          // frameless() may allow >1 exit. Sti
 // the lea subw/addw forms end in ", r7, #N]" with no bracket and answer -1 here.
 int split(int i) {
   char *t; char *u; int v; int neg; int o;
-  t = lpool + ltext[i];
+  if (lkind[i] != L_INS) return -2;           // a label/branch/deleted line is never a slot
+  t = lpool + ltext[i];                       // read: -2, so callers tell it from -1 ("a real
+                                              // instruction that is not one"), which the
+                                              // sprewrite walk relies on to skip screened
+                                              // non-slot lines without spinning on them
   if (!strncmp(t, "subw", 4) || !strncmp(t, "addw", 4) || !strncmp(t, "vstr", 4)) return -1;
   u = t;                                        // find ", [r7, #" or (rewritten) ", [sp, #":
   o = 2;                                        // the wide forms put a letter after the comma:
@@ -1265,20 +1269,23 @@ int sprel(int fa, int sz) {
                                                       // moved every local to [r7, #N] with
                                                       // N >= 0 by now)
                                                       // a parameter read promote shifted OUT
-        if (nparams && !spshift()                     // incoming arg at [r7, #k] sits at
-            && k >= 8 && k <= 7 + 4 * nparams)        // [sp, #k+4] once frameless drops r7,
-            return 0;                                 // but a LOCAL is [sp, #k-sz+sz]: one
-                                                      // mapping cannot name both, so A1 bails
-                                                      // whenever a parameter slot is read and
-                                                      // the line's offset is in the incoming
-                                                      // argument band (a stale symbol value can
-                                                      // put an r7 use there without nparams)
         if (nparams && spshift()                      // a parameter read promote shifted OUT
             && k > 7 + 4 * nparams                    // of its incoming place reads a grown
             && k - spshift() >= 8                     // save-list word now (#8 became #12 with
             && k - spshift() <= 4 + 4 * nparams)      // one promoted register): converting it
             return 0;                                 // would name the wrong word once
                                                       // frameless shrinks that list again.
+        if (k >= 8 && k <= 7 + 4 * nparams)           // a read of an incoming argument slot:
+          return 0;                                   // A1 bails whenever one is READ, promoted
+                                                      // or not. Dropping r7 from the push shifts
+                                                      // every incoming word by one and what
+                                                      // remains depends on how much promote
+                                                      // grew the list; with nothing promoted,
+                                                      // an fp-free a1() next to framed(n) is
+                                                      // exactly the old crash witness: the read
+                                                      // at [sp,#8] sees the pushed lr. A read
+                                                      // in this band with nparams == 0 is a
+                                                      // stale symbol's r7 use: bail too.
         k = k + sz;                                   // Task 3 adds the line's spill depth
         if (k < 0 || k > 1020) return 0;              // out of ldr/str/vldr's immediate window
         nconv = nconv + 1;
@@ -1303,9 +1310,10 @@ int sprel(int fa, int sz) {
   }
   if (!nconv) return 0;                               // no slot reads: frameless already fires
   i = fa + 3;                                         // (the screen above counted the same
-  while (i <= e) {                                    // lines: rewrite exactly those)
-    if (lkind[i] == L_INS && r7ref(i) == 1) sprewrite(i, split(i) + sz);
-    i = nx(i);
+  while (i <= e) {                                    // lines: rewrite exactly those; split
+    if (r7ref(i) == 1 && split(i) >= -1)              // answers -2 for a non-instruction, so
+      sprewrite(i, split(i) + sz);                    // this walks every line and rewrites the
+    i = nx(i);                                        // slot reads the screen accepted
   }
   spconv = 1;
   return 0;
@@ -1467,8 +1475,13 @@ int frameless(int fa, int sz) {
   while (e >= 0 && lkind[e] == L_DEL) e = e - 1;   // live line, a pop of pc, or no rewrite
   if (e < 0 || !fl_pc_end(e)) return 0;
   i = nx(fa - 3);                           // an earlier pop of pc is trimframe's copied
-  while (i < e) {                           // return: more than one exit keeps the frame
-    if (fl_pc_end(i)) return 0;             // (the copy happens after this pass)
+  while (i < e) {                           // return: more than one exit keeps the frame,
+    if (fl_pc_end(i) && !sprel_ok())        // unless sprel converted the function: then
+      return 0;                             // every exit sits at reservation depth (A1: no
+                                            // body sp moves) and the rewrite deleted the
+                                            // mov sp, r7 that made an early pop correct -
+                                            // each inline pop unwinds exactly what entry
+                                            // pushed. (the copy happens after this pass)
     i = nx(i);
   }
   i = fa - 3;                               // the decisive range: from the entry push to

@@ -44,7 +44,7 @@ def main():
     subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog.s'), SRC],
                    check=True, cwd=ROOT)
     f = funcs(open(os.path.join(WORK, 'prolog.s')).read())
-    for name in ('csc', 'cleaf', 'cmixed', 'rec', 'clocals', 'cfloat', 'cret', 'main'):
+    for name in ('csc', 'cleaf', 'cmixed', 'rec', 'clocals', 'cfloat', 'cret', 'csys', 'main'):
         if name not in f: fail('no function %s in prolog.s' % name)
 
     # calllive(): a promoted register must stay saved when its value is live across a call.
@@ -88,6 +88,15 @@ def main():
     cb = f.get('cfloat', [])
     if 'mov\tr7, sp' not in cb or 'mov\tsp, r7' not in cb or cb[:1] != ['push\t{r7, lr}']:
         fail('cfloat lost its frame pointer: %r' % cb[:2])
+    # csys: the syscall builtin's shape. The kernel switches tasks inside sys_read/sys_write,
+    # so r7 must keep pointing at this task's frame across the call: a converted fp-free body
+    # would leave task_switch() restoring a stale pointer. sprel bails on any incoming-slot
+    # read (A1), and the syscall sequence itself moves sp (push {r0} / add sp, #4), which the
+    # screen bails on too. Pin: entry push keeps r7, bookkeeping stays, pop keeps r7.
+    cs = f.get('csys', [])
+    if cs[:1] != ['push\t{r7, lr}']: fail('csys lost its frame pointer: %r' % cs[:1])
+    if 'mov\tr7, sp' not in cs or not any(l == 'pop\t{r7, pc}' for l in cs):
+        fail('csys entry/exit bookkeeping: %r' % cs)
 
     # behavior: cc build (with the stub object) must print what native gcc prints
     subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],

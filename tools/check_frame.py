@@ -42,11 +42,12 @@ def main():
     for name, body in (('leaf', leaf), ('noret', noret)):
         if 'mov\tr7, sp' in body or 'mov\tsp, r7' in body: fail('%s keeps the frame pointer: %r' % (name, body))
         if body[:1] != ['push\t{lr}']: fail('%s is not the minimal frameless entry: %r' % (name, body[:1]))
-    # framed: the crash witness of the frameless ruling. It reads its parameter with
-    # [r7, #off], so its frame stays even though a frameless leaf shares the stack:
-    # push {lr} there would shift every incoming word by one and the read would see lr.
+    # framed: the crash witness of the frameless ruling, now sprel()'s bail witness. It
+    # reads its parameter with [r7, #off]; converting that read would shift it by a word
+    # once r7 leaves the push list (a frameless leaf next to it then lands under the
+    # pushed lr), so sprel bails on any incoming-slot read and the frame stays.
     fb = f['framed']
-    if fb[:1] != ['push\t{r7, lr}']: fail('framed lost its frame: %r' % fb[:1])
+    if fb[:1] != ['push\t{r7, lr}']: fail('framed converted its parameter read: %r' % fb[:1])
     if 'mov\tr7, sp' not in fb or not any(l == 'pop\t{r7, pc}' for l in fb):
         fail('framed entry/exit bookkeeping: %r' % fb)
         if any(l.startswith('movt\tr1, #0') for l in body[:4]) or 'sub.w\tsp, sp, r1' in body:
