@@ -1,7 +1,8 @@
 # cc -O: sp-relative frame slots (fp-free functions with locals)
 
-Date: 2026-11-21. Status: implemented on branch cc-prologue (Tasks 1-4,
-plus the depth-walk extension below); board `--selfhost` pending. Follows
+Date: 2026-11-21. Status: implemented on branch cc-prologue, board
+gates green (selfhost byte-identical, bench and basic --board pass).
+Follows
 `2026-11-20-cc-prologue-opt-design.md` (branch cc-prologue); this spec removes
 the restriction its Rulings left in place: "any `[r7, #off]` read keeps the
 frame".
@@ -211,5 +212,15 @@ Gates at implementation: check_ref different: 0; make check green;
 bench 11/11 equal to gcc; check_frame/check_prolog ok (pins updated to
 the converted shapes, mixed-chain witness cmix->stublea added);
 check_basic 139 + asan clean; full tree `make OPT=-O` + check_sh 5/5.
-Board `check_toolchain.py --selfhost` and `check_sh --board` are the
-merge-time steps (need the board).
+
+Board (merge gates, run 2026-11-20): `check_toolchain.py --selfhost`
+IDENTICAL - the board's cc rebuilds cc/as/ld/ar/nm/objdump byte-for-byte
+equal to the PC builds and its own cc2.bin builds test4..12 correctly;
+`bench.py --board` 11/11 output equal to gcc on hardware, real-hardware
+speedups: total 7281ms -> 3564ms (2.04x), fib 447 -> 240ms (1.86x),
+mandel 3.05x, loop 2.60x; `check_basic.py --board` 139 cases (the
+converted interpreter binary on hardware). `check_sh.py` has no --board
+mode (the plan assumed one); shell coverage stays the PC suite. The
+first check_basic --board run hit a latent board.py bug: the put of the
+0-byte immediate*.bas cases raced (receiving and ok arrive in one
+flush) - fixed, see the board.py commit.
