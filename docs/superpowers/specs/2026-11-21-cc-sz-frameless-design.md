@@ -126,6 +126,13 @@ bugs it exposed rather than about the gates.
   body now converts, so the mixed-chain witness's framed half is held by
   the `vstr`/`vldr` slot instead.
 
+Superseded by 3c (`2026-11-21-cc-lea-design.md`): the lea forms and the
+negative-offset own-frame slot reads this list blamed for `small`, `big`,
+`bigprom`, `amem` and `rec` convert since 3c (and `stublea` with them,
+the mixed chain's framed half moving to `csys`); what still keeps a
+frame is the argv window, `vpush`-bracketed float state (`cfloat`,
+`fpint`, `fmany`), `sz > 4095` and un-windowed shapes.
+
 Corpus census, functions still keeping `mov r7, sp` under `-O`
 (this round: before -> after): crc 2->1, matmul 2->1, sieve 2->1,
 strings 4->2, sh.c 43->41; the rest unchanged, and their remaining

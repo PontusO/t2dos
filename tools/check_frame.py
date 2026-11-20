@@ -123,6 +123,11 @@ def main():
     for l in am[3:]:
         if re.search(r'\[r(4|5|6|10|11|12)[,\]]', l):
             fail('amem reads the frame through a promoted register: %r' % l)
+    # fpint: float local whose slot survives peep; the s register is saved by vpush {s16},
+    # and vpush moves sp by 8 - sprel must not run (same reason cfloat keeps its frame).
+    fp = f['fpint']
+    if not any(l.startswith('vpush\t{') for l in fp) or 'mov\tr7, sp' not in fp:
+        fail('fpint no longer keeps its frame via vpush: %r' % fp[:4])
     subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'frame.bin'), SRC], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/frame.bin'], capture_output=True, cwd=ROOT, timeout=30).stdout
     if out != b'1 18 7 5 3 11 14 0 94 29 18 7\n': fail('frame.bin printed %r' % out)

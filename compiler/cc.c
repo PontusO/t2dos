@@ -1292,7 +1292,7 @@ int leaform(int i) {
 // (k = +N). A lea line computes a WORD ADDRESS, and a word's address never moves:
 // pushes grow DOWNWARD from sp, so everything inside the reservation - and the
 // caller's band above r7 - sits at a fixed address until the exit drains. So the
-// line maps exactly like a literal read of the same word: o = k + sz + d - 4 at
+// line maps exactly like a literal read of the same word: o = spmap(k, sz, d) at
 // the line's own live depth d. 1 with *o the offset when the line is one and o
 // lands in the window; 0 for the other -1 forms (vstr, bare-register r7) and for
 // an out-of-window lea - all three keep the frame.
@@ -1504,8 +1504,9 @@ int sprel(int fa, int sz) {
   e = nlines - 1;
   while (e >= 0 && lkind[e] == L_DEL) e = e - 1;       // the last live line (the pop of pc)
   spholdcvt = 0;                              // band aliasing is a non-issue in the
-                                                    // uniform model: every literal maps
-                                                    // k + sz + d - 4, at any spshift
+                                                    // spmap model: every literal maps at
+                                                    // its line's depth (band by k+sz+d-4,
+                                                    // own-frame words by k+sz+d)
   i = fa + 3; nconv = 0; d = 0; ps = 0; na = 0;    // d: spill depth, words below the frame
                                                    // reservation (Task 3). The trio at
                                                    // fa..fa+2 is fl_frame's and trimframe's
@@ -1524,10 +1525,11 @@ int sprel(int fa, int sz) {
         && r7ref(i) == 1 && split(i) >= 0) {         // after the trio and read the GROWN
         k = spmap(split(i), sz, d);                  // incoming band. frameless drops ONE
         if (k < 0 || k > 1020) return 0;             // word - r7's - from the entry list, so
-        nconv = nconv + 1; spholdcvt = 1;            // every r7-relative literal becomes
-        i = nx(i); continue;                         // k + sz + d - 4 below sp, params and
-      }                                              // locals alike (the acceptance scan
-                                                     // below proves the frame actually goes)
+        nconv = nconv + 1; spholdcvt = 1;            // a band word (split >= 0 here) lands
+        i = nx(i); continue;                         // k + sz + d - 4 below sp; own-frame
+      }                                              // slots keep their offset (spmap; the
+                                                     // acceptance scan below proves the
+                                                     // frame actually goes)
       opinfo(i); isbl = opkind == 1;                 // a bl stores the call result to a slot
       if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7")) { i = nx(i); continue; }
                                                       // an entry push that saves r7 lists it
@@ -1544,23 +1546,24 @@ int sprel(int fa, int sz) {
       if (r7ref(i) == 1) {                            // the values right after their calls
         if (k == -1) {                                // the -1 forms: lea subw/addw convert
           if (!leaoff(i, sz, d, &o)) return 0;        // (leaoff/leawrite: a word's ADDRESS
-            nconv = nconv + 1;                        // maps through the same k+sz+d-4 as a
+            nconv = nconv + 1;                        // maps through the same spmap as a
             i = nx(i); continue;                      // read of the word, at this line's
           }                                           // depth, and the line moves nothing);
                                                       // vstr and bare-register r7 still bail.
-                                                      // split parses the
-                                                      // rest: a literal slot may sit below r7,
-                                                      // an unpromoted local at [r7, #-N]: the
-                                                      // window check below maps it through
-                                                      // k + sz + d - 4 like any other slot).
-                                                      // Every literal maps the SAME way once
-                                                      // the frame goes: the entry list loses
-                                                      // exactly r7's word, so [r7, #k] at
-                                                      // live depth d reads [sp, #k+sz+d-4] -
-                                                      // caller's band and own frame alike,
-                                                      // at any spshift (any number of parked
-                                                      // registers shifts band and frame by
-                                                      // the same words frameless drops).
+                                                      // split parses the rest: a literal
+                                                      // slot may sit below r7, an unpromoted
+                                                      // local at [r7, #-N], and spmap maps
+                                                      // it like any other word. The mapping
+                                                      // is uniform with ONE split: dropping
+                                                      // r7's word from the entry list shifts
+                                                      // the CALLER's band down by one, so
+                                                      // [r7, #k], k >= 0, reads [sp, #k+sz+d-4];
+                                                      // our own words sit in the reservation
+                                                      // that hangs off the moved sp, so
+                                                      // [r7, #k], k < 0, reads [sp, #k+sz+d],
+                                                      // at any spshift (parked registers
+                                                      // shift band and frame alike, the walk
+                                                      // counts the same words sprel drained).
         k = spmap(k, sz, d);                          // Task 3: the line's live spill depth
         if (k < 0 || k > 1020) return 0;              // out of ldr/str/vldr's immediate window
         nconv = nconv + 1;

@@ -32,18 +32,23 @@ as the cheap invariant guard it is; 3c is the lea arm alone.
 
 ## Key invariant (why lea needs no liveness analysis)
 
-A converted literal maps `[r7, #k] -> [sp, #k+sz+d-4]` at the read
-line's live depth d. A lea line materialises the SAME word's
-ADDRESS, so the identical formula gives the sp-relative constant:
-`subw rD, r7, #N` (word k = -N) becomes `addw rD, sp, #o` with
-`o = -N+sz+d-4` (or `subw rD, sp, #-o` when o < 0); `addw` enters
-with k = +N. That is it - no constraint on how long `rD` lives.
-`rD` holds an absolute address and the word's absolute address does
-not move during the function: pushes grow DOWNWARD from sp, so
-everything inside the reservation (and the caller's band) sits at a
-fixed address until the exit drains. The earlier worry (an address
-register read after sp moves) does not exist; the screen already
-knows d at every line.
+A converted literal maps `[r7, #k] -> [sp, #o]` at the read line's
+live depth d, where `o = spmap(k, sz, d) = k + sz + d - (k >= 0 ? 4 :
+0)`: dropping r7's word from the entry list shifts the CALLER's band
+(k >= 0) down by one, but our own-frame slots (k < 0) live inside the
+reservation, which hangs off the moved sp and keeps the offset it had
+framed. (The first draft of this spec claimed one uniform `-4` for
+both; the `bigprom` witness caught it: a local slot parked 4 low let
+`b[599]` store over the saved lr.) A lea line materialises the SAME
+word's ADDRESS, so the identical formula gives the sp-relative
+constant: `subw rD, r7, #N` (word k = -N) becomes `addw rD, sp, #o`
+with `o = spmap(-N, sz, d)`; `addw` enters with k = +N. That is it -
+no constraint on how long `rD` lives. `rD` holds an absolute address
+and the word's absolute address does not move during the function:
+pushes grow DOWNWARD from sp, so everything inside the reservation
+(and the caller's band) sits at a fixed address until the exit drains.
+The earlier worry (an address register read after sp moves) does not
+exist; the screen already knows d at every line.
 
 Encodings: `as` already assembles `addw/subw rD, sp, #N` - verified
 bit-identical to GNU `arm-none-eabi-as` (`f20d000c` etc.), including
@@ -113,8 +118,42 @@ codegen before running it on the board.
 - census: remaining framed functions carry only the non-goal reasons;
   bench and sh.bin sizes recorded; all gates green.
 
+## Results (as built, commit ce44426)
+
+- Formula as built: `spmap(k, sz, d) = k + sz + d - (k >= 0 ? 4 : 0)`,
+  applied at every mapping site (prescan window, hold window,
+  conversion walk, `leaoff`). The lea arm lives in `leaoff` (test +
+  window), `leawrite` (rewrite), `leaform` (fl_r7 excuse on shape) and
+  `leasp` (fl_frame excuse for the rewritten `addw rD, sp, #o`, which
+  opinfo flags via its SOURCE operand sp although nothing moves).
+  `fl_r7`'s converted-line excuse widened from `split(i) >= 0` to
+  `split(i) != -1`: own-frame slot reads carry negative offsets and
+  3b-iii never reached that path (every negative reader also had leas
+  and kept its frame).
+- Census (`mov r7, sp` lines in -O output, 3b-iii `2eba3af` -> 3c):
+  sh.c 43 -> 33, bench total 18 -> 10 (crc/interp/matmul/sieve/sort -1
+  each, strings -3), get.c 17 -> 17. Every survivor carries the argv
+  window class (the builtin `push {r4}` window and its `mov r2, sp`
+  friends; all 33 sh survivors and all 17 get survivors show it), so
+  the lea-only scope is complete: no framed function is lea-blocked
+  anymore.
+- Witness flips: `small`, `big`, `bigprom`, `amem` (frame.c) and `rec`,
+  `stublea` (prolog) convert; run pins unchanged (frame.bin prints the
+  same numbers, prolog.bin `check 9 16 3 8 6 16 19`). `rec`'s
+  previously pinned "pending result save" reason was really the
+  negative-slot bug: its `str r0, [sp, #4]` sits at drained depth and
+  traces clean. `fpint` keeps its frame (float slot survives). The
+  mixed-chain witness moved its framed half: `cmix` now also calls
+  framed `csys` (`read(0, b, 0)` adds 0), keeping a converted caller ->
+  framed callee on the run; `stublea` stays as the cross-object
+  converted callee.
+- Sizes: sh.bin -O 71791 -> 71621 (-170 B); bench -O total 93764 ->
+  93678 (-86 B). (Board totals follow in the board section below.)
+- Fixed point: whole-tree `make OPT=-O` then `make` both rebuild and
+  pass `check_sh --pc` (5 cases). PC gate at commit: `check_ref`
+  different: 0, `make check` ok, bench --pc 11/11, basic 139, sh 5.
+
 ## Left to the builder
 
-- Whether the lea arm parses inline or via a small helper next to
-  `sprewrite` (which already skips the `r7, #` prefix).
-- Pin wording, census table, sprel/3b-iii spec superseding bullets.
+- Board gates (`check_toolchain --selfhost`, `bench --board`,
+  `check_basic --board`): recorded here when run.
