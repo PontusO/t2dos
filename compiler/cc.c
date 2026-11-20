@@ -1147,6 +1147,7 @@ char *regnm(int k) {
 int ispro(int r) { return r == 4 || r == 5 || r == 6 || r == 10 || r == 11; }
 // line i's use of r7: 0 none (or the prologue and epilogue), 1 "..r7, #off.." (rfoff, rfplain),
 // 2 a use promote() does not know
+int fl_pc_end(int i);                     // defined below frameless(): line i pops pc
 int r7ref(int i) {
   char *t; char *u; int v; int neg;
   if (lkind[i] != L_INS) return 0;
@@ -1157,6 +1158,8 @@ int r7ref(int i) {
   }
   if (!*u) return 0;
   if (!strcmp(t, "push\t{r7, lr}") || !strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7") || !strcmp(t, "pop\t{r7, pc}")) return 0;
+  if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7")) return 0;   // promote's grown entry
+  if (fl_pc_end(i)) return 0;                         // push {r4, r7, lr} and exit pop too
   if (strncmp(u, "r7, #", 5)) return 2;
   u = u + 5; neg = 0;
   if (*u == '-') { neg = 1; u = u + 1; }
@@ -1247,19 +1250,167 @@ int sprewrite(int i, int new) {
 // nfpro s registers. sprel() uses this to tell an un-promoted parameter read at its
 // incoming offset (8..7+4n) from one promote shifted out of it (r7shift: rfoff + sh).
 int spshift() { int k; if (!npro && !nfpro) return 0; k = npro < 3 ? npro : 3; return 4 * (k + nfpro); }
+int inregs(char *t, char *nm);              // defined below frameless(): "r7" among the
+                                           // registers of a push/pop list, whole words only
+// line i moves sp by this much (Task 3's depth walk): a push of exactly one core
+// register +4, a pop of exactly one core register -4, add sp, #N -N. A pop or push
+// list with pc in it is not a spill (the exit pops frameless rewrites separately).
+// 0 means the line is none of these shapes; the caller's opinfo test still catches
+// every other sp mover. The list parse skips any s-register group: vpush/vpop spell
+// sNN, so they never match a one-core-register shape and stay bailed by opinfo.
+int spd(int i) {
+  char *t; char *u; int n; int sh;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (!strncmp(t, "push\t{", 6) || !strncmp(t, "pop\t{", 5)) {
+    u = t + (strncmp(t, "push", 4) ? 5 : 6);          // past the brace: "push\t{" is 6 chars,
+                                                      // "pop\t{" is 5
+    if (inregs(u, "pc")) return 0;                    // the exit pop: fl_pc_end's business
+    sh = strncmp(t, "push", 4) ? -4 : 4;
+    n = 0;
+    while (*u) {                                      // count the core registers in the list:
+      if (u[0] == 'r' && u[1] >= '0' && u[1] <= '9') { // a push of r7 saves no word frameless
+        if (u[1] == '7') sh = 0;                      // will not save anyway; a pop of r7
+        n = n + 1; u = u + 2;                         // unbalances the converted lists by one,
+      }                                               // so it counts as the -4 it really is
+      else if (u[0] == 's' && u[1] >= '0' && u[1] <= '9') { n = n + 1; u = u + 2; }
+      else u = u + 1;
+    }
+    return n == 1 ? sh : 0;
+  }
+  if (!strncmp(t, "add\tsp, #", 9)) { n = pnum(i, "add\tsp, #"); return n < 0 ? 0 : -n; }
+  return 0;
+}
+// a direct or indirect call (blx r8 is cc's syscall trampoline call: it takes no pushed
+// args, the screen excuses it). A tail jump to a builtin ends the body.
+int fl_bl(int i) {
+  char *t;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  return !strncmp(t, "bl\t", 3) || (!strncmp(t, "blx\t", 4) && strcmp(t, "blx\tr8"))
+    || (!strncmp(t, "b\t", 2) && strcmp(t, "b\tw"));
+}
+// lines that put a value where a push of r0-r3 can read it: cc builds args from these
+int fl_argsetup(char *t) {
+  return !strncmp(t, "mov\tr", 4) || !strncmp(t, "movw\tr", 5)   // of r0-r3 can read it: cc
+    || !strncmp(t, "movt\tr", 5) || !strncmp(t, "muls\tr", 5)    // builds args from mov/movw/
+    || !strncmp(t, "adds\tr", 5) || !strncmp(t, "subs\tr", 5)    // movt/mul/add/sub of r0-r3
+    || !strncmp(t, "ldr\tr", 4) || !strncmp(t, "ldr\ts", 4)     // (loads included: an arg may
+    || !strncmp(t, "vmov\ts", 5) || !strncmp(t, "vcvt", 4);      // be loaded on the way)
+}
+// line i is a call's result save: push {r0} right after the bl (cc saves r0 exactly this
+// way when a call's value must live across more code, and r0 is dead at every bl) or right
+// after that call's add sp, #N. The word it pushes sits below every later push until its
+// own add or pop claims it: the depth walk counts it. A push feeding a bl is never one:
+// that is an arg push (fl_argpush), and a save always stands at the top of its own window.
+int fl_resultsave(int i) {
+  int j; char *t;
+  if (lkind[i] != L_INS || strncmp(lpool + ltext[i], "push\t{r0}", 10)) return 0;
+  j = nx(i);                                          // a push {r0} feeding a call right
+  while (j < nlines && lkind[j] == L_INS              // below, or any arg setups that lead to
+    && fl_argsetup(lpool + ltext[j])                  // one, is that call's ARG push: its word
+    && strncmp(lpool + ltext[j], "push\t{", 6))       // sits ON sp during the call and its add
+    j = nx(j);                                        // pops it again, never read back as a
+  if (j < nlines && lkind[j] == L_INS                 // saved result (this holds whether the
+    && fl_bl(j))                                      // previous line is the bl or its
+    return 0;                                         // post-call add)
+  j = pv(i);                                          // a save stands right after the bl or
+  if (j < 0 || lkind[j] != L_INS) return 0;           // its post-call add sp, #N
+  t = lpool + ltext[j];
+  if (!strncmp(t, "add\tsp, #", 9)) return 1;         // right after the post-call add: that
+  if (strncmp(t, "bl\t", 3) && strncmp(t, "blx\tr8", 6)) return 0;   // call's result save
+  j = nx(i);                                          // a str r0, [r7, #-N] right after the
+  while (j < nlines && lkind[j] == L_INS              // push stores the answer in a slot
+    && !strncmp(lpool + ltext[j], "str", 3))          // instead: r0 dies there and this push
+    j = nx(j);                                        // feeds no call (fl_bl's walk above):
+  if (j != nx(i) || split(j) < 0) return 0;           // dead code peep deletes. Either way it
+  return 1;                                           // is no save: the str reads r0, not sp
+}
+// the str r0, [r7, #-N] that stands for a call result save fl_resultsave would otherwise
+// claim at a push. Right below a bare bl it is the save when nothing sits between: the
+// str's own slot read sees the result word still on sp, so the walk counts +4 HERE and
+// r0 dies at the store. After an add sp, #N stand-in it is the save unless the str's
+// value flows into a call (then the push below is fl_resultsave's).
+int strsave(int i) {
+  int j; char *t;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (strncmp(t, "str", 3)) return 0;
+  j = pv(i);
+  if (j < 0 || lkind[j] != L_INS) return 0;
+  t = lpool + ltext[j];
+  if (!strncmp(t, "add\tsp, #", 9)) {
+    j = nx(i);                                        // the add stand-in: a push below that
+    if (j < nlines && lkind[j] == L_INS               // feeds a call is fl_resultsave's save;
+      && !strncmp(lpool + ltext[j], "push\t{", 6)     // once peep's dead-push shape leaves it
+      && fl_bl(nx(j)))                                // feeding nothing, the str stands for
+      return 0;                                       // the save HERE instead (its dead push
+    return 1; }                                       // below shifts sp right away: net zero)
+  if (strncmp(t, "bl\t", 3)                       // After a bare bl the str must sit right
+    && strncmp(t, "blx\tr8", 6)) return 0;        // below it: a push {r0} in between is
+  return nx(j) == i;                              // fl_resultsave's save (or an arg push)
+}
+// line i is a call's argument push (cc pushes each arg as a value setup into r0-r3 and a
+// push {rX}): transparent to the depth walk, because a call sits ON these words and pops
+// them again before the function's exits (the fib shape: push {r0}; bl; add sp, #4). The
+// test walks forward over the run of value setups until it finds either the push (then
+// every setup line in the run is an arg push too) or a line that cannot be a setup.
+int fl_argpush(int i) {
+  int j; char *t;
+  if (lkind[i] != L_INS) return 0;
+  t = lpool + ltext[i];
+  if (fl_resultsave(i)) return 0;                   // a result save is not an arg push: the
+                                                    // test runs first, so a push {r0} whose
+                                                    // prev line is a bl or an add sp belongs
+                                                    // to the PREVIOUS call, not this one
+  if (!strncmp(t, "push\t{", 6)) {                 // the push itself: an arg push when it
+    if (inregs(t + 6, "r7") || inregs(t + 6, "lr")) // saves a value, not r7 or lr. A push
+      return 0;                                     // {r0} feeding the bl right below is
+    return 1;                                       // that call's FIRST arg (cc emits it with
+  }                                                 // no setup line)
+  if (!fl_argsetup(t)) return 0;                    // a setup line: an arg push when the run
+  j = nx(i);                                        // of setups it leads ends in a push
+  while (j < nlines && lkind[j] == L_INS && fl_argsetup(lpool + ltext[j])) j = nx(j);
+  return j < nlines && lkind[j] == L_INS && !strncmp(lpool + ltext[j], "push\t{", 6);
+}
 int sprel(int fa, int sz) {
-  int i; int e; int nconv; int k; char *t;
+  int i; int e; int j; int k; int d; int mv; int ps; int na; int isbl; int nconv; char *t;
   spconv = 0;
   if (!isins(fa - 1, "mov\tr7, sp")) return 0;        // the prologue as flush() emits it
   if (pnum(fa, "movw\tr1, #") < 0 || pnum(fa + 1, "movt\tr1, #") < 0
     || !isins(fa + 2, "sub.w\tsp, sp, r1")) return 0;   // the reservation trio (sz may be 0)
   e = nlines - 1;
   while (e >= 0 && lkind[e] == L_DEL) e = e - 1;       // the last live line (the pop of pc)
-  i = fa + 3; nconv = 0;                          // the trio at fa..fa+2 is fl_frame's and
-                                                  // trimframe's own work: always allowed
+  i = fa + 3; nconv = 0; d = 0; ps = 0; na = 0;    // d: spill depth, words below the frame
+                                                   // reservation (Task 3). The trio at
+                                                   // fa..fa+2 is fl_frame's and trimframe's
+                                                   // own work: always allowed
+  opinfo(fa + 3);                                    // the line right after the trio sits
+  if (opmask & 8192 || oprd == 13) return 0;         // OUTSIDE the walk below: an unknown sp
+                                                     // move there would slip past both walks
+                                                     // and leave d wrong at entry
   while (i <= e) {
     if (lkind[i] == L_INS && i != fa - 3) {
       t = lpool + ltext[i];
+      if (i >= fa && i <= fa + 2) { i = nx(i); continue; }   // the reservation trio: not body
+      if (phold >= 0 && i >= phold && i < phold + 21         // promote's hold loads sit right
+        && !strncmp(t, "ldr\t", 4)) {                // after the trio and read the GROWN
+        if (!(npro <= 1 && !nfpro))                  // incoming band [r7, #k+sh]: only npro
+          return 0;                                  // <= 1 parked core registers with no
+      }                                              // float parks cancel r7's word there;
+                                                     // otherwise the band has no single sp
+                                                     // mapping and the frame must stay
+      opinfo(i); isbl = opkind == 1;                 // a bl stores the call result to a slot
+      if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7")) { i = nx(i); continue; }
+                                                      // an entry push that saves r7 lists it
+                                                      // as a register, not a slot (promote
+                                                      // grows the list: r7ref's exact-text
+                                                      // exemption missed {r4, r7, lr} and its
+                                                      // answer 2 bailed every such function)
+      if (fl_pc_end(i) && inregs(t + 5, "r7"))        // an exit pop that restores r7: the
+        { i = nx(i); continue; }                      // line frameless' own rewrite strips
+                                                      // (a bare pop {r7} mid-body still reads
+                                                      // the frame: r7ref answers 2, bail)
       if (r7ref(i) == 2) return 0;                    // unknown r7 form
       k = split(i);                                   // split/r7ref parse this line only: read
       if (r7ref(i) == 1) {                            // the values right after their calls
@@ -1268,52 +1419,162 @@ int sprel(int fa, int sz) {
                                                       // never below -8: promote's r7shift has
                                                       // moved every local to [r7, #N] with
                                                       // N >= 0 by now)
-                                                      // a parameter read promote shifted OUT
-        if (nparams && spshift()                      // a parameter read promote shifted OUT
-            && k > 7 + 4 * nparams                    // of its incoming place reads a grown
-            && k - spshift() >= 8                     // save-list word now (#8 became #12 with
-            && k - spshift() <= 4 + 4 * nparams)      // one promoted register): converting it
-            return 0;                                 // would name the wrong word once
-                                                      // frameless shrinks that list again.
-        if (k >= 8 && k <= 7 + 4 * nparams)           // a read of an incoming argument slot:
-          return 0;                                   // A1 bails whenever one is READ, promoted
-                                                      // or not. Dropping r7 from the push shifts
-                                                      // every incoming word by one and what
-                                                      // remains depends on how much promote
-                                                      // grew the list; with nothing promoted,
-                                                      // an fp-free a1() next to framed(n) is
-                                                      // exactly the old crash witness: the read
-                                                      // at [sp,#8] sees the pushed lr. A read
-                                                      // in this band with nparams == 0 is a
-                                                      // stale symbol's r7 use: bail too.
-        k = k + sz;                                   // Task 3 adds the line's spill depth
+                                                      // promote shifted every unpromoted
+        if (spshift() && !(npro <= 1 && !nfpro))      // parameter read OUT of the incoming
+          return 0;                                   // band ([r7, #k+sh]): with two or more
+                                                      // parked words their entry save shifts
+                                                      // the caller's band a different amount
+                                                      // than r7's word alone: no single sp
+                                                      // offset names it once frameless shrinks
+                                                      // the list, so such a function keeps its
+                                                      // frame. With npro <= 1 and no floats the
+                                                      // parked word cancels r7's: band reads
+                                                      // convert at their own literal below.
+        if (nparams) {                                // judge the line by its INCOMING
+          j = spshift() ? k - spshift() : k;          // offset: a shifted read is [r7, #k+sh]
+          if (j >= 8 && j <= 7 + 4 * nparams)         // in the text but names the word at
+            return 0;                                 // incoming offset j. A plain-band read
+        }                                             // (A1's old bail: sh == 0, or the
+                                                      // re-anchored sh == 4 case where the
+                                                      // band stays put) and a shifted one
+                                                      // alike: [r7, #j] sits at [sp, #j+4]
+                                                      // once frameless drops r7, but a LOCAL
+                                                      // is [sp, #k-sz+sz]: one mapping cannot
+                                                      // name both, so A1 bails whenever a
+                                                      // parameter slot is READ (a stale
+                                                      // symbol's r7 use with nparams 0 lands
+                                                      // here too)
+        k = k + sz + d;                               // Task 3: the line's live spill depth
         if (k < 0 || k > 1020) return 0;              // out of ldr/str/vldr's immediate window
         nconv = nconv + 1;
       }
-      else if (fl_pc_end(i)) {                        // an exit pop: fine, it ends at depth 0
-        opinfo(i);
-        if (opmask & 8192 || oprd == 13) return 0;    // and it must not move sp itself
+      else if (fl_pc_end(i)) {                        // an exit pop. With one parked core
+        if (na || ps) {                               // register (sh == 4) fl_list keeps it
+          if (spshift() != 4) return 0;               // and drops r7 from both lists: the
+          if (na) na = na - 1;                        // pop's r7 word closes the window AT
+          else { ps = 0; if (d > 0) d = d - 4; }      // this line. Any other sh: r7 stays a
+        }                                             // saved value and a window word would
+        if (ps || na || d) return 0;                  // die below the pop: bail. Either way
+        opinfo(i);                                    // the depth must be clean here, and
+        if (opmask & 8192 || oprd == 13) return 0;    // the pop must not move sp otherwise
       }
-      else {                                          // no r7: spills move sp, everything else must not
-        if (fl_excused(t)) { i = nx(i); continue; }   // mov r7, sp / mov sp, r7: our own
-                                                      // bookkeeping (they move sp by r7, which
-                                                      // opinfo flags; frameless deletes them)
-        else if (!strncmp(t, "push\t{", 6)) return 0;   // A1: any spill push bails
-        if (!strncmp(t, "pop\t{", 5)) return 0;       // a value pop (A1) or an r7 restore
-        if (!strncmp(t, "add\tsp, #", 9)) return 0;   // the post-call correction (A1)
-        opinfo(i);                                    // read the globals before any helper call
-        if (opmask & 8192 || oprd == 13) return 0;    // sp moved for another reason: vpush,
-        if (opkind == 4) return 0;                    // a syscall's mov sp, r3, a linked .s
+      else {                                          // no r7: spills move sp, everything
+        if (!strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7")) { i = nx(i); continue; }
+                                                      // our own bookkeeping: both move sp by
+                                                      // r7, which opinfo would flag; frameless
+                                                      // deletes them once the function converts
+        else if (fl_bl(i))                            // a call line: its arg pushes sat ON sp
+          { na = 0; i = nx(i); continue; }            // during the call and the callee popped
+                                                      // them all: off the transparent list,
+                                                      // pending from an earlier save stays
+                                                      // live below the window (r0 dies only
+                                                      // until its own add or pop claims it)
+        else if (strsave(i))                          // the str r0, [r7, #-N] right after a
+          { ps = 1; d = d + 4; i = nx(i); continue; } // bare bl: stands for the call result
+                                                      // save. The str's own slot read above
+                                                      // saw the save word still on sp, so the
+                                                      // depth grew at the store, not at a push
+        else if (fl_resultsave(i))                    // push {r0} right after a bl, or right
+          { ps = 1; d = d + 4; i = nx(i); continue; } // after the call's add sp, #N: the call
+                                                      // result save. Its word sits below every
+                                                      // later push until its own add or pop
+                                                      // claims it (na stays: an arg window may
+                                                      // already stand above)
+        else if (fl_argpush(i)) {                     // a call's arg pushes sat ON sp during
+          if (strncmp(t, "push\t{", 6))               // the call, and the callee pops them at
+            { na = na + 1;                            // its exit: transparent words. But when
+              if (ps) d = d + 4; }                    // a setup line leads to such a push, or
+          i = nx(i); continue;                        // the push itself stands with a save
+        }                                             // pending below it, it lifts that save
+                                                      // (the fl_resultsave test ran first: a
+                                                      // push {r0} after a bl is a save, no arg)
+        else if ((na || ps) && spd(i)) {              // inside a pending window: call 2's
+          mv = spd(i);                                // args above call 1's save; a push
+          if (mv == 4)                                // lifts the save further down, a pop
+            { d = d + 4; i = nx(i); }                 // claims the newest word: an arg word
+          else if (mv == -4)                          // closes one, or the pending save
+            { if (na) na = na - 1;                    // itself when no args are left. A pop
+              else { ps = 0; if (d > 0) d = d - 4; }  // of r7 counts too: frameless will have
+            }                                         // dropped its push word, so this line
+          i = nx(i); continue;                        // balances the converted lists (the
+        }                                             // exit pop's own r7 closes a window
+                                                      // still open at the end of the body)
+        else if (!strncmp(t, "add\tsp, #", 9)) {      // an add sp, #N with no pending save and
+          if (na > 0) na = na - 1;                    // no counted args: the post-call cleanup
+          else if (ps)                                // of a call whose args all sat in r0-r3
+            { ps = 0; if (d > 0) d = d - 4; }         // was transparent. With a save pending
+          i = nx(i); continue;                        // below, it claims one word of the
+        }                                             // callee's arg words from below sp:
+        else mv = spd(i);                             // depth shrinks, newest first (the
+                                                      // counted cases ran above)
+        if (mv) d = d + mv;                           // a plain spill push/pop shifts sp for
+        opinfo(i);                                    // later reads. Anything else that moves
+        if (opmask & 8192 || oprd == 13) return 0;    // sp - vpush, a syscall's mov sp, r3, a
+        if (opkind == 4) return 0;                    // linked .s - the frameless screen bails
       }
     }
     i = nx(i);
   }
   if (!nconv) return 0;                               // no slot reads: frameless already fires
-  i = fa + 3;                                         // (the screen above counted the same
-  while (i <= e) {                                    // lines: rewrite exactly those; split
-    if (r7ref(i) == 1 && split(i) >= -1)              // answers -2 for a non-instruction, so
-      sprewrite(i, split(i) + sz);                    // this walks every line and rewrites the
-    i = nx(i);                                        // slot reads the screen accepted
+  if (d) return 0;                                    // the body must end at reservation depth
+  i = fa + 3; d = 0; ps = 0; na = 0;                  // the rewrite walk repeats the screen's
+  while (i <= e) {                                    // rules in the same order, so every
+    if (lkind[i] == L_INS && i != fa - 3) {           // read lands on its OWN live depth
+      if (i >= fa && i <= fa + 2) { i = nx(i); continue; }   // the reservation trio (see above)
+      if (phold >= 0 && i >= phold && i < phold + 21         // hold loads: the screen decided
+        && r7ref(i) == 1) {                          // (bail unless the band re-anchors).
+        sprewrite(i, split(i) - spshift()            // [r7, #k+sh] names the caller's word at
+          + 4 + sz);                                 // [sp, #k+4+sz]: sh cancels to r7's own
+        i = nx(i); continue;                         // word (npro <= 1, no floats), lr is the
+      }                                              // entry word between it and our frame
+
+      t = lpool + ltext[i];
+      opinfo(i); isbl = opkind == 1;
+      if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7")) { i = nx(i); continue; }
+      if (fl_pc_end(i) && inregs(t + 5, "r7")) { i = nx(i); continue; }   // see the screen
+      if (r7ref(i) == 1 && split(i) >= -1) {          // (r7ref answers 0 for non-instructions)
+        sprewrite(i, split(i) + sz + d);              // (the depth BEFORE this line: a slot
+                                                      // read sees the words live when it runs)
+      }
+      else if (!strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7")) { }   // bookkeeping:
+                                                      // nothing to track (the rewrite walk has
+                                                      // no opinfo screen: frameless deletes
+                                                      // both lines once the function converts)
+      else if (fl_pc_end(i)) {                        // the exit pop: same window closing
+        if (na) na = na - 1;                          // as the screen's arm (only sh == 4
+        else if (ps)                                  // ever gets here with a window open)
+          { ps = 0; if (d > 0) d = d - 4; }
+      }
+      else if (strsave(i))                            // the bare-bl result save's store:
+        { ps = 1; d = d + 4; i = nx(i); continue; }   // pending +4 below (the screen ran the
+                                                      // same arm at this line)
+      else {                                          // the screen's arms, same order:
+        if (strsave(i))
+          { ps = 1; d = d + 4; i = nx(i); continue; }
+        if (fl_resultsave(i))
+          { ps = 1; d = d + 4; i = nx(i); continue; }
+        if (fl_bl(i))
+          { na = 0; i = nx(i); continue; }
+        if (fl_argpush(i))
+          { if (strncmp(t, "push\t{", 6))
+              { na = na + 1; if (ps) d = d + 4; }
+            i = nx(i); continue; }
+        if ((na || ps) && spd(i)) { mv = spd(i);      // the window arm, same place as the
+          if (mv == 4) { d = d + 4; i = nx(i); continue; }    // screen: push lifts, pop claims
+          if (mv == -4)
+            { if (na) na = na - 1;
+              else { ps = 0; if (d > 0) d = d - 4; } }
+          i = nx(i); continue;
+        }
+        if (!strncmp(t, "add\tsp, #", 9))
+          { if (na > 0) na = na - 1;
+            else if (ps) { ps = 0; if (d > 0) d = d - 4; }
+            i = nx(i); continue; }
+        mv = spd(i);                                  // a plain spill push/pop moves sp for
+        if (mv) d = d + mv;                           // the next slot read
+      }
+    }
+    i = nx(i);
   }
   spconv = 1;
   return 0;
@@ -1370,14 +1631,20 @@ int fl_r7(int i) {                          // line i needs the frame pointer: i
   if (sprel_ok() && split(i) >= 0)          // is sp-relative already: no frame needed.
     return 0;                               // (fl_frame's opinfo test runs before this
                                             // call and excuses the same lines itself)
+  if (!strncmp(t, "push\t{", 6) && inregs(t + 6, "r7"))   // a push that saves r7 keeps the
+    return !sprel_ok();                     // frame (the entry line: fl_frame's range test
+                                            // exempts it; once sprel converted, frameless
+                                            // deletes it and rewrites the list without r7)
   k = r7ref(i);                             // FIRST: it excuses the exact entry and exit
   if (k == 0) return 0;                     // forms (push {r7, lr}, mov r7,sp, mov sp,r7,
                                             // pop {r7, pc}) as well as lines without r7.
   if (!strncmp(t, "push\t{", 6))             // A push with r7 AND registers (promote grew
     return !(!strcmp(t + 6, "r7, lr}"));    // it) is a save the frame still needs: bail.
   if (!strncmp(t, "pop\t{", 5))              // A pop of pc is an exit form (trimframe's
-    return !fl_pc_end(i);                   // copied return included): fl_list strips its
-                                            // r7 below; any other list keeps the frame
+    return !fl_pc_end(i)                    // copied return included): fl_list strips its
+      || !inregs(t + 5, "r7");              // r7 below (the grown list too: promote's
+                                            // reglist rewrote it); any other list pop
+                                            // restores a saved value and keeps the frame
                                             // Any [r7, #off] keeps the frame: once any
                                             // function in the call chain goes frameless it
                                             // saves one word less, so the caller's r7 and
@@ -1444,9 +1711,12 @@ int fl_frame(int i, int fa) {
   opinfo(i);
   if (opkind == 4) return 1;                // unknown form: it might read anything
   if (!strncmp(t, "push\t{", 6))             // a push with r7 (beyond the entry push the
-    return inregs(t + 6, "r7");             // caller exempted) saves what the frame holds
-  if (!strncmp(t, "pop\t{", 5))              // the caller exempted pops of pc; any other
-    return 1;                               // pop restores a saved r7: the frame stays
+    return inregs(t + 6, "r7");             // caller exempted) saves what the frame holds;
+  if (!strncmp(t, "pop\t{", 5))              // a value spill is balanced by its own pop - the
+    return !fl_pc_end(i) && !(sprel_ok()    // screen walk proved that - and once sprel
+      || inregs(t + 5, "r7"));              // converted, any pop without r7 unwinds only
+                                            // spilled values (frameless rewrites the exit).
+                                            // A pop WITH r7 restores the frame: it stays
   if (fl_excused(t))                         // mov r7,sp and mov sp,r7 are our own book-
     return 0;                               // keeping: deleted by the rewrite below
   opinfo(i);                                // fl_r7's helpers clobbered the globals, so
@@ -1458,7 +1728,7 @@ int fl_frame(int i, int fa) {
 int frameless(int fa, int sz) {
   int i; int e; char *t;
   if (phold < 0) return 0;                      // no prologue to strip
-  if ((npro || nfpro) && !sprel_ok()) return 0; // promote parked a value in r4-r11 or an s
+  if (npro + nfpro && !sprel_ok()) return 0; // promote parked a value in r4-r11 or an s
                                             // register: its load at phold reads OUR r7, the
                                             // stripped save list no longer protects the
                                             // register, and vpush/vpop move sp. Such a
