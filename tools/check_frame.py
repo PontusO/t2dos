@@ -42,22 +42,29 @@ def main():
     for name, body in (('leaf', leaf), ('noret', noret)):
         if 'mov\tr7, sp' in body or 'mov\tsp, r7' in body: fail('%s keeps the frame pointer: %r' % (name, body))
         if body[:1] != ['push\t{lr}']: fail('%s is not the minimal frameless entry: %r' % (name, body[:1]))
-    # framed: the crash witness of the frameless ruling, now sprel()'s bail witness. It
-    # reads its parameter with [r7, #off]; converting that read would shift it by a word
-    # once r7 leaves the push list (a frameless leaf next to it then lands under the
-    # pushed lr), so sprel bails on any incoming-slot read and the frame stays.
+    # framed: the frameless ruling's old bail witness, converted since the depth walk.
+    # The uniform mapping [r7, #k] -> [sp, #k+sz+d-4] names the same word: the frameless
+    # entry pushes exactly one word less (r7), so every literal drops by 4 - params from
+    # the caller's band and locals from our own frame alike, at any live spill depth.
     fb = f['framed']
-    if fb[:1] != ['push\t{r7, lr}']: fail('framed converted its parameter read: %r' % fb[:1])
-    if 'mov\tr7, sp' not in fb or not any(l == 'pop\t{r7, pc}' for l in fb):
+    if fb[:1] != ['push\t{lr}']: fail('framed lost its parameter read: %r' % fb[:1])
+    if 'mov\tr7, sp' in fb or not any(l == 'pop\t{pc}' for l in fb) \
+      or not any(re.match(r'ldr\tr\d+, \[sp, #4\]$', l) for l in fb):
         fail('framed entry/exit bookkeeping: %r' % fb)
-        if any(l.startswith('movt\tr1, #0') for l in body[:4]) or 'sub.w\tsp, sp, r1' in body:
-            fail('%s still reserves an empty frame: %r' % (name, body))
     if 'sub.w\tsp, sp, r1' in small or not any(re.match(r'sub\tsp, #\d+$', l) for l in small):
         fail('small does not reserve its frame with sub sp, #N: %r' % small[:8])
     if 'sub.w\tsp, sp, r1' not in big: fail('big lost its long frame reservation: %r' % big[:8])
-    if 'mov\tr7, sp' not in small or 'mov\tr7, sp' not in early: fail('a function with a frame lost r7')
+    if 'mov\tr7, sp' not in small: fail('small lost its frame pointer')
+    if 'mov\tr7, sp' in early or 'mov\tsp, r7' in early:
+        fail('early keeps the frame: %r' % early[:4])   # converted since the depth walk:
+                                                        # the second call re-reads the
+                                                        # parameter below the first call's
+                                                        # spill window at [sp, #N] (d > 0)
+    if any(re.search(r'\[r7, #', l) for l in early):
+        fail('early still reads a frame slot with r7: %r' % early)
     pops = [l for l in early if l.startswith('pop\t{') and l.endswith('pc}')]
     if len(pops) < 2: fail('early does not return on the spot (%d pops): %r' % (len(pops), early))
+    if any('r7' in l for l in pops): fail('a pop of pc keeps r7 in converted early: %r' % pops)
     # float locals and parameters live in s16-s31, saved by a vpush and restored by a vpop on
     # every exit; the shared exit ends mov sp, r7 / vpop / pop pc, and an inline pop at an
     # early return must only replace that last pop (trimframe copies nothing before the vpop)

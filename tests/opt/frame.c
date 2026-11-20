@@ -9,7 +9,9 @@ int framed(int n) { return n + 1; }                  // reads its parameter with
                                                      // drop r7 here and the read sees leaf's lr)
 int small(int n) { char buf[16]; int i; i = 0; while (i < 16) { buf[i] = n + i; i++; } return buf[15]; }   // sub sp, #N
 int big() { char b[1000]; b[999] = 7; return b[999]; }   // over 508 bytes: the long form stays
-int early(int x) { if (x < 2) return x; return early(x - 1) + 1; }   // the early return pops on the spot
+int early(int x) { if (x < 2) return x; return early(x - 1) + early(x - 2); }   // reads its
+                                                     // parameter again below the first call's
+                                                     // spill window: sprel converts it fp-free
 int noret() { g = g + 2; }                           // falls off the end
 float fpm(float a, int n, float b) {                 // floats in s registers: promoted param and locals
   float x; float y; int i;
