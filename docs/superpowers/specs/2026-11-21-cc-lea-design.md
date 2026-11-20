@@ -153,7 +153,9 @@ codegen before running it on the board.
   pass `check_sh --pc` (5 cases). PC gate at commit: `check_ref`
   different: 0, `make check` ok, bench --pc 11/11, basic 139, sh 5.
 
-## Left to the builder
-
-- Board gates (`check_toolchain --selfhost`, `bench --board`,
-  `check_basic --board`): recorded here when run.
+- Board gates (all on hardware): `check_toolchain --selfhost` ok (the
+  board cc rebuilds the six tools IDENTICAL, tests PASS);
+  `bench --board` ok, 11/11 equal to gcc, -O total 3430 ms (3b-iii:
+  3534) and 6690 B (3b-iii: 6740; -50 B, the movers matching the
+  flipped functions), speedup 2.12x overall; `check_basic --board` ok,
+  139 cases.
