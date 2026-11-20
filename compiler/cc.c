@@ -1195,6 +1195,13 @@ int r7shift(int i, int off) {               // line i with its r7 offset (rfoff,
 int spholdcvt;                           // 1 when the phold arm converted a
                                            // hold load: frameless must excuse those
                                            // lines (they read [sp, #N] by then)
+int wstart[64], wend[64], nwin;            // the argv-window spans sprel()'s prescan skipped
+                                           // (3d): fl_frame excuses every line inside one,
+                                           // so the scan's window test IS the walk's span
+                                           // instead of a second text match that can drift.
+                                           // nwin resets at sprel entry; a full table
+                                           // records nothing and the scan bails on the
+                                           // window's mov r4, sp (the frame is kept).
 int spconv;                                // 1 when sprel() made this function's slots:
 int sprel_ok() { return spconv; }          // frameless() may allow >1 exit. Sticky per
                                            // function: reset at the next prologue below.
@@ -1366,6 +1373,17 @@ int sp_syscall_save(int i) {
   }
   return 0;
 }
+// 1 when line i sits inside a window span the prescan skipped (wstart/wend): the
+// excuse fl_frame needs for every line but the window's first (sp_syscall_save
+// matches its text only there). The table is fresh whenever sprel_ok() holds:
+// sprel resets it at entry and fl_frame's two callers both run after sprel on
+// the same function.
+int in_window(int i) {
+  int t;
+  t = 0;
+  while (t < nwin) { if (i >= wstart[t] && i <= wend[t]) return 1; t = t + 1; }
+  return 0;
+}
 // line i moves sp by this much (Task 3's depth walk): a push of exactly one core
 // register +4, a pop of exactly one core register -4, add sp, #N -N. A pop or push
 // list with pc in it is not a spill (the exit pops frameless rewrites separately).
@@ -1498,6 +1516,7 @@ int fl_argpush(int i) {
 int sprel(int fa, int sz) {
   int i; int e; int j; int k; int d; int mv; int ps; int na; int isbl; int nconv; int o; char *t;
   spconv = 0;
+  nwin = 0;                                         // window spans are per-function (3d)
   if (!isins(fa - 1, "mov\tr7, sp")) return 0;        // the prologue as flush() emits it
   if (pnum(fa, "movw\tr1, #") < 0 || pnum(fa + 1, "movt\tr1, #") < 0
     || !isins(fa + 2, "sub.w\tsp, sp, r1")) return 0;   // the reservation trio (sz may be 0)
@@ -1594,6 +1613,9 @@ int sprel(int fa, int sz) {
           j = i;                                      // sp (see sp_syscall_save). Land just
           while (j < nlines                           // past the pop {r4}; the `add sp, #N`
               && strcmp(lpool + ltext[j], "pop\t{r4}")) j = nx(j);  // that pops the argv
+          if (nwin < 64)                              // record the span: fl_frame excuses
+            { wstart[nwin] = i; wend[nwin] = j;       // its lines for the acceptance scan
+              nwin = nwin + 1; }                      // and frameless' range scan (3d)
           i = nx(j);                                  // words is next and its own arm below
           continue;                                   // claims na, as for a bl's post-call
         }                                             // add (a result save peep moved after
@@ -1907,9 +1929,10 @@ int fl_frame(int i, int fa) {
     return 0;                               // (trimframe's own work: always allowed)
   opinfo(i);
   if (opkind == 4) return 1;                // unknown form: it might read anything
-  if (sprel_ok() && sp_syscall_save(i))     // a builtin's argv window converts with the
-    return 0;                               // frame: sprel's walk proved its sp moves
-                                            // cancel line for line (sp_syscall_save)
+  if (sprel_ok() && (sp_syscall_save(i) || in_window(i)))   // a builtin's argv window converts
+    return 0;                               // with the frame: the walk proved its sp
+                                            // moves cancel line for line, and every line
+                                            // the prescan skipped is in the span table
   if (sprel_ok() && spholdcvt && phold >= 0         // a converted hold load reads [sp, #N]
     && i >= phold && i < phold + 21                 // by now: it needs no frame pointer
     && r7ref(i) == 1)                               // (the walk rewrote every such line;

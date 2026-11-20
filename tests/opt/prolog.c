@@ -5,12 +5,16 @@ int g;
 int ext(int a) { return a + 1; }         // reference build links the stubs
 float cfext(float x) { return x + 0.25; }
 int stublea(int a, int b) { int v[4]; int i; v[0] = a; for (i = 1; i < 4; i++) v[i] = v[i - 1] + b; return v[3]; }
+int sframe(int a) { return a + 1; }     // the C face of the hand-written framed stub
 #endif
 int ext(int a);                          // prototype only: forces real calls
 int ext(int a);                          // prototype only: forces real calls
 int stublea(int a, int b);               // linked from prolog_stub.o: converts on its own
                                          // since 3c (leas and float slot map through sp),
-                                         // the cross-object callee of the mixed chain below
+                                         // the converted callee across the object boundary
+int sframe(int a);                       // linked from prolog_stubframed.o (hand-written .s,
+                                         // assembled by the checker): always framed, the
+                                         // framed callee of the mixed chain below
 int csc(int n) {                         // s live across the call: its register stays saved
   int s;
   s = n;
@@ -52,9 +56,10 @@ int cret(int n) {                        // early return: trimframe copies the p
 int csys(char *p, int n);                // defined below: cmix calls the framed callee
 int cmix(int n) {                        // mixed chain: sprel converts this caller (the
   char b[4];                             // second call re-reads the param below the first
-  return stublea(n, 1) + stublea(n, 2)   // call's result save) + csys, the survivor of the
-    + csys(b, 0);                        // frame-keeping classes: a framed callee reading
-}                                        // [r7, #off] under -O (read(0, b, 0) returns 0), stublea keeps its frame
+  return stublea(n, 1) + stublea(n, 2)   // call's result save) + csys, converted since 3d
+    + csys(b, 0)                         // with its window, + sframe, the hand-written
+    + sframe(0) - 1;                     // .s that is ALWAYS framed: both callee shapes
+}                                        // under one converted caller, stublea keeps its frame
 int csys(char *p, int n) {               // a real syscall (the read builtin): the kernel
   return read(0, p, n);                  // switches tasks inside it, so r7 must stay put
 }

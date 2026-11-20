@@ -94,24 +94,27 @@ def main():
     cb = f.get('cfloat', [])
     if 'mov\tr7, sp' not in cb or 'mov\tsp, r7' not in cb or cb[:1] != ['push\t{r7, lr}']:
         fail('cfloat lost its frame pointer: %r' % cb[:2])
-    # csys: the syscall builtin's shape. The kernel switches tasks inside sys_read/sys_write
-    # saving only the user sp (sys_sp) - it never reads the application's r7 - so a
-    # converted csys would be safe in principle; it keeps its frame today because the
-    # builtin's argv window (mov r2, sp and friends right where the walk must start) is
-    # outside sprel's tracked forms. Pin: entry push keeps r7, bookkeeping stays, pop keeps r7.
+    # csys: the syscall builtin's shape. The window converts since 3d: the prescan's
+    # skipped spans are recorded (wstart/wend) and fl_frame excuses every line inside
+    # one, so the mov r2/r4, sp and mov sp, r3/r4 lines that the depth walk proved to
+    # cancel line for line no longer bail the acceptance scan. The kernel switches tasks
+    # inside sys_read/sys_write saving only the user sp (sys_sp) and never touches r4.
+    # Pin: fp-free, the argv words drained by their own cleanup add, plain exit pop.
     cs = f.get('csys', [])
-    if cs[:1] != ['push\t{r7, lr}']: fail('csys lost its frame pointer: %r' % cs[:1])
-    if 'mov\tr7, sp' not in cs or not any(l == 'pop\t{r7, pc}' for l in cs):
-        fail('csys entry/exit bookkeeping: %r' % cs)
+    if cs[:1] != ['push\t{lr}'] or any('r7' in l for l in cs):
+        fail('csys keeps a frame: %r' % cs[:2])
+    if 'add\tsp, #12' not in cs or not any(l == 'pop\t{pc}' for l in cs):
+        fail('csys does not drain the argv words or returns wrong: %r' % cs[-3:])
 
     # mixed chain: cmix is sprel-converted - the frameless caller's hold load reads
-    # [sp, #16] (one word less pushed: r7 dropped) - and csys, framed by its argv
-    # window (pinned above), is the framed callee of the chain: it reads [r7, #12]
-    # under -O. stublea (prolog_stub.o) converts on its own since 3c: its descriptor
-    # leas and float slot map through sp; it keeps the call across the object
-    # boundary as the converted-callee shape. The linked run below pins their
-    # agreement with the native gcc reference (19 = stublea(5,1) + stublea(5,2) =
-    # 8 + 11; csys adds read(0, b, 0) = 0).
+    # [sp, #16] (one word less pushed: r7 dropped). Its callees cover both shapes:
+    # csys (converted with its argv window since 3d, pinned above), stublea (its
+    # descriptor leas and float slot map through sp since 3c) - both converted,
+    # across the object boundary - and sframe, from the hand-written
+    # prolog_stubframed.s assembled below: never through cc, so always framed,
+    # reading [r7, #12]. The linked run pins their agreement with the native gcc
+    # reference (19 = stublea(5,1) + stublea(5,2) = 8 + 11; csys adds read(0, b, 0)
+    # = 0, sframe(0) - 1 = 0).
     cm = f.get('cmix', [])
     if cm[:1] != ['push\t{r4, lr}'] or any('r7' in l for l in cm):
         fail('cmix is not fp-free (sprel-converted): %r' % cm[:3])
@@ -123,11 +126,14 @@ def main():
     if any('r7' in l for l in sb) or 'add\tsp, #32' not in sb:
         fail('stublea is not fp-free since 3c: %r' % sb[:4])
 
-    # behavior: cc build (with the stub object) must print what native gcc prints
+    # behavior: cc build (with both stub objects) must print what native gcc prints
     subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],
                    check=True, cwd=ROOT)
+    subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', os.path.join(WORK, 'prolog_stubframed.o'),
+                    os.path.join(ROOT, 'tests', 'opt', 'prolog_stubframed.s')], check=True, cwd=ROOT)
     subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog.bin'), SRC,
-                    os.path.join(WORK, 'prolog_stub.o')], check=True, cwd=ROOT)
+                    os.path.join(WORK, 'prolog_stub.o'),
+                    os.path.join(WORK, 'prolog_stubframed.o')], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/prolog.bin'],
                          capture_output=True, cwd=ROOT, timeout=30).stdout
     if out != b'check 9 16 3 8 6 16 19\n': fail('prolog.bin printed %r' % out)
