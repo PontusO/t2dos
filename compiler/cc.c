@@ -1195,13 +1195,14 @@ int r7shift(int i, int off) {               // line i with its r7 offset (rfoff,
 int spholdcvt;                           // 1 when the phold arm converted a
                                            // hold load: frameless must excuse those
                                            // lines (they read [sp, #N] by then)
-int wstart[64], wend[64], nwin;            // the argv-window spans sprel()'s prescan skipped
+int wstart[128], wend[128], nwin;          // the argv-window spans sprel()'s prescan skipped
                                            // (3d): fl_frame excuses every line inside one,
                                            // so the scan's window test IS the walk's span
                                            // instead of a second text match that can drift.
                                            // nwin resets at sprel entry; a full table
                                            // records nothing and the scan bails on the
                                            // window's mov r4, sp (the frame is kept).
+                                           // 128: the census found sh's run_cmd at 65.
 int spconv;                                // 1 when sprel() made this function's slots:
 int sprel_ok() { return spconv; }          // frameless() may allow >1 exit. Sticky per
                                            // function: reset at the next prologue below.
@@ -1613,7 +1614,7 @@ int sprel(int fa, int sz) {
           j = i;                                      // sp (see sp_syscall_save). Land just
           while (j < nlines                           // past the pop {r4}; the `add sp, #N`
               && strcmp(lpool + ltext[j], "pop\t{r4}")) j = nx(j);  // that pops the argv
-          if (nwin < 64)                              // record the span: fl_frame excuses
+          if (nwin < 128)                             // record the span: fl_frame excuses
             { wstart[nwin] = i; wend[nwin] = j;       // its lines for the acceptance scan
               nwin = nwin + 1; }                      // and frameless' range scan (3d)
           i = nx(j);                                  // words is next and its own arm below
