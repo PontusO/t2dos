@@ -54,7 +54,15 @@ def main():
     if 'sub.w\tsp, sp, r1' in small or not any(re.match(r'sub\tsp, #\d+$', l) for l in small):
         fail('small does not reserve its frame with sub sp, #N: %r' % small[:8])
     if 'sub.w\tsp, sp, r1' not in big: fail('big lost its long frame reservation: %r' % big[:8])
-    if 'mov\tr7, sp' not in small: fail('small lost its frame pointer')
+    # A reserved frame converts since 3b-iii: add sp, #sz takes the exit's place where
+    # mov sp, r7 unwound the reservation (every early return branches to the drained
+    # exit), and r7 leaves the save lists. small and big keep their frames: their &b
+    # words are lea forms (subw rD, r7, #N) that sprel cannot map - split answers -1
+    # and the screen bails on the line.
+    for name in ('small', 'big'):
+        body = f[name]
+        if 'mov\tr7, sp' not in body or not any(l_end_pc(l) and 'r7' in l for l in body):
+            fail('%s lost its frame pointer: %r' % (name, body[:2]))
     if 'mov\tr7, sp' in early or 'mov\tsp, r7' in early:
         fail('early keeps the frame: %r' % early[:4])   # converted since the depth walk:
                                                         # the second call re-reads the
@@ -82,7 +90,8 @@ def main():
             if not l_end_pc(body[i - 1]): fail('%s returns on the spot past its vpop: %r' % (name, body[i - 1:i + 1]))
     if not any(l.startswith('vldr\ts') for l in f['fmany']): fail('fmany loads no float parameter with vldr')
     # promoted parameters are loaded once into a callee-saved register after the prologue
-    if not any(re.match(r'ldr\tr\d+, \[r7, #\d+\]$', l) for l in f['plarge'][:6]):
+    # (from the converted plarge: [sp, #N], its 8-byte reservation drained at the exit)
+    if not any(re.match(r'ldr\tr\d+, \[sp, #\d+\]$', l) for l in f['plarge'][:6]):
         fail('plarge loads no parameter into a register: %r' % f['plarge'][:6])
     # a long frame keeps the movw/movt reservation even with a promoted parameter (r4 holds n);
     # its early return is an inline pop only when trimframe's exit-label window holds it

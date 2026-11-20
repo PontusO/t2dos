@@ -53,17 +53,22 @@ def main():
     head = f.get('csc', [])[:5]
     if not any(l.startswith('push\t{r4') for l in head[:1]):
         fail('csc lost its callee-saved register: %r' % f.get('csc', [])[:1])
-    # (frameless() leaves csc's frame alone today - its parameter load reads our r7 - so
-    # the prologue still loads the slot into r4, which the push saves across ext().)
-    if not any(re.match(r'ldr\tr4, \[r7, #\d+\]$', l) for l in head):
-        fail('csc reads its parameter from no stack slot: %r' % head)
+    # csc's reserved frame converts since 3b-iii: the parameter read maps to [sp, #16]
+    # (k=12, sz=8, one word less pushed for the dropped r7) and add sp, #8 drains at the exit.
+    if not any(re.match(r'ldr\tr4, \[sp, #16\]$', l) for l in head):
+        fail('csc reads its parameter from no converted stack slot: %r' % head)
+    if any('r7' in l for l in f.get('csc', [])):
+        fail('csc kept r7: %r' % f.get('csc', [])[:2])
     # cmixed: n (the bound) is loaded once before the loop and never read again - dead at
     # every call - while s (accumulator) and i (counter, re-read after ext returns) stay.
-    if f.get('cmixed', [])[:1] != ['push\t{r4, r5, r7, lr}']:
+    # Its reserved frame converts too: the bound read inside the loop maps at its own
+    # live depth, exactly as cret's does.
+    if f.get('cmixed', [])[:1] != ['push\t{r4, r5, lr}']:
         fail('cmixed push list changed: %r' % f.get('cmixed', [])[:1])
     # rec: self-recursion. Only one slot is promotable (the argument n), and it is read
     # after the recursive call - so it keeps its register. The accumulator lives in a
-    # peep-created stack slot, which promote() never touches. One callee-saved reg today.
+    # peep-created stack slot: the result save after bl rec is the str r0, [r7, #-N]
+    # shape whose pending word the walk cannot see claimed, so rec keeps its frame.
     if f.get('rec', [])[:1] != ['push\t{r4, r7, lr}']:
         fail('rec push list changed: %r' % f.get('rec', [])[:1])
     # cret: trimframe copies the epilogue pop into the branch targeting the exit label,
@@ -95,9 +100,10 @@ def main():
         fail('csys entry/exit bookkeeping: %r' % cs)
 
     # mixed chain: cmix is sprel-converted - the frameless caller's hold load reads
-    # [sp, #8] (one word less pushed: r7 dropped), and stublea, whose locals force its
-    # frame to stay, is the framed callee. The linked run below pins their agreement
-    # with the native gcc reference (19 = stublea(5,1) + stublea(5,2) = 8 + 11).
+    # [sp, #8] (one word less pushed: r7 dropped), and stublea, whose float slot vstr/vldr
+    # read through r7 (a form sprel cannot move), is the framed callee. The linked run
+    # below pins their agreement with the native gcc reference (19 = stublea(5,1) +
+    # stublea(5,2) = 8 + 11).
     cm = f.get('cmix', [])
     if cm[:1] != ['push\t{r4, lr}'] or any('r7' in l for l in cm):
         fail('cmix is not fp-free (sprel-converted): %r' % cm[:3])

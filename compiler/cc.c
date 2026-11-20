@@ -1462,14 +1462,14 @@ int sprel(int fa, int sz) {
       if (r7ref(i) == 2) return 0;                    // unknown r7 form
       k = split(i);                                   // split/r7ref parse this line only: read
       if (r7ref(i) == 1) {                            // the values right after their calls
-        if (k < -8) return 0;                         // lea subw/addw, vstr and bare-register
-                                                      // r7 forms answer -1 (the window check
-                                                      // below rejects them too); a real slot
-                                                      // offset is never below -8: promote's
-                                                      // r7shift has moved every local to
-                                                      // [r7, #N] with N >= 0 by now. Every
-                                                      // literal maps the SAME way once the
-                                                      // frame goes: the entry list loses
+        if (k == -1) return 0;                        // lea subw/addw, vstr and bare-register
+                                                      // r7 forms answer -1 (split parses the
+                                                      // rest: a literal slot may sit below r7,
+                                                      // an unpromoted local at [r7, #-N]: the
+                                                      // window check below maps it through
+                                                      // k + sz + d - 4 like any other slot).
+                                                      // Every literal maps the SAME way once
+                                                      // the frame goes: the entry list loses
                                                       // exactly r7's word, so [r7, #k] at
                                                       // live depth d reads [sp, #k+sz+d-4] -
                                                       // caller's band and own frame alike,
@@ -1566,9 +1566,11 @@ int sprel(int fa, int sz) {
                                                       // BEFORE rewriting: the converted
                                                       // offsets bake in the dropped r7 word,
                                                       // so the frame MUST actually go)
-  if (sz) return 0;                                   // a reservation unwinds at the exit
-                                                      // through mov sp, r7 (frameless deletes
-                                                      // it): sz > 0 keeps the frame
+  if (sz > 4095) return 0;                            // reserved frames convert since 3b-iii
+                                                      // (frameless rewrites the exit's
+                                                      // mov sp, r7 into add sp, #sz): past the
+                                                      // add.w immediate the drain has no
+                                                      // single form, so those keep the frame
   t = lpool + ltext[fa - 3];                          // frameless' entry test, verbatim
   if (strncmp(t, "push\t{", 6) || !inregs(t + 6, "lr")) return 0;
   spconv = 1;                                         // from here the scan judges the
@@ -1750,7 +1752,13 @@ int fl_list(int i, char *t, char *mn, char *last) {   // push/pop line t without
   u = u + 1; first = 1;                     // emit it when the rest is done
   while (*u && *u != '}') {
     if (u[0] == 'r' && u[1] >= '0' && u[1] <= '9') {
-      if (u[1] != '7') { if (!first) ls(", "); ls("r"); lpool[lppos] = u[1]; lppos = lppos + 1; first = 0; }
+      if (u[1] != '7') {                         // copy the WHOLE token: promote lists r10
+        if (!first) ls(", ");                    // and r11, and a one-digit copy of r10 is
+        ls("r"); lpool[lppos] = u[1]; lppos = lppos + 1;   // an r1 that as merges into the
+        if (u[2] >= '0' && u[2] <= '9')          // save list - dropping r10/r11's words
+          { lpool[lppos] = u[2]; lppos = lppos + 1; u = u + 1; }
+        first = 0;
+      }
       u = u + 2;
     }
     else u = u + 1;
@@ -1824,12 +1832,15 @@ int fl_frame(int i, int fa) {
 int frameless(int fa, int sz) {
   int i; int e; char *t;
   if (phold < 0) return 0;                      // no prologue to strip
-  if (sz) return 0;                             // a frame reservation unwinds at the exit
-                                                // through mov sp, r7: frameless deletes it,
-                                                // so sz > 0 keeps the frame. A converted
-                                                // body stays correct framed: its [sp, #N]
-                                                // reads bake in sz, and r7 still anchors
-                                                // the exit.
+  if (sz && !sprel_ok()) return 0;              // a reservation unwinds at the exit through
+                                                // mov sp, r7: unless sprel converted the body
+                                                // that unwind must stay (an unconverted
+                                                // function reads its slots through r7). A
+                                                // converted body drains it instead: the loop
+                                                // below turns every exit's mov sp, r7 into
+                                                // add sp, #sz, which is what lets sz > 0
+                                                // convert at all.
+  if (sz > 4095) return 0;                      // add sp, #sz needs the add.w immediate form
   if (npro + nfpro && !sprel_ok()) return 0; // promote parked a value in r4-r11 or an s
                                             // register: its load at phold reads OUR r7, the
                                             // stripped save list no longer protects the
@@ -1871,12 +1882,24 @@ int frameless(int fa, int sz) {
   if (fl_outside(e + 1, nlines)) return 0;  // a linked .s can leave code after the exit
                                             // pop: it runs in the caller's frame and
                                             // reads the caller's r7/sp
-  npro = 0;                                 // fl_list rebuilds the two lists without r7
-  i = 0;                                    // (and without them if nothing else is saved:
-  while (i < nlines) {                      // push {lr} / pop {pc})
+  i = 0;                                    // fl_list rebuilds the two lists without r7:
+  while (i < nlines) {                      // what remains of each list line is kept as
+                                            // written (lr or pc plus any builtin's r4).
+                                            // npro keeps its value on purpose: flush()'s
+                                            // final peep() gates its promoted-register
+                                            // merges on it, and a converted function still
+                                            // has those registers. The next function resets
+                                            // it (parse_global's tail), and trimframe's nor7
+                                            // only decides deletion of the mov lines that
+                                            // were just deleted here.
     if (lkind[i] == L_INS) {
       t = lpool + ltext[i];
-      if (!strcmp(t, "mov\tr7, sp") || !strcmp(t, "mov\tsp, r7")) pdel(i);
+      if (!strcmp(t, "mov\tr7, sp")) pdel(i);
+      else if (!strcmp(t, "mov\tsp, r7")) {      // the exit's unwind: nothing to drain at
+        if (!sz) pdel(i);                      // sz == 0; the reservation's drain otherwise
+        else { pset(i); ls("add\tsp, #"); ls(dec(sz)); lend(); }   // (as picks add.w past the
+      }                                        // 8-bit form; the gate capped sz at 4095)
+
       else if (i == fa - 3 && inregs(t + 6, "r7")) fl_list(i, t, "push", "lr");
       else if (fl_pc_end(i) && inregs(t + 5, "r7")) fl_list(i, t, "pop", "pc");
     }
