@@ -83,16 +83,17 @@ class Board:
         # send the bytes only once put.bin is receiving: if the command was missed, the shell
         # would read the file as typed commands (and make files with junk names)
         want = b'receiving %d bytes' % len(data)
-        got = b''; t0 = time.time()
-        while want not in got and time.time() - t0 < 5.0:
+        ok = b'ok, %d bytes' % len(data)   # a 0-byte put answers want and ok in one flush:
+        got = b''; t0 = time.time()        # accept ok seen early, or the wait below hangs
+        while want not in got and ok not in got and time.time() - t0 < 5.0:
             got += self.s.read(4096)
-        if want not in got:
+        if want not in got and ok not in got:
             raise BoardError('put %s: the board did not start receiving (got %r); nothing was sent' % (remote, got[-120:]))
         for i in range(0, len(data), 512):
             self._write(data[i:i + 512])
             time.sleep(0.01)
         out = self._read(5.0, 0.5).decode('latin-1')
-        if 'ok, %d bytes' % len(data) not in out:
+        if ok.decode() not in out and ok not in got:
             raise BoardError('put %s failed: %r' % (remote, out[-200:]))
 
     def run(self, cmd, wait=3.0):
