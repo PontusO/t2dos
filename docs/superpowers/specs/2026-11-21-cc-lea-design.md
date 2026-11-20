@@ -1,25 +1,34 @@
-# cc -O 3c: frame-address arithmetic and idle reservations, without r7
+# cc -O 3c: frame-address (lea) arithmetic without r7
 
-Date: 2026-11-21. Status: approved design (approach A, user pick from
-the recon report). Follows 3b-iii
+Date: 2026-11-21. Status: approved design, corrected by pre-plan
+recon (the idle-reservation class was disproved; 3c is the lea arm
+alone). Follows 3b-iii
 (`2026-11-21-cc-sz-frameless-design.md`, merged to main as of
 `2eba3af`).
 
 ## Problem
 
-Two bail reasons keep most of the corpus's remaining `-O` frames:
+One bail reason keeps most of the corpus's remaining `-O` frames:
 
-1. **lea forms.** `subw rD, r7, #N` / `addw rD, r7, #N` - taking the
-   address of a local array (or a caller band word) - answer -1 from
-   `split()` and the screen bails on the line. Census over bench +
-   sh.c + get.c + the two pin files: 20 functions, e.g. sh's
-   `dollar`/`glob_word`/`run_cmd`, get's `net_*` cluster, and every
-   array witness in `frame.c` (`small`, `big`, `bigprom`, `amem`).
-2. **Idle reservations.** A function with `sz > 0` whose body reads
-   r7 NOWHERE (locals fully dead-coded, only the reservation left):
-   sprel bails with "no slot reads" (`nconv == 0`), then frameless'
-   `sz && !sprel_ok()` gate refuses the drain it could perform
-   unaided. sh's `find_var` is the witness.
+**lea forms.** `subw rD, r7, #N` / `addw rD, r7, #N` - taking the
+address of a local array (or a caller band word) - answer -1 from
+`split()` and the screen bails on the line. Census over bench +
+sh.c + get.c + the two pin files: 20 functions, e.g. sh's
+`dollar`/`glob_word`/`run_cmd`, get's `net_*` cluster, and every
+array witness in `frame.c` (`small`, `big`, `bigprom`, `amem`).
+Every local declaration emits one: cc's local array keeps a pointer
+cell in its slot 0 and initializes it with exactly this shape, so
+`int f(int n) { char b[40]; return n; }` - a fully dead array -
+still reads r7 at its descriptor init.
+
+An earlier draft also claimed an "idle reservation" class (bodies
+with `sz > 0` that read r7 nowhere, blocked by frameless'
+`sz && !sprel_ok()` gate). Recon disproved it: the descriptor init
+above means no such body exists, and `find_var`, the suspected
+witness, converts fine standalone - in sh.c it is the BUILTIN argv
+window (a non-goal class) that bails. The census script had also
+mislabelled wide-form lines (`str.w r0, [r7, #-N]`). The gate stays
+as the cheap invariant guard it is; 3c is the lea arm alone.
 
 ## Key invariant (why lea needs no liveness analysis)
 
@@ -48,40 +57,39 @@ the wide immediate (subw r1, sp, #1012 -> f2ad31f4) and hi registers
   `addw rD, r7, #N` (base operand exactly r7) is rewritten in place
   with the formula above and counts toward `nconv`. The existing
   mapped-offset window check (0..1020, the ldr/str reach) bounds it:
-  the lea's `|o|` must satisfy the same test as a literal read of the
+  the lea's `o` must satisfy the same test as a literal read of the
   same word. The depth walk is unchanged - lea lines move nothing.
-- **frameless gate.** Drop `sz && !sprel_ok()`. `fl_frame`'s scan
-  already bails on every line that touches r7 beyond the excused
-  entry/exit forms, so an unconverted body with real r7 uses (float
-  slots, `vstr`, bare uses, un-windowed literals) still keeps its
-  frame; only bodies that read nothing get the free drain. Keep
-  `sz > 4095` (screen and frameless test it identically, as today),
-  and keep the `fl_pc_end && !sprel_ok` multi-exit restriction: an
-  unconverted body's exits are only trusted at reservation depth
-  once the screen has walked them.
-- **trimframe**: no change (same argument as 3b-iii: the `sz > 0`
-  branch returns before the pop-copy code, so early returns branch to
-  the drained exit label).
+  Both walks need the arm: the prescan (test, window, bail) and the
+  conversion walk (the `pset` rewrite). The rewritten line
+  (`addw rD, sp, #N'`) loses its r7 token, so it passes the
+  conversion walk's `r7ref(i) == 1` gate, `fl_r7` (whose `r7ref`
+  scan finds no r7) and `trimframe`'s `nor7` loop with NO changes
+  to any of them.
+- **frameless, trimframe, fl_r7, split, sprewrite**: no change. The
+  `sz && !sprel_ok()` gate stays (no body can reach frameless with
+  `sz > 0` and zero r7 reads, see Problem).
 
 ## Approaches considered
 
-- **A (picked): lea arm + gate removal, one round.** Two functions
-  touched, witnesses already exist, no model change to the depth
-  walk.
+- **A (picked): the lea arm, one round.** One function touched
+  (`sprel`), witnesses already exist, no model change to the depth
+  walk. An earlier A also removed frameless' `sz && !sprel_ok()`
+  gate; recon (Problem) showed nothing needs that, and the gate is
+  kept as a cheap invariant guard.
 - **B: add the pending-save walk fix** (the `rec` class, 23
   functions). Rejected for this round: it edits the walk's claim
   logic, the one place a modeling slip means silent corruption; it
   deserves its own round and board campaign.
-- **C: lea only, keep the redundant gate.** Rejected: `find_var`
-  keeps a frame for no reason and the spec must document a known
-  redundant test.
+- **C: rewrite at the lea's uses instead of the lea line** (fold the
+  frame offset into each `ldr rX, [rD]`). Rejected: it duplicates
+  the depth model at every use site, where the screen already walks
+  it once at the line.
 
 ## Goals / non-goals
 
-Goals: the lea class and the idle-reservation class convert; frame
-survivors are only argv windows, pending saves, float slots and
-over-window shapes; the usual suites prove behavior; census and specs
-updated.
+Goals: the lea class converts; frame survivors are only argv
+windows, pending saves, float slots and over-window shapes; the
+usual suites prove behavior; census and specs updated.
 Non-goals: pending saves, argv windows, `vstr`/`vldr` slots (future
 rounds 3d/3e).
 
@@ -100,9 +108,6 @@ codegen before running it on the board.
   stays framed (sz gate); `fpint` stays framed if its float slot
   survives peep, else converts - the builder pins whichever holds.
   The `frame.bin` run pin keeps printing the same numbers.
-- A new idle-reservation witness (locals fully dead across a call,
-  `sz > 0`, zero r7 reads) converts; `find_var`-shaped code is the
-  model.
 - `stublea`, `cfloat`, `csys`, `rec`, `fmany` and friends keep their
   frames by the reasons already pinned.
 - census: remaining framed functions carry only the non-goal reasons;
@@ -112,7 +117,4 @@ codegen before running it on the board.
 
 - Whether the lea arm parses inline or via a small helper next to
   `sprewrite` (which already skips the `r7, #` prefix).
-- Exact witness source for the idle-reservation class (an unused
-  array local plus a call should leave a live reservation and no
-  reads; verify maxloc counts it).
 - Pin wording, census table, sprel/3b-iii spec superseding bullets.
