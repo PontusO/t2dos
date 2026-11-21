@@ -133,7 +133,7 @@ class Board:
         return data
 
     def expect_gcc(self, test_c, flags='', ccflags='', gccflags=''):
-        """Compare the board's run of test_c (built by compiler/cc -S, as and ld) with a native
+        """Compare the board's run of test_c (built by src/compiler/cc -S, as and ld) with a native
         gcc run; flags (e.g. -D NAME=1) go to both compilers, ccflags (e.g. -O) only to cc and
         gccflags only to gcc. Trailing white space is ignored."""
         name = os.path.splitext(os.path.basename(test_c))[0]
@@ -147,7 +147,7 @@ class Board:
         binp = os.path.join(bdir, name + '.bin')
         asm = os.path.join(bdir, name + '.s')
         obj = os.path.join(bdir, name + '.o')
-        subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data'] + flags.split() + ccflags.split() + ['-o', asm, test_c], check=True)
+        subprocess.run([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-S', '-mshort-data'] + flags.split() + ccflags.split() + ['-o', asm, test_c], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', obj, asm], check=True)
         subprocess.run([os.path.join(ROOT, 'build', 'host', 'ld'), '-o', binp, obj], check=True)
         self.put(binp, '/src/%s.bin' % name)

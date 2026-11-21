@@ -7,7 +7,7 @@ arrays, struct pointers, globals, function pointer dispatch, floats, ...). It pr
 (so a miscompile shows up as a failure, not as a fast time), and "time MS", the time the
 work took by millis().
 
-  bench.py --pc      build with compiler/cc (plain and -O) and gcc, run under qemu and compare
+  bench.py --pc      build with src/compiler/cc (plain and -O) and gcc, run under qemu and compare
                      the check lines; prints code sizes (qemu times are only a rough guide)
   bench.py --board   the same, then upload both builds to /tmp/bench on the board and run
                      them there: a table of times, speedup and code sizes
@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 BENCH = os.path.join(ROOT, 'tests', 'bench')
 WORK = os.path.join(ROOT, 'build', 'bench')
-CC = os.path.join(ROOT, 'compiler', 'cc')
+CC = os.path.join(ROOT, 'src', 'compiler', 'cc')
 QROOT = os.path.join(ROOT, 'root')
 
 
@@ -67,7 +67,7 @@ def build(names, opt):
         if not ref[n]:
             fail('%s: gcc build prints no check line' % n)
         for tag, flags in (('p', []), ('o', opt)):
-            r = subprocess.run([CC] + flags + ['-I', os.path.join(ROOT, 'lib'), '-o',
+            r = subprocess.run([CC] + flags + ['-I', os.path.join(ROOT, 'src', 'lib'), '-o',
                                os.path.join(WORK, '%s_%s.bin' % (n, tag)), src],
                                capture_output=True, text=True, cwd=ROOT)
             if r.returncode:

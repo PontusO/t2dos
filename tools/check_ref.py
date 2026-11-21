@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Byte identity of the assembly pipeline against the reference compiler.
 
-  check_ref.py            for every userland/*.c, assembler/as.c, linker/ld.c,
-                          binutils/*.c and compiler/tests/test*.c: build/ref/cc -o ref.bin X
-                          versus compiler/cc -o new.bin X (cc runs build/host/as and
-                          build/host/ld); the .bin files must be byte-identical.
-                          compiler/cc.c itself left the corpus with the split into
-                          compiler/*.c (see sources()).
+  check_ref.py            for every src/userland/*.c, src/assembler/as.c, src/linker/ld.c,
+                          src/binutils/*.c and src/compiler/tests/test*.c: build/ref/cc -o
+                          ref.bin X versus src/compiler/cc -o new.bin X (cc runs build/host/as
+                          and build/host/ld); the .bin files must be byte-identical.
+                          src/compiler/cc.c itself left the corpus with the split into
+                          src/compiler/*.c (see sources()).
 
 A file whose reference .bin starts at an init stub (its entry is not main: the reference
 cc's stub begins with push {r4, lr} = 0xB510) has run-before-main initializer code, which
@@ -37,12 +37,12 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'ref')
 REF_CC = os.path.join(ROOT, 'build', 'ref', 'cc')
-CC = os.path.join(ROOT, 'compiler', 'cc')
+CC = os.path.join(ROOT, 'src', 'compiler', 'cc')
 NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe', 'reboot', 'wifi_save', 'wifi_saved', 'ping', 'mount', 'mountat', 'telnetd',   # unknown to the reference cc
                   'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
                   'exp', 'log', 'log10', 'pow', 'sqrt', 'fabs', 'floor', 'ceil', 'fmod')
 UNDEF_RE = re.compile(r'undefined function: (\w+)\(')
-STATIC_TESTS = ('compiler/tests/test15.c',)    # uses `static`: unparseable by the ref cc
+STATIC_TESTS = ('src/compiler/tests/test15.c',)    # uses `static`: unparseable by the ref cc
 
 
 def newer_builtin(msg):
@@ -53,15 +53,15 @@ def newer_builtin(msg):
 
 def sources():
     """(source, flags) for the identity set; -I lib where the Makefile uses it."""
-    lib = ['-I', 'lib']
-    out = [(f, lib) for f in sorted(glob.glob('userland/*.c'))]
-    # compiler/cc.c is not compared: since the split into compiler/*.c the sources use
+    lib = ['-I', 'src/lib']
+    out = [(f, lib) for f in sorted(glob.glob('src/userland/*.c'))]
+    # src/compiler/cc.c is not compared: since the split into src/compiler/*.c the sources use
     # extern (the ref cc at e4fb427 predates it); the split cc is gated by behaviour
     # (bench, tests) and on-board byte identity (check_make --board, --selfhost).
-    out.append(('assembler/as.c', lib))
-    out.append(('linker/ld.c', lib))
-    out += [(f, lib) for f in sorted(glob.glob('binutils/*.c'))]
-    out += [(f, []) for f in sorted(glob.glob('compiler/tests/test*.c'))]
+    out.append(('src/assembler/as.c', lib))
+    out.append(('src/linker/ld.c', lib))
+    out += [(f, lib) for f in sorted(glob.glob('src/binutils/*.c'))]
+    out += [(f, []) for f in sorted(glob.glob('src/compiler/tests/test*.c'))]
     return out
 
 
@@ -79,11 +79,11 @@ def has_init_stub(path):
 def main():
     os.chdir(ROOT)                   # the globs in sources() are relative to the repo root
     srcs = sources()
-    for d in ('userland', 'compiler/tests', 'binutils'):
+    for d in ('src/userland', 'src/compiler/tests', 'src/binutils'):
         if not any(s.startswith(d + '/') for s, _ in srcs):
             print('check_ref: no sources found in %s/' % d)
             return 1
-    for f in ('compiler/cc.c', 'assembler/as.c', 'linker/ld.c'):
+    for f in ('src/compiler/cc.c', 'src/assembler/as.c', 'src/linker/ld.c'):
         if not os.path.exists(f):
             print('check_ref: %s is missing' % f)
             return 1

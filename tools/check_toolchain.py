@@ -7,7 +7,7 @@ tests/toolchain/pipeline_errors/NAME.c or NAME.s with NAME.expected: `cc -o NAME
 print the tool's message (a /tmp/ccXXXX_N_NAME name stands for any temporary file) and exit with
 the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
 
-  check_toolchain.py --pc        build every case with compiler/cc (build/host/as and ld) in
+  check_toolchain.py --pc        build every case with src/compiler/cc (build/host/as and ld) in
                                  build/toolchain/: silent steps, .bin headers, symbol tables of
                                  the objects, only the needed archive member linked, the error
                                  cases, the driver's own errors, temporary files cleaned
@@ -20,7 +20,7 @@ the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
                                  and PSRAM fully returned when the files are gone
   check_toolchain.py --selfhost  on the board, cc.bin rebuilds cc, as, ld, ar, nm and objdump
                                  from source with plain cc; each must equal root/bin/X.bin. Then
-                                 the board-built cc compiles compiler/tests/test4..12 and test15 on the
+                                 the board-built cc compiles src/compiler/tests/test4..12 and test15 on the
                                  board and their output is compared with gcc -m32 (SSE floats)
 """
 import glob
@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 TESTS = os.path.join(ROOT, 'tests', 'toolchain')
 ERRORS = os.path.join(TESTS, 'pipeline_errors')
 WORK = os.path.join(ROOT, 'build', 'toolchain')
-TOOL = {'cc': os.path.join(ROOT, 'compiler', 'cc'), 'ar': os.path.join(ROOT, 'build', 'host', 'ar'), 'mkdir': 'mkdir'}
+TOOL = {'cc': os.path.join(ROOT, 'src', 'compiler', 'cc'), 'ar': os.path.join(ROOT, 'build', 'host', 'ar'), 'mkdir': 'mkdir'}
 NM = os.path.join(ROOT, 'build', 'host', 'nm')
 OBJDUMP = os.path.join(ROOT, 'build', 'host', 'objdump')
 REMOTE = '/src/tc'
@@ -433,7 +433,7 @@ FREE_RE = re.compile(r'^psram\s+\d+ bytes, (\d+) free$')
 
 
 def check_ramtmp(r):
-    """/tmp in PSRAM (kernel/ramfs.cpp): the file operations, mv across filesystems both ways"""
+    """/tmp in PSRAM (src/kernel/ramfs.cpp): the file operations, mv across filesystems both ways"""
     def psram_free():
         out, _ = r.run('free', 10.0)
         return [int(m.group(1)) for m in map(FREE_RE.match, out) if m][0]
@@ -484,9 +484,9 @@ def check_ramtmp(r):
 
 # (name, sources): sources are repo-relative and staged at /src/<that path>, so a
 # multi-file tool (cc) keeps its layout; the board compiles them in one command.
-SELFHOST = [('cc', sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, 'compiler', '*.c')))),
-            ('as', ['assembler/as.c']), ('ld', ['linker/ld.c']),
-            ('ar', ['binutils/ar.c']), ('nm', ['binutils/nm.c']), ('objdump', ['binutils/objdump.c'])]
+SELFHOST = [('cc', sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, 'src', 'compiler', '*.c')))),
+            ('as', ['src/assembler/as.c']), ('ld', ['src/linker/ld.c']),
+            ('ar', ['src/binutils/ar.c']), ('nm', ['src/binutils/nm.c']), ('objdump', ['src/binutils/objdump.c'])]
 
 
 def check_selfhost():
@@ -496,15 +496,15 @@ def check_selfhost():
     put_tools(r)
     r.run('mkdir /src')
     r.run('mkdir /lib')
-    for f in ('sys.h', 'lib/t2obj.h', 'lib/t2obj.c', 'lib/net.c'):
+    for f in ('sys.h', 'src/lib/t2obj.h', 'src/lib/t2obj.c', 'src/lib/net.c'):
         r.put(os.path.join(ROOT, f), '/lib/' + os.path.basename(f))
-    r.put(os.path.join(ROOT, 'compiler', 'cc.h'), '/lib/cc.h')   # always: a split cc build without it is broken anyway
+    r.put(os.path.join(ROOT, 'src', 'compiler', 'cc.h'), '/lib/cc.h')   # always: a split cc build without it is broken anyway
     ok = True
     made = {'/src'}
     for name, srcs in SELFHOST:
         bpaths = []
         for src in srcs:
-            bp = '/src/' + src
+            bp = '/src/' + os.path.relpath(src, 'src')   # repo src/X -> board /src/X: board layout is fixed
             bpaths.append(bp)
             d = bp.rsplit('/', 1)[0]
             if d not in made:
@@ -529,7 +529,7 @@ def check_selfhost():
     bdir = os.path.join(WORK, 'selfhost')
     os.makedirs(bdir, exist_ok=True)
     for name, flags in tests:
-        src = os.path.join(ROOT, 'compiler', 'tests', name + '.c')
+        src = os.path.join(ROOT, 'src', 'compiler', 'tests', name + '.c')
         native = os.path.join(bdir, name + '.native')
         subprocess.run(['gcc', '-m32', '-msse2', '-mfpmath=sse', '-w'] + flags.split() + ['-o', native, src], check=True)   # 32-bit pointers, IEEE single floats as on the M33
         want = [l.rstrip() for l in subprocess.run([native], capture_output=True, text=True).stdout.split('\n')]

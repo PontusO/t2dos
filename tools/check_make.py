@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the make tool (userland/make.c) on the PC and on the board.
+"""Check the make tool (src/userland/make.c) on the PC and on the board.
 
 make reads a target-line build file ("name: [-flags] prereqs": leading -tokens
 are that target's build flags, -I takes the next token, # starts a comment, a
@@ -168,14 +168,14 @@ def cleanup():
     shutil.rmtree(MKTMP, ignore_errors=True)
 
 
-REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'basic/basic.h', '/lib/cc.h': 'compiler/cc.h'}  # mirrored headers
+REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'src/basic/basic.h', '/lib/cc.h': 'src/compiler/cc.h'}  # mirrored headers
 
 
 def repo_path(tok):                       # board path -> repo file (check_toolchain layout)
     if tok in REPO_OF:
         return REPO_OF[tok]
     if tok.startswith('/src/'):
-        return tok[len('/src/'):]
+        return 'src/' + tok[len('/src/'):]   # board layout fixed: repo sources live under src/
     return tok.lstrip('/')
 
 
