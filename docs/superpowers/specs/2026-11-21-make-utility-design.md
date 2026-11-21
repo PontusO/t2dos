@@ -113,8 +113,9 @@ the split lands).
 ## Constraints
 
 - `userland/make.c` inside the language subset the committed cc
-  compiles (build it with the PC cc, and keep it compiling under gcc
-  too for host-side reference runs).
+  compiles (it is built BY that cc as `root/bin/make.bin`, so this is
+  a hard build-time fact, not a convention; like other userland tools
+  it is not gcc-buildable, the kernel builtins are called by name).
 - PC behavior unchanged: GNU make keeps driving PC builds; adding
   `make.bin` to the Makefile must not alter any existing output
   (`check_ref` byte identity still applies to the toolchain).
