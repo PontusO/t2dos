@@ -199,9 +199,11 @@ def board_main(tool_names=None):
     r.put(os.path.join(ROOT, 'Makefile.board'), '/src/Makefile.board')
     names = tool_names or ['cc', 'as', 'ld', 'ar', 'nm', 'objdump', 'basic', 'sh']
     for n in names:
+        t0 = time.time()
         out, code = r.run('/bin/make.bin -f /src/Makefile.board /src/%s.bin' % n, 1200.0)
         if code:
             fail('board-' + n, 'make exited %d: %r' % (code, out[-6:]))
+        secs = time.time() - t0
         got = r.fetch('/src/%s.bin' % n)
         with open(os.path.join(ROOT, 'root', 'bin', '%s.bin' % n), 'rb') as f:
             want = f.read()
@@ -209,7 +211,7 @@ def board_main(tool_names=None):
             off = next(i for i in range(min(len(got), len(want))) if got[i] != want[i])
             fail('board-' + n, '%s.bin differs: %d vs %d bytes, first diff at %d'
                  % (n, len(got), len(want), off))
-        print('PASS board-%s: byte-identical to root/bin, %d bytes' % (n, len(got)))
+        print('PASS board-%s: byte-identical to root/bin, %d bytes, %.0f s' % (n, len(got), secs))
     # a child failure must stop make with a message and the child's code
     r.run('mkdir /src/mkfail', 10.0)
     r.put(b'int main(void) { bogus syntax here; }\n', '/src/mkfail/bad.c')

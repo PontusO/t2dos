@@ -144,3 +144,32 @@ the split lands).
   line spells its target; a prerequisite is a target iff it names a
   defined target, otherwise it is a file. This keeps matching to one
   string compare and matches how selfhost already names files.
+
+## Results (2026-11-21)
+
+Built as specified: `userland/make.c` (target-line grammar exactly as
+above - flags are leading `-` tokens, `-I` takes the next token,
+collections recurse, cycles error, always-rebuild, `-n` prints the plan,
+`.s` prereqs assemble with `/bin/as.bin -o` first, target name IS the
+output path). No deviations from the settled design. The argv cap
+(MAXARGS 32) was not hit: the largest recipe is basic.bin with 12
+entries. `make root/bin/make.bin` builds it with the committed cc
+(bootstrap-clean); `check_ref` still reports `different: 0`.
+
+Checker (`tools/check_make.py`):
+
+- `--pc`: `ok: 13 make plan cases` (plan order, collections, recursion
+  once, .s prereq, flags, child failure exit, missing file vs target,
+  unknown target, -n, argv cap).
+- `--board [--tools a,b]`: stages `Makefile.board` (sources `/src/...`,
+  mirrored `/lib` headers; cc-included `.c` files staged but NOT
+  prereqs - listing them would make cc compile them twice), runs make,
+  byte-compares each tool against `root/bin`, and checks a child failure
+  stops make with the child's code.
+- Fresh-boot board run: cc 206823 B / 19 s, ld 3 s, nm 2 s, ar 3 s,
+  objdump 6 s and sh all PASS byte-identical; the board-fail case
+  PASSes. `assembler/as.c` and the multi-source `basic.bin` FAIL - the
+  on-board cc cannot write its first `.s` to `/tmp` for those two
+  invocations even straight from `sh`, a pre-existing board-side defect
+  unrelated to make (see `docs/NOTES-board-cc-flaky.md`, filed in the
+  HANDOVER backlog).

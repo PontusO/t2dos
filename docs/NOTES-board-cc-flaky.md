@@ -29,11 +29,18 @@ Measured facts (board Challenger 2350, ttyACM2):
 - A plain program could write 2 MB files to /tmp while cc failed to write its
   460 KB .s -> not raw capacity.
 - On a freshly booted board every source builds byte-identically through
-  make EXCEPT `assembler/as.c`, deterministically and without make involved:
+  make EXCEPT `assembler/as.c` and the multi-source `basic.bin`,
+  deterministically and without make involved:
   `/bin/cc.bin -S -I /lib -o /tmp/x.s /src/assembler/as.c` from the shell
-  fails the same way, while ld/nm/ar/objdump/sh/basic all pass at the same
-  moment and `free` never moves. as.c stays broken after reboot; other
-  tools still build after it fails once.
+  fails the same way, while ld/nm/ar/objdump/sh/cc all pass at the same
+  moment and `free` never moves. as.c and basic stay broken after reboot;
+  other tools still build after they fail once. (basic passed once early
+  in the session; it has failed every run since, incl. four repeats on a
+  fresh boot, always at the FIRST temp file `comp.s`.) Both failing
+  invocations read 7 (basic) or 2 (as.c via #include "t2obj.c") sources
+  into cc's 1 MB-per-source srcbufs; the single-buffer compiles pass.
+  basic fails on the first .s with only comp.c's 1 MB buffer live, so it
+  is not simple capacity either.
 
 Diagnosis status (not finished - next round picks it up here):
 - the same cc.bin (byte-identical to the PC build) compiles the same as.c
