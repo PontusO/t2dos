@@ -46,7 +46,7 @@ On the PC, in the repository:
 ```sh
 make                                   # the PC cross compiler and every program, into root/
 FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
-arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel kernel
+arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel src/kernel
 arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel
 ```
 
@@ -60,7 +60,7 @@ with the ESPHost copy in `third_party/ESPHost`:
 
 ```sh
 FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted
-arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --library third_party/ESPHost --output-dir build/kernel-challenger-hosted kernel
+arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --library third_party/ESPHost --output-dir build/kernel-challenger-hosted src/kernel
 arduino-cli upload  --fqbn $FQBN -p /dev/ttyACM0 --input-dir build/kernel-challenger-hosted
 ```
 
@@ -704,7 +704,7 @@ demosrv [name] [-p port]
 
 A small server that answers requests sent through a named pipe. It is the
 reference for writing your own background program (its source is
-`userland/demosrv.c`, and every step is commented). Run it as a job:
+`src/userland/demosrv.c`, and every step is commented). Run it as a job:
 
 ```
 /> demosrv &
@@ -807,7 +807,7 @@ password off the card in plain text. It is not strong security: the key is
 in kernel memory while the board runs, T2DOS has no memory protection, and a
 debug probe attached at reset can read OTP. A board that needs real
 protection should keep the key in a secure element (such as an ATECC608);
-`kernel/vault.cpp` is the only code that knows where the key lives.
+`src/kernel/vault.cpp` is the only code that knows where the key lives.
 
 #### The PC file server
 
@@ -1341,7 +1341,7 @@ beat 3
 A job reaches the console with `printf`
 like any program; with `> file &` its output goes to the file instead.
 
-A server follows three steps, as `userland/demosrv.c` shows:
+A server follows three steps, as `src/userland/demosrv.c` shows:
 
 1. Create the resources first, before the first call that waits: the pipes
    (`mkpipe`), a `listen` socket, and open what you will read. The shell runs
@@ -1551,7 +1551,7 @@ expression (only `sizeof(type)`), functions of your own with `...` (variadic
 macros work), struct assignment (`a = b` with structs is an error; copy with
 `memcpy`), 64-bit integers, `long long` and real doubles.
 
-The tests in `compiler/tests/` show each feature in use (test4.c function
+The tests in `src/compiler/tests/` show each feature in use (test4.c function
 pointers, test5.c initializers, test6.c arrays, test7.c unsigned and short,
 test8.c the comma operator, test9.c macros, test10.c conditional compilation,
 test11.c float, test12.c addresses of struct members, test13.c the maths
@@ -2616,7 +2616,7 @@ board keeps the default server and the remote directory in `/etc/remote`
 (two lines: `host[:port]` and the directory), which `wifi -s` and `rcd`
 write. `/etc/mount` holds the network filesystem's mounts, one
 `name host[:port] dir` line each (dir is the rest of the line), written by
-`mount` and `umount` (`lib/mtab.c`); a file in the older format, two lines
+`mount` and `umount` (`src/lib/mtab.c`); a file in the older format, two lines
 `host[:port]` and `dir`, is read as the mount `fs`.
 
 ### File formats
@@ -2627,7 +2627,7 @@ write. `/etc/mount` holds the network filesystem's mounts, one
   `ssid\0password\0`, then a 16-byte AES-GCM tag (`T2W1` is also the
   authenticated data). Written and read only by the kernel.
 - **Object (`.o`, `T2OB`) and library (`.a`, `T2AR`):** defined in
-  `lib/t2obj.h`. An object holds code, data, symbols, relocations and a
+  `src/lib/t2obj.h`. An object holds code, data, symbols, relocations and a
   string table; a library holds a symbol index and the member objects.
 
 ---
@@ -2638,19 +2638,23 @@ write. `/etc/mount` holds the network filesystem's mounts, one
 
 ```
 sys.h             the system call ABI, shared by the kernel, the compiler and programs
-kernel/kernel.ino the kernel (arduino-pico; SD card on SPI, LittleFS fallback)
-kernel/ramfs.cpp  /tmp in PSRAM; vault.cpp seals the saved WiFi password
-kernel/netfs.c    the network filesystem at /mnt/fs (also used by host_linux.c);
+src/kernel/kernel.ino
+                  the kernel (arduino-pico; SD card on SPI, LittleFS fallback)
+src/kernel/ramfs.cpp
+                  /tmp in PSRAM; vault.cpp seals the saved WiFi password
+src/kernel/netfs.c
+                  the network filesystem at /mnt/fs (also used by host_linux.c);
                   netfs.cpp makes it an arduino-pico filesystem
-compiler/cc.c     the compiler and driver; compiler/tests/ has the language tests
-assembler/as.c    the assembler
-linker/ld.c       the linker
-binutils/         ar, nm, objdump
-lib/              t2obj.h and t2obj.c (object formats), net.c (network helpers),
+src/compiler/cc.c the compiler and driver; src/compiler/tests/ has the language tests
+src/assembler/as.c
+                  the assembler
+src/linker/ld.c   the linker
+src/binutils/     ar, nm, objdump
+src/lib/          t2obj.h and t2obj.c (object formats), net.c (network helpers),
                   mtab.c (/etc/mount for mount and umount)
-basic/            the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
+src/basic/        the BASIC interpreter (several files; pcsys.c is the shim for the PC test build)
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
-userland/         sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
+src/userland/     sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
                   write, edit, blink, reboot, wifi, get, send, rls, rcd, rcp, ping, nc,
                   mount, umount, demosrv
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ and
@@ -2663,7 +2667,7 @@ root/             the filesystem image that make fills: /bin, /lib, /src
 ### Make targets
 
 ```sh
-make            # the PC cross compiler (compiler/cc), host tools (build/host/) and root/bin/*.bin
+make            # the PC cross compiler (src/compiler/cc), host tools (build/host/) and root/bin/*.bin
 make check      # the PC test suite
 make ref        # the reference compiler for the byte-identity check
 make host       # host_linux (needs arm-linux-gnueabihf-gcc)
@@ -2674,7 +2678,7 @@ The PC build of `cc` runs `build/host/as` and `build/host/ld` (or those in
 `$T2_TOOLS`), so the same commands work on the PC:
 
 ```sh
-compiler/cc -I root/lib -o hello.bin hello.c
+src/compiler/cc -I root/lib -o hello.bin hello.c
 ```
 
 ### Checks
@@ -2712,8 +2716,8 @@ python3 tools/check_basic.py --board          # the BASIC cases on the board
 
 `check_jobs.py` uploads the programs of `tests/jobs/`, runs every case
 (spawn, kill, redirection, `exec` inside a job, pipes) and checks that the
-free PSRAM is the same afterwards. `check_ref.py` lists `userland/sh.c` and
-`userland/demosrv.c` as excluded ("newer builtins"): they use calls that the
+free PSRAM is the same afterwards. `check_ref.py` lists `src/userland/sh.c` and
+`src/userland/demosrv.c` as excluded ("newer builtins"): they use calls that the
 reference compiler does not know, so they cannot be compared with it.
 
 ### Self-hosting

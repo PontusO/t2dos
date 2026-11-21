@@ -9,7 +9,7 @@
 # Layout below the board root /: tool sources mirror the repo dirs under
 # /src, includes and shared lib files (sys.h, basic.h) live in /lib, mirrored like the PC root/lib tree. Built binaries are byte-equal
 # to the PC Makefile's root/bin/*.bin (same cc, same flags up to -I paths).
-# cc's sources: keep in sync with the PC Makefile's CC_SRC (compiler/*.c) and the
+# cc's sources: keep in sync with the PC Makefile's CC_SRC (src/compiler/*.c) and the
 # plan-board fixture in tools/check_make.py (which pins the command built from this line)
 /src/cc.bin: -I /lib /src/compiler/cc.c /src/compiler/emit.c /src/compiler/expr.c /src/compiler/fp.c /src/compiler/lex.c /src/compiler/licm.c /src/compiler/opt.c /src/compiler/regs.c /src/compiler/state.c /src/compiler/stmt.c /src/compiler/types.c /lib/cc.h /lib/sys.h
 /src/as.bin: -I /lib /src/assembler/as.c /lib/sys.h /lib/t2obj.h

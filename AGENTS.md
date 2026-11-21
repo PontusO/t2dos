@@ -44,7 +44,7 @@ The board is one serial port: only one program may hold `/dev/ttyACM*` at a time
 ## Build and test
 
 ```sh
-make            # gcc builds compiler/cc and build/host/{as,ld,ar,nm,objdump}, then cc builds root/bin/*.bin
+make            # gcc builds src/compiler/cc and build/host/{as,ld,ar,nm,objdump}, then cc builds root/bin/*.bin
 make check      # PC checks: asm vs GNU as, objdump vs GNU objdump, link tests, byte identity, driver
 make ref        # build build/ref/cc (the pre-assembler compiler at build/ref/COMMIT) for check_ref
 make host       # build the Linux/ARM kernel harness (needs arm-linux-gnueabihf-gcc)
@@ -59,7 +59,7 @@ Triage - what you changed, what to run:
 
 | change | PC check | board check |
 |---|---|---|
-| `cc.c` codegen (no `-O` path touched) | `check_ref.py` (byte identity), `compiler/tests/test*.c` vs gcc | `check_toolchain.py --selfhost` |
+| `cc.c` codegen (no `-O` path touched) | `check_ref.py` (byte identity), `src/compiler/tests/test*.c` vs gcc | `check_toolchain.py --selfhost` |
 | anything in `cc/as/ld/binutils` | `make check`, `bench.py --pc` | `--board`, `--selfhost` |
 | `as` encodings | `check_asm.py --diff N` (GNU oracle below) | |
 | `ld` / objects / archives | `check_link.py --pc` | `check_link.py --board` |
@@ -80,12 +80,12 @@ same syscall contract as the kernel against a root directory (default `./root`):
 
 ```sh
 printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin       # drive the shell
-compiler/cc -o root/bin/test.bin compiler/tests/test.c && qemu-arm ./host_linux -r root /bin/test.bin
+src/compiler/cc -o root/bin/test.bin src/compiler/tests/test.c && qemu-arm ./host_linux -r root /bin/test.bin
 ```
 
 A fresh `host_linux` that segfaults at startup is a stale or bad build (`make host`),
 not your code. In this sandbox it may not start at all; direct `.bin` runs still work.
-`compiler/tests/*.c` exercise the language subset; test.c returns 42, test4.c onward
+`src/compiler/tests/*.c` exercise the language subset; test.c returns 42, test4.c onward
 are standard C so gcc builds them natively for reference output (only pointer `sizeof`
 differs). On-board testing goes over the serial console (`put name size` + raw bytes,
 `hexdump file`); `tools/board.py` wraps it (`put`, `run`, `fetch`, `expect_gcc`). If
@@ -101,11 +101,11 @@ includes `sys.h` from the repo root):
 
 ```sh
 FQBN=rp2040:rp2040:ilabs_cpico_2350:flash=8388608_7340032
-arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel kernel
+arduino-cli compile --fqbn $FQBN --build-property "compiler.cpp.extra_flags=-I$PWD" --output-dir build/kernel src/kernel
 arduino-cli upload  --fqbn $FQBN -p /dev/ttyACMx --input-dir build/kernel
 ```
 
-On the Challenger 2350 WiFi/BLE use `FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted` and add `--library third_party/ESPHost` (the default `esp_at` build has no WiFi driver; the core's bundled ESPHost hangs in the GPIO IRQ once WiFi is up, so the patched copy is required). A hard hang that stops accepting serial input needs a manual reset or BOOTSEL and a `.uf2` copy; reflashing keeps the flash filesystem. `kernel/vault.cpp` (wifi -k, AES-128-GCM) uses OTP page 60 rows 0xf00-0xf08 only: never write any other OTP row.
+On the Challenger 2350 WiFi/BLE use `FQBN=rp2040:rp2040:challenger_2350_wifi6_ble5:flash=8388608_7340032,espwifitype=esp_hosted` and add `--library third_party/ESPHost` (the default `esp_at` build has no WiFi driver; the core's bundled ESPHost hangs in the GPIO IRQ once WiFi is up, so the patched copy is required). A hard hang that stops accepting serial input needs a manual reset or BOOTSEL and a `.uf2` copy; reflashing keeps the flash filesystem. `src/kernel/vault.cpp` (wifi -k, AES-128-GCM) uses OTP page 60 rows 0xf00-0xf08 only: never write any other OTP row.
 
 ## Architecture
 
@@ -114,9 +114,9 @@ On the Challenger 2350 WiFi/BLE use `FQBN=rp2040:rp2040:challenger_2350_wifi6_bl
 about to change; do not load the whole file. The ones that break silently if missed:
 
   - A new or changed syscall must land in all four places: `sys.h`, the builtin strings
-    in `cc.c` `main()`, the switch in `kernel/kernel.ino`, the switch in `host_linux.c`.
-  - Toolchain sources (`compiler/cc.c`, `assembler/as.c`, `linker/ld.c`, `binutils/*.c`,
-    `lib/t2obj.c`) must stay inside the subset the committed cc compiles (bootstrap);
+    in `cc.c` `main()`, the switch in `src/kernel/kernel.ino`, the switch in `host_linux.c`.
+  - Toolchain sources (`src/compiler/cc.c`, `src/assembler/as.c`, `src/linker/ld.c`,
+    `src/binutils/*.c`, `src/lib/t2obj.c`) must stay inside the subset the committed cc compiles (bootstrap);
     when in doubt, compile your change with the committed cc and `build/ref/cc`.
   - No absolute addresses anywhere: data symbols are offsets against `r9`, text symbols
     code offsets.

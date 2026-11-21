@@ -9,10 +9,10 @@ Deep reference for how T2DOS works. AGENTS.md holds the build/test workflow and 
   1. `sys.h` (numbers are frozen; add new ones in the gaps of their group),
   2. the builtin name/number string in `cc.c` `main()` (and the list there of builtins
      returning `char *`); `as`, `ld` and the binutils use the same builtins,
-  3. the dispatch `switch` in `kernel/kernel.ino`,
+  3. the dispatch `switch` in `src/kernel/kernel.ino`,
   4. the dispatch `switch` in `host_linux.c`.
-- **Bootstrap rule.** `compiler/cc.c`, `assembler/as.c`, `linker/ld.c`, `binutils/*.c`
-  and `lib/t2obj.c` must stay inside the subset the committed `cc` compiles, because
+- **Bootstrap rule.** `src/compiler/cc.c`, `src/assembler/as.c`, `src/linker/ld.c`,
+  `src/binutils/*.c` and `src/lib/t2obj.c` must stay inside the subset the committed `cc` compiles, because
   they rebuild themselves on the board. No floats, initializers, function pointers,
   unsigned/short, 2-D arrays or multi-line macros in `cc.c`; the subset still lacks
   `static`, `const`, do-while, goto, `sizeof expr`, user variadic functions, long long
@@ -26,7 +26,7 @@ Deep reference for how T2DOS works. AGENTS.md holds the build/test workflow and 
 ## Toolchain
 
 - **Toolchain pipeline:** `cc` writes GNU unified-syntax Thumb-2 assembly; `as` turns
-  it into a T2DOS object (`"T2OB"`, see `lib/t2obj.h`), `ld` links objects and `ar`
+  it into a T2DOS object (`"T2OB"`, see `src/lib/t2obj.h`), `ld` links objects and `ar`
   archives (`"T2AR"`, only needed members are linked) into the `.bin`. `cc` is also the
   driver (`-S`, `-c`, `-l`/`-L`, mixed inputs; temporaries in `/tmp`): on the board it
   `exec`s `/bin/as.bin` and `/bin/ld.bin`, on the PC it runs `build/host/as`/`ld` (or
@@ -66,7 +66,7 @@ Deep reference for how T2DOS works. AGENTS.md holds the build/test workflow and 
   in PSRAM. PSRAM shares the QSPI controller with flash: nothing may touch PSRAM while
   flash is written (hence the SRAM `kstack` in `sys_entry`). Program mallocs are per
   `Proc`, zeroed on allocation (`cc` depends on that) and freed on exit. `/tmp` is a
-  PSRAM RAM filesystem (`kernel/ramfs.cpp`): writes stop at `TMP_MARGIN` (1 MB) free;
+  PSRAM RAM filesystem (`src/kernel/ramfs.cpp`): writes stop at `TMP_MARGIN` (1 MB) free;
   contents lost at reset; checked by `check_toolchain.py --board` (`check_ramtmp`).
 - **Tasks:** program code is preempted, kernel code never is. Foreground + up to 4
   jobs; all switches go through `k_yield()`/`k_wait()` (getchar, kbhit, sleep, recv,
@@ -78,14 +78,14 @@ Deep reference for how T2DOS works. AGENTS.md holds the build/test workflow and 
   Details of `preempt_tramp`, pipes and the type-ahead ring: comments in `kernel.ino`.
 ## Other subsystems
 
-- **BASIC (`basic/`):** QBasic-style bytecode interpreter, `root/bin/basic.bin`; VM in
+- **BASIC (`src/basic/`):** QBasic-style bytecode interpreter, `root/bin/basic.bin`; VM in
   `vm.c`, yields every 1024 ops, `mem_alloc` is the only allocator (64 KB PSRAM
-  margin). cc accepts one `-I`, so it builds with `-I basic`. Maths built-ins are
-  syscalls 112-130 (`lib/math.h`, TFLOAT); user syscalls start at 131.
+  margin). cc accepts one `-I`, so it builds with `-I src/basic`. Maths built-ins are
+  syscalls 112-130 (`src/lib/math.h`, TFLOAT); user syscalls start at 131.
 - **printf/sprintf and string/memory helpers run kernel-side**, so the format subset is
   whatever `kernel.ino` and `host_linux.c` implement; keep them in sync.
 - **Includes:** `#include "x"` resolves relative to the *current directory*, then the
   `-I` dir, then `/lib`. The Makefile runs from the repo root with `-I lib`, so
-  userland picks up the top-level `sys.h` and `lib/net.c`. Never add a second `sys.h`.
+  userland picks up the top-level `sys.h` and `src/lib/net.c`. Never add a second `sys.h`.
 - **`root/`** is the SD card image. `root/bin`, `root/lib` and `root/src/*` are build
   output (gitignored); copy `root/` to the card.
