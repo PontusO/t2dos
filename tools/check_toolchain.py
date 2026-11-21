@@ -480,7 +480,8 @@ def check_ramtmp(r):
 
 # (name, sources): sources are repo-relative and staged at /src/<that path>, so a
 # multi-file tool (cc) keeps its layout; the board compiles them in one command.
-SELFHOST = [('cc', ['compiler/cc.c']), ('as', ['assembler/as.c']), ('ld', ['linker/ld.c']),
+SELFHOST = [('cc', sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, 'compiler', '*.c')))),
+            ('as', ['assembler/as.c']), ('ld', ['linker/ld.c']),
             ('ar', ['binutils/ar.c']), ('nm', ['binutils/nm.c']), ('objdump', ['binutils/objdump.c'])]
 
 

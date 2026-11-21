@@ -78,3 +78,18 @@ all other tools byte-identically, then builds tests 4-12.
 
 A `docs/NOTES-cc-split.md` ledger tracks what moved and what is ruled
 out, per the context-window rules.
+
+## Results (landed 2026-11-21)
+
+Eleven sources + `cc.h` as planned; `cc.c` is 312 lines (cfile->asm,
+runner, driver). Every move passed `make`, `check_ref different: 0` and
+the PC selfhost proxy byte-identity. Final gates: `make check` ok;
+`bench.py --pc` 11/11; `check_make.py --pc` 13/13 cases; tests 4-12 vs
+gcc under qemu match; `check_make --board` all 8 tools byte-identical
+(cc.bin 226256 B built on-board from `/src/compiler/*.c`, 36 s);
+`check_toolchain --selfhost` IDENTICAL x6 (the board cc rebuilds the
+split cc in 26.2 s) and tests 4-12 built on-board PASS. Costs: cc.bin
+grew 207403 -> 226256 bytes (per-TU data/string layout, cross-TU symbol
+refs), on-board cc build 19 -> 26-36 s; check_ref lost its
+`compiler/cc.c` entry (ref cc `e4fb427` predates `extern`), the rest of
+its corpus (39 files) gates codegen unchanged.

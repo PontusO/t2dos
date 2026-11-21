@@ -138,8 +138,12 @@ def pc_cases():
         if tok.startswith('/') and tok not in targets:
             stage(tok, 'int main(void) { return 0; }\n')
     rc, out = run_make(['-n', '-f', '/tmp/make/Makefile.board', 'all'])
-    want = ['/bin/cc.bin -I /lib -o /src/%s.bin /src/%s/%s.c' % (n, d, n)
-            for n, d in (('cc', 'compiler'), ('as', 'assembler'), ('ld', 'linker'))] + \
+    want = ['/bin/cc.bin -I /lib -o /src/cc.bin /src/compiler/cc.c /src/compiler/emit.c '
+            '/src/compiler/expr.c /src/compiler/fp.c /src/compiler/lex.c /src/compiler/licm.c '
+            '/src/compiler/opt.c /src/compiler/regs.c /src/compiler/state.c '
+            '/src/compiler/stmt.c /src/compiler/types.c',
+            '/bin/cc.bin -I /lib -o /src/as.bin /src/assembler/as.c',
+            '/bin/cc.bin -I /lib -o /src/ld.bin /src/linker/ld.c'] + \
            ['/bin/cc.bin -I /lib -o /src/%s.bin /src/binutils/%s.c' % (n, n)
             for n in ('ar', 'nm', 'objdump')] + \
            ['/bin/cc.bin -I /lib -o /src/basic.bin /src/basic/comp.c /src/basic/fmt.c '
@@ -162,7 +166,7 @@ def cleanup():
     shutil.rmtree(MKTMP, ignore_errors=True)
 
 
-REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'basic/basic.h'}  # mirrored headers
+REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'basic/basic.h', '/lib/cc.h': 'compiler/cc.h'}  # mirrored headers
 
 
 def repo_path(tok):                       # board path -> repo file (check_toolchain layout)
