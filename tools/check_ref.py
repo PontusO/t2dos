@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Byte identity of the assembly pipeline against the reference compiler.
 
-  check_ref.py            for every userland/*.c, compiler/cc.c, assembler/as.c, linker/ld.c,
+  check_ref.py            for every userland/*.c, assembler/as.c, linker/ld.c,
                           binutils/*.c and compiler/tests/test*.c: build/ref/cc -o ref.bin X
                           versus compiler/cc -o new.bin X (cc runs build/host/as and
                           build/host/ld); the .bin files must be byte-identical.
+                          compiler/cc.c itself left the corpus with the split into
+                          compiler/*.c (see sources()).
 
 A file whose reference .bin starts at an init stub (its entry is not main: the reference
 cc's stub begins with push {r4, lr} = 0xB510) has run-before-main initializer code, which
@@ -48,7 +50,9 @@ def sources():
     """(source, flags) for the identity set; -I lib where the Makefile uses it."""
     lib = ['-I', 'lib']
     out = [(f, lib) for f in sorted(glob.glob('userland/*.c'))]
-    out.append(('compiler/cc.c', []))
+    # compiler/cc.c is not compared: since the split into compiler/*.c the sources use
+    # extern (the ref cc at e4fb427 predates it); the split cc is gated by behaviour
+    # (bench, tests) and on-board byte identity (check_make --board, --selfhost).
     out.append(('assembler/as.c', lib))
     out.append(('linker/ld.c', lib))
     out += [(f, lib) for f in sorted(glob.glob('binutils/*.c'))]
