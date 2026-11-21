@@ -53,6 +53,8 @@ CASES = [
      [['cc', '-o', 'globals.bin', 'globals_a.c', 'globals_b.c']]),
     ('static_files', ['static_files_a.c', 'static_files_b.c'],
      [['cc', '-o', 'static_files.bin', 'static_files_a.c', 'static_files_b.c']]),
+    ('static_init', ['static_init.c'],
+     [['cc', '-o', 'static_init.bin', 'static_init.c']]),
     ('names', ['names.c', 'names_lib.c'],
      [['cc', '-S', 'names_lib.c'],
       ['cc', '-c', '-o', 'nl.o', 'names_lib.s'],

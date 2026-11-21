@@ -355,6 +355,7 @@ int parse_global() {
       }
       next();
       s->nptypes = n < 32 ? n : 32;
+      if (st && s->class == CFun && !s->statik) die("static mismatch");   // declared plain, defined static: the prototype promised external linkage
       if (st) s->statik = 1;
       if (s->statik && s->len == 4 && strncmp(s->name, "main", 4) == 0) die("static main");   // strncmp: names are not NUL-terminated
       if (tk == ';') {                          // prototype

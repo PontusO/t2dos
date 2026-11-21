@@ -1,0 +1,2 @@
+protostat.c:2: error: static mismatch near token 123
+exit 1
