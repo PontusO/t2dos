@@ -3,17 +3,19 @@
 # that target's build flags (-I takes the next token); remaining prereqs are
 # sources, headers (checked now, inputs to a future timestamp pass) or other
 # targets (a line whose prereq matches a defined target name resolves it).
+# Files a source #includes (t2obj.c) are NOT prereqs: cc would get them twice
+# (duplicate symbols); they are staged for the include path like headers.
 # Always rebuilds: no timestamps. Checker: tools/check_make.py.
 # Layout below the board root /: tool sources mirror the repo dirs under
-# /src, includes and lib files live in /lib. Built binaries are byte-equal
+# /src, includes and shared lib files (sys.h, basic.h) live in /lib, mirrored like the PC root/lib tree. Built binaries are byte-equal
 # to the PC Makefile's root/bin/*.bin (same cc, same flags up to -I paths).
-/src/cc.bin: -I /lib /src/compiler/cc.c /sys.h
-/src/as.bin: -I /lib /src/assembler/as.c /sys.h /lib/t2obj.h /lib/t2obj.c
-/src/ld.bin: -I /lib /src/linker/ld.c /sys.h /lib/t2obj.h /lib/t2obj.c
-/src/ar.bin: -I /lib /src/binutils/ar.c /sys.h /lib/t2obj.h /lib/t2obj.c
-/src/nm.bin: -I /lib /src/binutils/nm.c /sys.h /lib/t2obj.h /lib/t2obj.c
-/src/objdump.bin: -I /lib /src/binutils/objdump.c /sys.h /lib/t2obj.h /lib/t2obj.c
+/src/cc.bin: -I /lib /src/compiler/cc.c /lib/sys.h
+/src/as.bin: -I /lib /src/assembler/as.c /lib/sys.h /lib/t2obj.h
+/src/ld.bin: -I /lib /src/linker/ld.c /lib/sys.h /lib/t2obj.h
+/src/ar.bin: -I /lib /src/binutils/ar.c /lib/sys.h /lib/t2obj.h
+/src/nm.bin: -I /lib /src/binutils/nm.c /lib/sys.h /lib/t2obj.h
+/src/objdump.bin: -I /lib /src/binutils/objdump.c /lib/sys.h /lib/t2obj.h
 /src/basic.bin: -I /lib /src/basic/comp.c /src/basic/fmt.c /src/basic/funcs.c /src/basic/io.c /src/basic/lex.c /src/basic/main.c /src/basic/vm.c /lib/basic.h
-/src/sh.bin: -I /lib /src/userland/sh.c /sys.h /lib/net.c /lib/mtab.c
+/src/sh.bin: -I /lib /src/userland/sh.c /lib/sys.h
 tools: /src/cc.bin /src/as.bin /src/ld.bin /src/ar.bin /src/nm.bin /src/objdump.bin
 all: tools /src/basic.bin /src/sh.bin

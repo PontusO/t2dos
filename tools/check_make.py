@@ -132,20 +132,20 @@ def pc_cases():
     os.makedirs(MKTMP, exist_ok=True)
     with open(os.path.join(MKTMP, 'Makefile.board'), 'w') as f:
         f.write(board)
-    for tok in board.replace(':', ' ').replace('\n', ' ').split():
-        if tok.startswith('/'):
+    body = '\n'.join(l.split('#')[0] for l in board.splitlines())
+    targets = {l.split(':')[0].strip() for l in board.splitlines() if ':' in l}
+    for tok in body.replace(':', ' ').replace('\n', ' ').split():
+        if tok.startswith('/') and tok not in targets:
             stage(tok, 'int main(void) { return 0; }\n')
     rc, out = run_make(['-n', '-f', '/tmp/make/Makefile.board', 'all'])
     want = ['/bin/cc.bin -I /lib -o /src/%s.bin /src/%s/%s.c' % (n, d, n)
-            for n, d in (('cc', 'compiler'),)] + \
-           ['/bin/cc.bin -I /lib -o /src/%s.bin /src/%s/%s.c /lib/t2obj.c' % (n, d, n)
-            for n, d in (('as', 'assembler'), ('ld', 'linker'))] + \
-           ['/bin/cc.bin -I /lib -o /src/%s.bin /src/binutils/%s.c /lib/t2obj.c' % (n, n)
+            for n, d in (('cc', 'compiler'), ('as', 'assembler'), ('ld', 'linker'))] + \
+           ['/bin/cc.bin -I /lib -o /src/%s.bin /src/binutils/%s.c' % (n, n)
             for n in ('ar', 'nm', 'objdump')] + \
            ['/bin/cc.bin -I /lib -o /src/basic.bin /src/basic/comp.c /src/basic/fmt.c '
             '/src/basic/funcs.c /src/basic/io.c /src/basic/lex.c /src/basic/main.c '
             '/src/basic/vm.c',
-            '/bin/cc.bin -I /lib -o /src/sh.bin /src/userland/sh.c /lib/net.c /lib/mtab.c']
+            '/bin/cc.bin -I /lib -o /src/sh.bin /src/userland/sh.c']
     got = [l for l in out.splitlines() if l.strip()]
     if rc != 0 or got != want:
         fail('plan-board', 'exit %d, want %r, got %r' % (rc, want, got))
@@ -162,7 +162,72 @@ def cleanup():
     shutil.rmtree(MKTMP, ignore_errors=True)
 
 
+REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'basic/basic.h'}  # mirrored headers
+
+
+def repo_path(tok):                       # board path -> repo file (check_toolchain layout)
+    if tok in REPO_OF:
+        return REPO_OF[tok]
+    if tok.startswith('/src/'):
+        return tok[len('/src/'):]
+    return tok.lstrip('/')
+
+
+def board_main(tool_names=None):
+    from check_toolchain import Remote
+    import time
+    r = Remote()
+    with open(os.path.join(ROOT, 'Makefile.board')) as f:
+        board = f.read()
+    body = '\n'.join(l.split('#')[0] for l in board.splitlines())
+    targets = {l.split(':')[0].strip() for l in board.splitlines() if ':' in l}
+    toks = [t for t in body.replace(':', ' ').replace('\n', ' ').split()
+            if t.startswith('/') and t not in targets]
+    for d in sorted({os.path.dirname(t) for t in toks} - {'/'}):
+        r.run('mkdir ' + d, 10.0)         # "exists" is a fine answer
+    r.put(os.path.join(ROOT, 'root', 'bin', 'make.bin'), '/bin/make.bin')
+    for t in ('cc', 'as'):                # make runs the toolchain already on the board
+        r.put(os.path.join(ROOT, 'root', 'bin', t + '.bin'), '/bin/%s.bin' % t)
+    for t in ['/lib/t2obj.c', '/lib/net.c', '/lib/mtab.c'] + toks:   # included/not-listed files too
+        src = os.path.join(ROOT, repo_path(t))
+        if os.path.isdir(src):                    # -I /lib: a directory token, push nothing
+            r.run('mkdir ' + t, 10.0)
+            continue
+        if not os.path.exists(src):
+            fail('board-stage', 'no repo file for board path %s' % t)
+        r.put(src, t)
+    r.put(os.path.join(ROOT, 'Makefile.board'), '/src/Makefile.board')
+    names = tool_names or ['cc', 'as', 'ld', 'ar', 'nm', 'objdump', 'basic', 'sh']
+    for n in names:
+        out, code = r.run('/bin/make.bin -f /src/Makefile.board /src/%s.bin' % n, 1200.0)
+        if code:
+            fail('board-' + n, 'make exited %d: %r' % (code, out[-6:]))
+        got = r.fetch('/src/%s.bin' % n)
+        with open(os.path.join(ROOT, 'root', 'bin', '%s.bin' % n), 'rb') as f:
+            want = f.read()
+        if got != want:
+            off = next(i for i in range(min(len(got), len(want))) if got[i] != want[i])
+            fail('board-' + n, '%s.bin differs: %d vs %d bytes, first diff at %d'
+                 % (n, len(got), len(want), off))
+        print('PASS board-%s: byte-identical to root/bin, %d bytes' % (n, len(got)))
+    # a child failure must stop make with a message and the child's code
+    r.run('mkdir /src/mkfail', 10.0)
+    r.put(b'int main(void) { bogus syntax here; }\n', '/src/mkfail/bad.c')
+    r.put(b'/src/mkfail/bad.bin: /src/mkfail/bad.c\n', '/src/Makefile.fail')
+    out, code = r.run('/bin/make.bin -f /src/Makefile.fail /src/mkfail/bad.bin', 120.0)
+    if code == 0 or not any('failed' in l for l in out):
+        fail('board-fail', 'expected a failed cc, exit %d out %r' % (code, out[-6:]))
+    print('PASS board-fail: child failure stops make (%d lines, exit %d)' % (len(out), code))
+    print('ok: make board')
+    return 0
+
+
 def main(argv):
+    if '--board' in argv:
+        names = None
+        if '--tools' in argv:
+            names = argv[argv.index('--tools') + 1].split(',')
+        return board_main(names)
     if '--pc' in argv:
         try:
             pc_cases()
