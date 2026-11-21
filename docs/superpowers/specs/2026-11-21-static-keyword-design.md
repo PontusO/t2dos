@@ -126,3 +126,29 @@ Using `static` inside `compiler/*.c` (retiring the globally-unique-name rule
 in `cc.h`) — needs the new cc committed first; its own round with only
 binaries as the diff. `static` in BASIC — different language, no. Inline
 storage-class keywords in parameters — invalid C, unhandled.
+
+## Results (landed 2026-11-21)
+
+Implemented as designed with four deviations, all ledgered:
+
+- The new test is `test15.c`, not `test14.c` — test14 was taken (float
+  s-register test); `check_ref.STATIC_TESTS` excludes it by name.
+- Statics never register in `gsym` at all, so `write_data` needed no change
+  (cleaner than the spec's "skip the label"; same net effect).
+- `lea_data(0, n, off)` prints `n` literally, so static references pass
+  `(0, val, val)` — not `(0, 0, val)` as the plan text had it.
+- A static local's *coded* initializer could not call `init_close` (it
+  flushes the function's whole line list into `.Linit` — crash mid-body);
+  `init_splice` moves only the initializer's trailing lines. Constants
+  write the image directly and need nothing. Computed initializers for
+  statics extend C the way globals already do (gcc rejects them; the
+  gcc-diffed `test15.c` therefore uses constant inits, and the once-before-
+  main property is pinned by a qemu case).
+- Block scoping (restoring shadowed names at `}`) is a pre-existing cc
+  limitation, reproduced with the reference cc on plain locals — the
+  shadowing test pins restoration at function end instead.
+
+Gates: `make check` ok; `check_ref` different: 0 (39 files); `bench --pc`
+11/11; `check_make --pc` 13/13; `check_toolchain --pc` 8 cases + 6 errors;
+test4–12 still match gcc; test15 matches gcc plain **and** `-O`;
+`--selfhost` and `check_make --board` as reported in the ledger.

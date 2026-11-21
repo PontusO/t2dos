@@ -1473,6 +1473,14 @@ is what lets it compile itself on the board.
 `++`/`--`, the compound assignments (`+= -= *= /= %= &= |= ^= <<= >>=`) and
 the comma operator; `sizeof(type)`; casts; prototypes; `extern`.
 
+**Storage classes:** `extern` (the storage is in another file) and `static`
+(internal linkage: a file-scope variable or function is invisible to other
+files, and a `static` local keeps its value between calls - it lives in the
+data segment, not the frame). A `static` variable initializes with global
+semantics: constants go straight into the data, computed initializers run as
+code before `main`, exactly once. `static` and `extern` cannot combine, and
+`main` cannot be `static`.
+
 **Integer rules** follow C: `char` and `short` promote to `int`; with an
 `unsigned int` operand, comparisons, `/`, `%` and `>>` are unsigned; casts,
 stores and `return` truncate to the target type. Literals take `u` and `l`
