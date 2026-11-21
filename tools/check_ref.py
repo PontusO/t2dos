@@ -19,7 +19,11 @@ to fmod) cannot be compared either: it is excluded too and checked by behaviour 
 (check_jobs.py; test13.c with `board.py expect`). Any other reference failure counts as
 different.
 
-Prints "identical: N, excluded (init code): M, excluded (newer builtins): B, different: K",
+A source that uses the `static` keyword (STATIC_TESTS) is unknown to the reference cc,
+which dies with a generic parse error there; it is excluded by file name and checked by
+behaviour instead (qemu vs gcc, and on the board by check_toolchain --selfhost).
+
+Prints "identical: N, excluded (init code): M, excluded (newer builtins): B, excluded (static syntax): S, different: K",
 the excluded files on one line per class and the names of the different files; exit
 status 1 if K > 0. Work files go to build/s/ref/.
 """
@@ -38,6 +42,7 @@ NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe', 'reboot', 'wifi_sa
                   'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
                   'exp', 'log', 'log10', 'pow', 'sqrt', 'fabs', 'floor', 'ceil', 'fmod')
 UNDEF_RE = re.compile(r'undefined function: (\w+)\(')
+STATIC_TESTS = ('compiler/tests/test15.c',)    # uses `static`: unparseable by the ref cc
 
 
 def newer_builtin(msg):
@@ -86,8 +91,12 @@ def main():
     same = []
     excluded = []
     newer = []
+    staticx = []
     diff = []
     for src, flags in srcs:
+        if src in STATIC_TESTS:
+            staticx.append(src)
+            continue
         name = src.replace('/', '-')[:-2]
         ref = os.path.join(WORK, name + '.ref.bin')
         new = os.path.join(WORK, name + '.bin')
@@ -115,12 +124,14 @@ def main():
         else:
             k = next((i for i in range(min(len(a), len(b))) if a[i] != b[i]), min(len(a), len(b)))
             diff.append((src, 'first difference at byte %d (sizes %d and %d)' % (k, len(a), len(b))))
-    print('identical: %d, excluded (init code): %d, excluded (newer builtins): %d, different: %d' %
-          (len(same), len(excluded), len(newer), len(diff)))
+    print('identical: %d, excluded (init code): %d, excluded (newer builtins): %d, excluded (static syntax): %d, different: %d' %
+          (len(same), len(excluded), len(newer), len(staticx), len(diff)))
     if excluded:
         print('excluded (init code): ' + ' '.join(excluded))
     if newer:
         print('excluded (newer builtins): ' + ' '.join(newer))
+    if staticx:
+        print('excluded (static syntax): ' + ' '.join(staticx))
     for src, why in diff:
         print('different: %s: %s' % (src, why))
     return 1 if diff else 0

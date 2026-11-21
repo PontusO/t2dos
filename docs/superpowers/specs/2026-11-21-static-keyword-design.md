@@ -95,7 +95,7 @@ function cannot resurrect the flag — 3 one-line edits).
 
 ## Tests (this round's deliverable)
 
-`compiler/tests/test14.c` — standard C (gcc builds it natively for reference
+`compiler/tests/test15.c` — standard C (gcc builds it natively for reference
 output, like test4+): static global var/function used across several
 functions, same-named static locals in two functions (collision test), static
 arrays, constant *and* computed initializers (`.Linit` path) for both static
@@ -113,12 +113,12 @@ byte-identical anyway.
 
 ## Gates (AGENTS triage: cc codegen + new syntax)
 
-PC: `make check`; `check_ref` different: 0; test14 vs gcc under qemu, plain
+PC: `make check`; `check_ref` different: 0; test15 vs gcc under qemu, plain
 and `-O`; `bench.py --pc`; `check_make --pc`.
 Board (standing permission): `check_toolchain.py --selfhost` (the committed
 board cc must still rebuild the new cc byte-identically — it only *parses*
 `static` in the sources, never compiles with it), `check_make --board`,
-test14 built and run on the board.
+test15 built and run on the board.
 
 ## Out of scope
 

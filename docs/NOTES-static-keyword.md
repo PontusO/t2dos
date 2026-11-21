@@ -20,7 +20,7 @@ toolchain sources can't use it yet).
   registration next to `p = "extern"` at cc.c:55.
 - Restore loops stmt.c:317/:346 must grow (`CSta`/`CStaArr` + `statik`);
   :323/:324 must NOT (no slots).
-- check_ref: exclude test14.c by file name (ref cc error text too generic).
+- check_ref: exclude test15.c by file name (ref cc error text too generic).
 
 ## Status
 
