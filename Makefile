@@ -1,11 +1,11 @@
 # T2DOS build: cross compiler on the PC, userland binaries into an SD card image tree (root/)
-CC_HOST = compiler/cc
-PROGS = $(patsubst userland/%.c,root/bin/%.bin,$(wildcard userland/*.c))
+CC_HOST = src/compiler/cc
+PROGS = $(patsubst src/userland/%.c,root/bin/%.bin,$(wildcard src/userland/*.c))
 BINUTILS = nm ar objdump
 BIN_BINS = $(patsubst %,root/bin/%.bin,$(BINUTILS))
 HOST_BINS = $(patsubst %,build/host/%,$(BINUTILS))
 all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.bin build/host/ld root/bin/ld.bin root/lib/sys.h root/lib/net.c root/lib/mtab.c root/lib/t2obj.h root/lib/t2obj.c root/lib/math.h root/bin/basic.bin basic_examples
-# Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
+# Board binaries: src/compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
 # CCBIN source flags: sources to $@. OPT=-O builds with the peephole optimizer.
@@ -14,63 +14,64 @@ define CCBIN
 	@mkdir -p root/bin
 	./$(CC_HOST) $(OPT) $(2) -o $@ $(1)
 endef
-# the compiler's own sources: one file per stage (compiler/cc.h holds what they share).
+# the compiler's own sources: one file per stage (src/compiler/cc.h holds what they share).
 # Adding a file lands here free, but Makefile.board's /src/cc.bin line and the
 # check_make plan-board fixture list them too - update those as well (--pc fails on drift).
-CC_SRC = $(sort $(wildcard compiler/*.c))
+CC_SRC = $(sort $(wildcard src/compiler/*.c))
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): $(CC_SRC) sys.h
-	gcc -O2 -w -I . -I compiler -o $@ $(CC_SRC)
+	gcc -O2 -w -I . -I src/compiler -o $@ $(CC_SRC)
 root/bin/cc.bin: $(CC_SRC) $(TOOLS)
 	@mkdir -p root/lib root/src
-	$(call CCBIN,$(CC_SRC),-I compiler)
-root/bin/%.bin: userland/%.c $(TOOLS) lib/net.c lib/mtab.c
-	$(call CCBIN,$<,-I lib)
-# binutils: host builds for the PC (tests) and board builds with compiler/cc
-build/host/%: binutils/%.c lib/t2obj.h lib/t2obj.c
+	$(call CCBIN,$(CC_SRC),-I src/compiler)
+root/bin/%.bin: src/userland/%.c $(TOOLS) src/lib/net.c src/lib/mtab.c
+	$(call CCBIN,$<,-I src/lib)
+# binutils: host builds for the PC (tests) and board builds with src/compiler/cc
+build/host/%: src/binutils/%.c src/lib/t2obj.h src/lib/t2obj.c
 	@mkdir -p build/host
-	gcc -O2 -w -I lib -I . -o $@ $<
-root/bin/%.bin: binutils/%.c $(TOOLS) lib/t2obj.h lib/t2obj.c
-	$(call CCBIN,$<,-I lib)
-# BASIC: several files in basic/ (pcsys.c is the PC test build's shim, not part of it); cc takes
+	gcc -O2 -w -I src/lib -I . -o $@ $<
+root/bin/%.bin: src/binutils/%.c $(TOOLS) src/lib/t2obj.h src/lib/t2obj.c
+	$(call CCBIN,$<,-I src/lib)
+# BASIC: several files in src/basic/ (pcsys.c is the PC test build's shim, not part of it); cc takes
 # one -I, so basic sources find sys.h in the current directory (the repo root)
-BASIC_SRC = $(sort $(filter-out basic/pcsys.c,$(wildcard basic/*.c)))
-root/bin/basic.bin: $(BASIC_SRC) basic/basic.h $(TOOLS)
-	$(call CCBIN,$(BASIC_SRC),-I basic)
+BASIC_SRC = $(sort $(filter-out src/basic/pcsys.c,$(wildcard src/basic/*.c)))
+root/bin/basic.bin: $(BASIC_SRC) src/basic/basic.h $(TOOLS)
+	$(call CCBIN,$(BASIC_SRC),-I src/basic)
 # example programs: examples/basic/*.bas into root/src/basic/
 BASIC_EX = $(patsubst examples/basic/%,root/src/basic/%,$(wildcard examples/basic/*.bas))
 basic_examples: $(BASIC_EX)
 root/src/basic/%.bas: examples/basic/%.bas
 	@mkdir -p root/src/basic && cp $< $@
 .PHONY: basic_examples
-# the assembler: same pattern, source in assembler/
-build/host/as: assembler/as.c lib/t2obj.h lib/t2obj.c
+# the assembler: same pattern, source in src/assembler/
+build/host/as: src/assembler/as.c src/lib/t2obj.h src/lib/t2obj.c
 	@mkdir -p build/host
-	gcc -O2 -w -I lib -I . -o $@ assembler/as.c
-root/bin/as.bin: assembler/as.c $(TOOLS) lib/t2obj.h lib/t2obj.c
-	$(call CCBIN,assembler/as.c,-I lib)
-# the linker: same pattern, source in linker/
-build/host/ld: linker/ld.c lib/t2obj.h lib/t2obj.c
+	gcc -O2 -w -I src/lib -I . -o $@ src/assembler/as.c
+root/bin/as.bin: src/assembler/as.c $(TOOLS) src/lib/t2obj.h src/lib/t2obj.c
+	$(call CCBIN,src/assembler/as.c,-I src/lib)
+# the linker: same pattern, source in src/linker/
+build/host/ld: src/linker/ld.c src/lib/t2obj.h src/lib/t2obj.c
 	@mkdir -p build/host
-	gcc -O2 -w -I lib -I . -o $@ linker/ld.c
-root/bin/ld.bin: linker/ld.c $(TOOLS) lib/t2obj.h lib/t2obj.c
-	$(call CCBIN,linker/ld.c,-I lib)
-root/lib/t2obj.h: lib/t2obj.h
-	@mkdir -p root/lib && cp lib/t2obj.h root/lib/
-root/lib/t2obj.c: lib/t2obj.c
-	@mkdir -p root/lib && cp lib/t2obj.c root/lib/
-root/lib/net.c: lib/net.c
-	@mkdir -p root/lib && cp lib/net.c root/lib/
-root/lib/mtab.c: lib/mtab.c
-	@mkdir -p root/lib && cp lib/mtab.c root/lib/
+	gcc -O2 -w -I src/lib -I . -o $@ src/linker/ld.c
+root/bin/ld.bin: src/linker/ld.c $(TOOLS) src/lib/t2obj.h src/lib/t2obj.c
+	$(call CCBIN,src/linker/ld.c,-I src/lib)
+root/lib/t2obj.h: src/lib/t2obj.h
+	@mkdir -p root/lib && cp $< root/lib/
+root/lib/t2obj.c: src/lib/t2obj.c
+	@mkdir -p root/lib && cp $< root/lib/
+root/lib/net.c: src/lib/net.c
+	@mkdir -p root/lib && cp $< root/lib/
+root/lib/mtab.c: src/lib/mtab.c
+	@mkdir -p root/lib && cp $< root/lib/
 root/lib/sys.h: sys.h
-	@mkdir -p root/lib && cp sys.h root/lib/
-root/lib/math.h: lib/math.h
-	@mkdir -p root/lib && cp lib/math.h root/lib/
+	@mkdir -p root/lib && cp $< root/lib/
+root/lib/math.h: src/lib/math.h
+	@mkdir -p root/lib && cp $< root/lib/
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
-host: host_linux.c sys.h kernel/netfs.c kernel/netfs.h kernel/telnetd.c kernel/telnetd.h
+host: host_linux.c sys.h src/kernel/netfs.c src/kernel/netfs.h src/kernel/telnetd.c src/kernel/telnetd.h
 	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static -lm
-# Reference compiler: gcc build of compiler/cc.c at the commit in build/ref/COMMIT (byte-identity reference)
+# Reference compiler: gcc build of compiler/cc.c as of build/ref/COMMIT (byte-identity reference).
+# The git show path is the HISTORIC tree's path (pre src/ move at that commit): do not prefix it.
 ref:
 	@mkdir -p build/ref
 	@test -f build/ref/COMMIT || echo e4fb427 > build/ref/COMMIT

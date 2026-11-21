@@ -117,7 +117,7 @@ int run_tool(char *name, int argc, char **argv) {
 #endif
 #ifndef __T2CC__
 // The PC (gcc) build: as and ld from $T2_TOOLS, else build/host/ under the directory that
-// holds the directory of this executable (compiler/cc -> build/host/), run by system().
+// holds the src/ tree (src/compiler/cc -> build/host/), run by system().
 // Temporary names use the process id: make -j starts several cc in the same millisecond.
 #include <sys/wait.h>
 char *toolsdir;
@@ -129,7 +129,7 @@ int init_tools(char *argv0) {
   if (e && *e) { toolsdir = e; return 0; }
   k = readlink("/proc/self/exe", buf, sizeof buf - 1);
   if (k > 0) buf[k] = 0; else { strncpy(buf, argv0, sizeof buf - 1); buf[sizeof buf - 1] = 0; }
-  for (j = 0; j < 2; j++) { sl = strrchr(buf, '/'); if (sl) *sl = 0; else strcpy(buf, "."); }
+  for (j = 0; j < 3; j++) { sl = strrchr(buf, '/'); if (sl) *sl = 0; else strcpy(buf, "."); }   // <root>/src/compiler/cc -> <root>
   toolsdir = malloc(strlen(buf) + 16); sprintf(toolsdir, "%s/build/host", buf);
   return 0;
 }
