@@ -25,6 +25,25 @@ int restore_lex() {                    // lexing strings wrote to data: clear wh
 int init_addr(int off) { if (ikind) lea_loc(ibase + off); else if (isym) lea_data(isym, off, ibase + off); else lea_data(0, ibase + off, ibase + off); return 0; }   // isym 0: a string literal or a static (.Ldata target)
 int init_code() { if (!ikind) init_open = 1; return 0; }   // global initializer code: it goes to .Linit
 int init_close() { if (init_open) { tobuf = 1; flush(); tobuf = 0; init_open = 0; } return 0; }
+int init_splice(int from, int lpf) {   // a static local's coded init: move only the lines added since (from, lpf) to .Linit, keep the function's own lines (label numbers are unique per file, so the split is safe)
+  int i; int k;
+  if (!init_open) { nlines = from; lppos = lpf; return 0; }
+  tobuf = 1;
+  i = from;
+  while (i < nlines) {
+    k = lkind[i];
+    if (k == L_INS) { oput("\t"); oput(lpool + ltext[i]); oput("\n"); }
+    else if (k == L_LAB) { oput(".L"); oput(dec(llab[i])); oput(":\n"); }
+    else if (k == L_BR) {
+      if (llab[i] < 0) die("internal error: branch without a target");
+      oput("\tb"); if (lcond[i] >= 0) oput(ccn(lcond[i])); oput(".w\t.L"); oput(dec(llab[i])); oput("\n");
+    }
+    i = i + 1;
+  }
+  tobuf = 0;
+  nlines = from; lppos = lpf; init_open = 0;
+  return 0;
+}
 int poke(int off, int v, int t) {
   data[off] = v;
   if (tysize(t) >= 2) data[off + 1] = v >> 8;
@@ -128,6 +147,14 @@ int init_zero(int n) {                       // local aggregate: memset(storage,
 }
 
 // ------------------------------------------------------------------ statements
+int newstatic(struct Sym *s, int t, int size, int arr) {   // static local: file-scope storage, block-visible name (no slot, no label)
+  s->hclass = s->class; s->htype = s->type; s->hval = s->val; s->hstatik = s->statik;
+  dpos = (dpos + 3) & -4;
+  s->class = arr ? CStaArr : CSta; s->type = arr ? t + PTR : t; s->val = dpos; s->statik = 0;
+  dpos = dpos + size;
+  return 0;
+}
+
 int newlocal(struct Sym *s, int t, int size) {
   s->hclass = s->class; s->htype = s->type; s->hval = s->val; s->hstatik = s->statik;
   loc = loc + ((size + 3) & -4);
@@ -142,7 +169,7 @@ int newlocal(struct Sym *s, int t, int size) {
 }
 
 int stmt() {
-  int at; int at2; int sv_brk; int sv_cont; int sv_tgt; int body; int t; int bt; int n; int hi; struct Sym *d;
+  int at; int at2; int sv_brk; int sv_cont; int sv_tgt; int body; int t; int bt; int n; int hi; int st; int ln0; int lp0; struct Sym *d;
   if (tk == If) {
     next(); if (tk != '(') die("( expected"); next();
     expr_comma(); if (tk != ')') die(") expected"); next();
@@ -226,7 +253,9 @@ int stmt() {
     next();
   }
   else if (tk == ';') { next(); }
-  else if (is_type()) {                       // local declaration
+  else if (tk == Static || is_type()) {         // local declaration (maybe static: data image, no slot)
+    st = 0;
+    if (tk == Static) { st = 1; next(); if (!is_type()) die("type expected after static"); }
     bt = parse_type();
     while (tk != ';') {
       t = declarator(bt);
@@ -235,7 +264,18 @@ int stmt() {
       if (tk == Assign) { next(); hi = 1; }
       if (darr == -2) { if (!hi) die("array size expected"); darr = count_init(); }
       n = tysize(t);
-      if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
+      if (st) {                               // global-init semantics on the .Ldata/.Linit paths
+        ln0 = nlines; lp0 = lppos;
+        if (darr >= 0) {
+          n = n * darr;
+          newstatic(d, t, n, 1);
+          if (hi) { ikind = 0; isym = 0; ibase = d->val; init_array(t, darr, 0); init_splice(ln0, lp0); }
+        } else {
+          newstatic(d, t, n, 0);
+          if (hi) { ikind = 0; isym = 0; ibase = d->val; init_elem(t, 0); init_splice(ln0, lp0); }
+        }
+      }
+      else if (darr >= 0) {                          // local array: slot holds pointer to the storage that follows it
         n = n * darr;
         newlocal(d, t + PTR, n + 4);
         lea_loc(d->val); addi12(1, 0, 4); ins("str\tr1, [r0]");   // slot = slot + 4

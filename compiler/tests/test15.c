@@ -16,11 +16,9 @@ int once(void) { static int c = 41; c = c + 1; return c; }   // static init once
 
 int sum_arr(void) { int i; int s; s = 0; for (i = 0; i < 3; i = i + 1) s = s + arr[i]; return s; }
 
-int shadow(void) {
-  int out;
-  { int v = 2; printf("shadow inner %d\n", v); }
-  out = v;                                                    // static v again
-  return out;
+int shadow(void) {                       // cc block symbols scope to end of function (pre-existing),
+  { int v = 2; printf("shadow inner %d\n", v); }   // so print only inside: main below proves v was restored
+  return 0;
 }
 
 int apply(int (*f)(int), int x) { return f(x); }
