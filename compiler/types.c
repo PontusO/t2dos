@@ -103,3 +103,145 @@ int skip_params() {
     next();
   }
 }
+// ------------------------------------------------------------------ constant expressions
+// Evaluated while parsing, for array sizes, case labels and enum values:
+// numbers, enum and macro constants, sizeof(type), ( ), unary - + ~ !, binary
+// operators and ?:.
+int cexpr();
+int cunary() {
+  int v; int t;
+  if (tk == Num) { if (numty == TFLOAT) die("integer constant expected"); v = ival; next(); return v; }
+  if (tk == Id && id->class == CNum) { v = id->val; next(); return v; }
+  if (tk == Id && pp_if) { next(); return 0; }          // #if FOO with FOO not a macro
+  if (tk == '(') { next(); v = cexpr(); if (tk != ')') die(") expected"); next(); return v; }
+  if (tk == Sub) { next(); return -cunary(); }
+  if (tk == Add) { next(); return cunary(); }
+  if (tk == '~') { next(); return ~cunary(); }
+  if (tk == '!') { next(); return !cunary(); }
+  if (tk == Sizeof) {
+    next(); if (tk != '(') die("( expected after sizeof"); next();
+    t = declarator(parse_type()); v = tysize(t); if (darr >= 0) v = v * darr;
+    if (tk != ')') die(") expected"); next();
+    return v;
+  }
+  die("constant expected"); return 0;
+}
+int cprec(int op) {
+  if (op == Mul || op == Div || op == Mod) return 10;
+  if (op == Add || op == Sub) return 9;
+  if (op == Shl || op == Shr) return 8;
+  if (op == Lt || op == Gt || op == Le || op == Ge) return 7;
+  if (op == Eq || op == Ne) return 6;
+  if (op == And) return 5;
+  if (op == Xor) return 4;
+  if (op == Or) return 3;
+  if (op == Lan) return 2;
+  if (op == Lor) return 1;
+  return 0;
+}
+int cbin(int minp) {
+  int v; int r; int op; int pr;
+  v = cunary();
+  while ((pr = cprec(tk)) && pr >= minp) {
+    op = tk; next(); r = cbin(pr + 1);
+    if ((op == Div || op == Mod) && !r) die("division by zero in a constant");
+    if (op == Mul) v = v * r; else if (op == Div) v = v / r; else if (op == Mod) v = v % r;
+    else if (op == Add) v = v + r; else if (op == Sub) v = v - r;
+    else if (op == Shl) v = v << r; else if (op == Shr) v = v >> r;
+    else if (op == Lt) v = v < r; else if (op == Gt) v = v > r; else if (op == Le) v = v <= r; else if (op == Ge) v = v >= r;
+    else if (op == Eq) v = v == r; else if (op == Ne) v = v != r;
+    else if (op == And) v = v & r; else if (op == Xor) v = v ^ r; else if (op == Or) v = v | r;
+    else if (op == Lan) v = v && r; else v = v || r;
+  }
+  return v;
+}
+int cexpr() {
+  int v; int a; int b;
+  v = cbin(1);
+  if (tk == Cond) {
+    next(); a = cexpr(); if (tk != ':') die(": expected"); next(); b = cexpr();
+    return v ? a : b;
+  }
+  return v;
+}
+
+// array row type: n elements of type et (shared between declarations)
+int mkrow(int et, int n) {
+  int i;
+  i = 0; while (i < nstructs) { if (starr[i] == et && stcnt[i] == n) return TSTRUCT + i; i = i + 1; }
+  i = newstruct(); starr[i] = et; stcnt[i] = n; stsize[i] = tysize(et) * n;
+  return TSTRUCT + i;
+}
+// [N][M]...: dims[0..ndims); only the first may be [] (-2)
+int parse_dims() {
+  ndims = 0;
+  while (tk == Brak) {
+    if (ndims >= 8) die("too many array dimensions");
+    array_dim(); dims[ndims] = darr; ndims = ndims + 1;
+  }
+  return 0;
+}
+// element type of dims[from - 1]: rows of dims[from..ndims), innermost first
+int rows_of(int t, int from) {
+  int k;
+  k = ndims - 1;
+  while (k >= from) { if (dims[k] < 0) die("array size expected"); t = mkrow(t, dims[k]); k = k - 1; }
+  return t;
+}
+// [N] or [] (size from the initializer: darr = -2)
+int array_dim() {
+  next();
+  if (tk == ']') { darr = -2; next(); return 0; }
+  darr = cexpr();
+  if (darr < 0) die("negative array size");
+  if (tk != ']') die("] expected"); next();
+  return 0;
+}
+// ( types ) of a function pointer into pl[]; returns how many, -1 for ( )
+int param_types(int *pl) {
+  struct Sym *sv_name; int sv_arr; int n; int t; int isvoid;
+  if (tk != '(') die("( expected");
+  sv_name = dname; sv_arr = darr;           // declarator() is used for the parameters too
+  next(); n = 0;
+  if (tk == ')') { next(); dname = sv_name; darr = sv_arr; return -1; }
+  while (tk != ')') {
+    if (!is_type()) die("parameter type expected");
+    isvoid = tk == Void;
+    t = declarator(parse_type());
+    if (darr != -1) t = t + PTR;
+    if (isvoid && t == TCHAR && tk == ')' && !n) break;   // (void)
+    if (n < 16) pl[n] = t;
+    n = n + 1;
+    if (tk == ',') next(); else if (tk != ')') die(", or ) expected");
+  }
+  next();
+  dname = sv_name; darr = sv_arr;
+  return n < 16 ? n : 16;
+}
+// Declarator after a base type: stars, then a name (or none, for casts and
+// prototypes) and optional [N][M]..., or ( *name[N] ) followed by ( params ) for
+// a function pointer or by [M]... for a pointer to an array.
+// Returns the type (of an element, for arrays); sets dname (0 if no name) and
+// darr (outermost length, -1 if not an array, -2 for []).
+int declarator(int t) {
+  int ps; int inner; int pl[16];
+  while (tk == Mul) { next(); t = t + PTR; }
+  dname = 0; darr = -1;
+  if (tk == '(') {
+    next(); ps = 0;
+    while (tk == Mul) { next(); ps = ps + 1; }
+    if (!ps) die("only function and array pointers are supported: (*name)");
+    if (tk == Id) { dname = id; next(); }
+    if (tk == Brak) array_dim();
+    if (tk != ')') die(") expected in declarator"); next();
+    if (tk == Brak) {                           // int (*p)[4]: pointer to array
+      inner = darr; parse_dims(); darr = inner;
+      return rows_of(t, 0) + ps * PTR;
+    }
+    inner = param_types(pl);
+    return fntype_p(t, pl, inner) + ps * PTR;
+  }
+  if (tk == Id) { dname = id; next(); }
+  if (tk == Brak) { parse_dims(); t = rows_of(t, 1); darr = dims[0]; }
+  return t;
+}
