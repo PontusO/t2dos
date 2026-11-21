@@ -12,7 +12,7 @@ message uppercased; "quit" answers "BYE" and exits 3) and pclient (`pclient CASE
 the pipe driver, same output style; `start` spawns pecho, `finish` makes it quit).
 
   check_jobs.py --build   build tests/jobs/*.c into build/jobs/ and root/bin/sh.bin with
-                          compiler/cc (PC only, no board); OPT=-O in the environment adds -O
+                          src/compiler/cc (PC only, no board); OPT=-O in the environment adds -O
                           (spin and fexec always get -O)
   check_jobs.py --board   --build, upload the programs to /src/jobs/ and sh.bin to /bin/,
                           record `free`, run every case, then `free` must show the same
@@ -106,10 +106,10 @@ sys.path.insert(0, os.path.join(ROOT, 'tools'))
 JOBS = os.path.join(ROOT, 'tests', 'jobs')
 TOOLCHAIN = os.path.join(ROOT, 'tests', 'toolchain')
 WORK = os.path.join(ROOT, 'build', 'jobs')
-CC = os.path.join(ROOT, 'compiler', 'cc')
+CC = os.path.join(ROOT, 'src', 'compiler', 'cc')
 PROGS = ['tick', 'hog', 'listener', 'spawner', 'pecho', 'pclient', 'demosrv', 'exectick', 'spin', 'fexec']
 OPT_ALWAYS = {'fexec': ['-O'], 'spin': ['-O']}
-SRCS = {'demosrv': os.path.join(ROOT, 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
+SRCS = {'demosrv': os.path.join(ROOT, 'src', 'userland', 'demosrv.c')}   # the others are tests/jobs/NAME.c
 REMOTE = '/src/jobs'
 SPAWNER = REMOTE + '/spawner.bin'
 PCLIENT = REMOTE + '/pclient.bin'
@@ -127,9 +127,9 @@ def fail(msg):
 def build():
     os.makedirs(WORK, exist_ok=True)
     jobs = [(os.path.join(WORK, p + '.bin'), SRCS.get(p, os.path.join(JOBS, p + '.c'))) for p in PROGS]
-    for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'userland', 'sh.c'))]:
+    for out, src in jobs + [(os.path.join(ROOT, 'root', 'bin', 'sh.bin'), os.path.join(ROOT, 'src', 'userland', 'sh.c'))]:
         opt = OPT_ALWAYS.get(os.path.basename(out)[:-4], os.environ.get('OPT', '').split())
-        r = subprocess.run([CC] + opt + ['-I', 'lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
+        r = subprocess.run([CC] + opt + ['-I', 'src/lib', '-o', out, src], cwd=ROOT, capture_output=True, text=True)
         if r.returncode != 0 or r.stdout or r.stderr:
             return fail('cc %s: exit %d, %r' % (os.path.relpath(src, ROOT), r.returncode, r.stdout + r.stderr))
     print('ok: built %s and root/bin/sh.bin' % ', '.join(p + '.bin' for p in PROGS))

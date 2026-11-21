@@ -40,8 +40,8 @@ def funcs(text):                       # label -> list of instruction lines, lik
 
 def main():
     os.makedirs(WORK, exist_ok=True)
-    cc = os.path.join(ROOT, 'compiler', 'cc')
-    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog.s'), SRC],
+    cc = os.path.join(ROOT, 'src', 'compiler', 'cc')
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'prolog.s'), SRC],
                    check=True, cwd=ROOT)
     f = funcs(open(os.path.join(WORK, 'prolog.s')).read())
     for name in ('csc', 'cleaf', 'cmixed', 'rec', 'clocals', 'cfloat', 'cret', 'csys', 'main'):
@@ -120,18 +120,18 @@ def main():
         fail('cmix is not fp-free (sprel-converted): %r' % cm[:3])
     if not any(re.match(r'ldr\tr4, \[sp, #16\]$', l) for l in cm):
         fail('cmix reads no converted band slot: %r' % cm[:3])
-    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'),
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'src', 'lib'),
                     '-o', os.path.join(WORK, 'prolog_stub.s'), STUB], check=True, cwd=ROOT)
     sb = funcs(open(os.path.join(WORK, 'prolog_stub.s')).read()).get('stublea', [])
     if any('r7' in l for l in sb) or 'add\tsp, #32' not in sb:
         fail('stublea is not fp-free since 3c: %r' % sb[:4])
 
     # behavior: cc build (with both stub objects) must print what native gcc prints
-    subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],
+    subprocess.run([cc, '-c', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'prolog_stub.o'), STUB],
                    check=True, cwd=ROOT)
     subprocess.run([os.path.join(ROOT, 'build', 'host', 'as'), '-o', os.path.join(WORK, 'prolog_stubframed.o'),
                     os.path.join(ROOT, 'tests', 'opt', 'prolog_stubframed.s')], check=True, cwd=ROOT)
-    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'prolog.bin'), SRC,
+    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'prolog.bin'), SRC,
                     os.path.join(WORK, 'prolog_stub.o'),
                     os.path.join(WORK, 'prolog_stubframed.o')], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/prolog.bin'],

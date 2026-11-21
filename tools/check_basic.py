@@ -57,7 +57,7 @@ BOARD_ONLY = ('pipesrv',)        # tests/basic/NAME.bas without a NAME.out: only
 # -msse2 -mfpmath=sse and -fsingle-precision-constant: float arithmetic rounds to single
 # precision at every step, as on the board's FPU (the x87 default keeps extra precision)
 PC_CFLAGS = ['-m32', '-w', '-msse2', '-mfpmath=sse', '-fsingle-precision-constant',
-             '-I', ROOT, '-I', os.path.join(ROOT, 'basic'), '-include', os.path.join(ROOT, 'basic', 'pcsys.h')]
+             '-I', ROOT, '-I', os.path.join(ROOT, 'src', 'basic'), '-include', os.path.join(ROOT, 'src', 'basic', 'pcsys.h')]
 
 
 class Case:
@@ -127,7 +127,7 @@ def report(where, case, ok, want, got):
 # ------------------------------------------------------------------ PC
 def build_pc(out=PC_BIN, extra=()):
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    srcs = sorted(glob.glob(os.path.join(ROOT, 'basic', '*.c')))
+    srcs = sorted(glob.glob(os.path.join(ROOT, 'src', 'basic', '*.c')))
     r = subprocess.run(['gcc'] + PC_CFLAGS + list(extra) + ['-o', out] + srcs + ['-lm'])
     return r.returncode == 0
 

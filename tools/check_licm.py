@@ -48,9 +48,9 @@ def loop_body(body):
 
 def run(name):
     """build root/tmp/name.bin with -O and run it under qemu; its stdout"""
-    cc = os.path.join(ROOT, 'compiler', 'cc')
+    cc = os.path.join(ROOT, 'src', 'compiler', 'cc')
     src = SRC if name == 'licm' else TORTURE
-    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, name + '.bin'), src],
+    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, name + '.bin'), src],
                    check=True, cwd=ROOT)
     return subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/%s.bin' % name],
                           capture_output=True, cwd=ROOT, timeout=60).stdout
@@ -58,8 +58,8 @@ def run(name):
 
 def main():
     os.makedirs(WORK, exist_ok=True)
-    cc = os.path.join(ROOT, 'compiler', 'cc')
-    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm.s'), SRC],
+    cc = os.path.join(ROOT, 'src', 'compiler', 'cc')
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'licm.s'), SRC],
                    check=True, cwd=ROOT)
     f = funcs(open(os.path.join(WORK, 'licm.s')).read())
     sum_, two, nohoist = f['sum'], f['two'], f['nohoist']
@@ -109,7 +109,7 @@ def main():
     # licm_torture.c: the guards' own cases. reentry's exit branches below the outer head,
     # so licm() must refuse its loops; callloop makes a call every round. Both sit beside
     # loops that hoist, and the printed sums must equal gcc's for -O and plain builds alike.
-    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm_torture.s'), TORTURE],
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'licm_torture.s'), TORTURE],
                    check=True, cwd=ROOT)
     t = funcs(open(os.path.join(WORK, 'licm_torture.s')).read())
     for name, body_ in t.items():
@@ -119,7 +119,7 @@ def main():
     want = b'108 105 84 189 140 112\n'
     out = run('licm_torture')
     if out != want: fail('licm_torture.bin printed %r' % out)
-    subprocess.run([cc, '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'licm_torture_p.bin'), TORTURE],
+    subprocess.run([cc, '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'licm_torture_p.bin'), TORTURE],
                    check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/licm_torture_p.bin'],
                          capture_output=True, cwd=ROOT, timeout=60).stdout

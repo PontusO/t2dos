@@ -605,7 +605,7 @@ def main(argv):
         open(os.path.join(SRV, 'shrink.bin'), 'w').write('a' * 8192)
         os.makedirs(os.path.join(SRV, LONG['DEEP']))
         open(os.path.join(SRV, '.old.t2tmp'), 'w').write('left from a failed save\n')
-        shutil.copy(os.path.join(ROOT, 'userland', 'cp.c'), os.path.join(BOARD, 'cps.c'))
+        shutil.copy(os.path.join(ROOT, 'src', 'userland', 'cp.c'), os.path.join(BOARD, 'cps.c'))
         shutil.copy(os.path.join(ROOT, 'sys.h'), os.path.join(BOARD, 'sys.h'))
         for n, t in [('victim.txt', 'keep\n'), ('o.txt', 'a longer old content\n'), ('s2.txt', 'x'), ('m1.txt', 'move\n'), ('t.txt', 'old\n')]:
             open(os.path.join(SRV, n), 'w').write(t)
@@ -613,7 +613,7 @@ def main(argv):
         open(os.path.join(BOARD, 's.txt'), 'w').write('sent\n')
         open(os.path.join(BOARD, 'short.txt'), 'w').write('x\n')
         for t in TEST_PROGS:
-            subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+            subprocess.run([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-I', os.path.join(ROOT, 'src', 'lib'), '-o',
                             os.path.join(BOARD, 'bin', t + '.bin'), os.path.join(ROOT, 'tests', 'netfs', t + '.c')], check=True)
         open(os.path.join(BOARD, 'h.c'), 'w').write('int main() { return 0; }\n')
         open(os.path.join(SRV, 'hs.c'), 'w').write('int main() { return 0; }\n')

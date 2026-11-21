@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IAC, DONT, DO, WONT, WILL, SB, SE, IP = 255, 254, 253, 252, 251, 250, 240, 244
 HELLO = bytes([IAC, WILL, 1, IAC, WILL, 3, IAC, DO, 31])
 PW = 'sesame'
-MTAB = open(os.path.join(ROOT, 'lib', 'mtab.c'), 'rb').read()
+MTAB = open(os.path.join(ROOT, 'src', 'lib', 'mtab.c'), 'rb').read()
 bad = 0
 
 
@@ -235,9 +235,9 @@ CTL_C = os.path.join(ROOT, 'tests', 'telnetd', 'ctl.c')
 
 def pc_main():
     os.makedirs(os.path.join(ROOT, 'root', 'tmp'), exist_ok=True)
-    subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+    subprocess.run([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-I', os.path.join(ROOT, 'src', 'lib'), '-o',
                     os.path.join(ROOT, 'root', 'tmp', 'tdsize.bin'), SIZE_C], check=True, cwd=ROOT)
-    subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+    subprocess.run([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-I', os.path.join(ROOT, 'src', 'lib'), '-o',
                     os.path.join(ROOT, 'root', 'tmp', 'tdctl.bin'), CTL_C], check=True, cwd=ROOT)
     s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
     con = PcConsole()
@@ -272,7 +272,7 @@ def board_main():
     import board
     port = 2323
     b = board.Board()
-    subprocess.run([os.path.join(ROOT, 'compiler', 'cc'), '-I', os.path.join(ROOT, 'lib'), '-o',
+    subprocess.run([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-I', os.path.join(ROOT, 'src', 'lib'), '-o',
                     os.path.join(ROOT, 'build', 'tdsize.bin'), SIZE_C], check=True, cwd=ROOT)
     b.put(os.path.join(ROOT, 'build', 'tdsize.bin'), '/tmp/tdsize.bin')
     ip = None

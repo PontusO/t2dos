@@ -15,7 +15,7 @@
                                    then a blank line and the nm listing of the object
   check_asm.py --inits file.s      print the names of the SYM_INIT (.t2init) symbols, sorted
   check_asm.py --corpus            disassemble every root/bin/*.bin and compiler/tests/*.c (built
-                                   with compiler/cc into build/corpus/), turn it back into
+                                   with src/compiler/cc into build/corpus/), turn it back into
                                    assembly, and require build/host/as and GNU as to reproduce
                                    the original code bytes
   check_asm.py --objdump-corpus    run build/host/objdump on the corpus programs and on the objects
@@ -233,9 +233,12 @@ def build_corpus():
     out = os.path.join(ROOT, 'build', 'corpus')
     os.makedirs(out, exist_ok=True)
     bins = sorted(glob.glob(os.path.join(ROOT, 'root', 'bin', '*.bin')))
-    for t in sorted(glob.glob(os.path.join(ROOT, 'compiler', 'tests', '*.c'))):
+    tests = sorted(glob.glob(os.path.join(ROOT, 'src', 'compiler', 'tests', '*.c')))
+    if not tests:                              # a silently empty corpus would pass: fail instead
+        print('check_asm: no sources under src/compiler/tests'); sys.exit(1)
+    for t in tests:
         base = os.path.join(out, os.path.basename(t)[:-2])
-        for cmd in ([os.path.join(ROOT, 'compiler', 'cc'), '-S', '-mshort-data', '-I', os.path.dirname(t), '-o', base + '.s', t],
+        for cmd in ([os.path.join(ROOT, 'src', 'compiler', 'cc'), '-S', '-mshort-data', '-I', os.path.dirname(t), '-o', base + '.s', t],
                     [os.path.join(ROOT, 'build', 'host', 'as'), '-o', base + '.o', base + '.s'],
                     [os.path.join(ROOT, 'build', 'host', 'ld'), '-o', base + '.bin', base + '.o']):
             r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)

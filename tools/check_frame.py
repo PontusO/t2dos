@@ -34,8 +34,8 @@ def l_end_pc(l):
 
 def main():
     os.makedirs(WORK, exist_ok=True)
-    cc = os.path.join(ROOT, 'compiler', 'cc')
-    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'frame.s'), SRC],
+    cc = os.path.join(ROOT, 'src', 'compiler', 'cc')
+    subprocess.run([cc, '-O', '-S', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'frame.s'), SRC],
                    check=True, cwd=ROOT)
     f = funcs(open(os.path.join(WORK, 'frame.s')).read())
     leaf, small, big, early, noret = f['leaf'], f['small'], f['big'], f['early'], f['noret']
@@ -128,7 +128,7 @@ def main():
     fp = f['fpint']
     if not any(l.startswith('vpush\t{') for l in fp) or 'mov\tr7, sp' not in fp:
         fail('fpint no longer keeps its frame via vpush: %r' % fp[:4])
-    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'lib'), '-o', os.path.join(WORK, 'frame.bin'), SRC], check=True, cwd=ROOT)
+    subprocess.run([cc, '-O', '-I', os.path.join(ROOT, 'src', 'lib'), '-o', os.path.join(WORK, 'frame.bin'), SRC], check=True, cwd=ROOT)
     out = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/tmp/frame.bin'], capture_output=True, cwd=ROOT, timeout=30).stdout
     if out != b'1 18 7 5 3 11 14 0 94 29 18 7\n': fail('frame.bin printed %r' % out)
     if bad: print('%d failed' % bad); return 1
