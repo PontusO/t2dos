@@ -1,0 +1,2 @@
+statmain.c:1: error: static main near token 123
+exit 1

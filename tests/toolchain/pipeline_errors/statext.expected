@@ -1,0 +1,2 @@
+statext.c:1: error: static and extern near token 140
+exit 1

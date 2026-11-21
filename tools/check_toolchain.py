@@ -20,7 +20,7 @@ the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
                                  and PSRAM fully returned when the files are gone
   check_toolchain.py --selfhost  on the board, cc.bin rebuilds cc, as, ld, ar, nm and objdump
                                  from source with plain cc; each must equal root/bin/X.bin. Then
-                                 the board-built cc compiles compiler/tests/test4..12 on the
+                                 the board-built cc compiles compiler/tests/test4..12 and test15 on the
                                  board and their output is compared with gcc -m32 (SSE floats)
 """
 import glob
@@ -51,6 +51,8 @@ CASES = [
       ['cc', '-o', 'asm_calls_c.bin', 'asm_calls_c.s', 'c_fn.o']]),
     ('globals', ['globals_a.c', 'globals_b.c'],
      [['cc', '-o', 'globals.bin', 'globals_a.c', 'globals_b.c']]),
+    ('static_files', ['static_files_a.c', 'static_files_b.c'],
+     [['cc', '-o', 'static_files.bin', 'static_files_a.c', 'static_files_b.c']]),
     ('names', ['names.c', 'names_lib.c'],
      [['cc', '-S', 'names_lib.c'],
       ['cc', '-c', '-o', 'nl.o', 'names_lib.s'],
@@ -521,7 +523,7 @@ def check_selfhost():
               % ('ok' if same else 'FAIL', cmd, dt, name, len(got), name, len(pc), 'IDENTICAL' if same else 'DIFFERENT'))
         ok = ok and same
     # the board-built cc compiles and runs the compiler tests; gcc gives the reference output
-    tests = [('test%d' % i, '-D FROM_CMDLINE=7' if i == 10 else '') for i in range(4, 13)]
+    tests = [('test%d' % i, '-D FROM_CMDLINE=7' if i == 10 else '') for i in range(4, 13)] + [('test15', '')]
     bdir = os.path.join(WORK, 'selfhost')
     os.makedirs(bdir, exist_ok=True)
     for name, flags in tests:

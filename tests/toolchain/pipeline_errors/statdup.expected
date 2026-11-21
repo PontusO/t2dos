@@ -1,0 +1,2 @@
+statdup.c:1: error: duplicate global near token 59
+exit 1
