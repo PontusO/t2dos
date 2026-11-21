@@ -3,7 +3,23 @@
 Goal: pure code move of `compiler/cc.c` into `compiler/{cc.h,state,emit,opt,fp,
 regs,licm,lex,types,expr,stmt}.c` — plan `docs/superpowers/plans/2026-11-21-cc-split.md`,
 spec `docs/superpowers/specs/2026-11-21-cc-split-design.md`.
-SDD ledger (all rulings): `.superpowers/sdd/2026-11-21-cc-split/progress.md`.
+
+## Rulings made during execution (final review: merge Yes, no Critical/Important)
+
+- `static char *shquote` (gcc-only runner helper) dropped from `cc.h` - T2CC
+  has no `static` and it is not a cross-file interface.
+- The `L_INS/L_LAB/L_BR/L_DEL` enum went to `cc.h`, not `emit.c` - shared by
+  all -O passes (gcc undeclared-error caught it).
+- The section matcher's `end="expressions"` matched the "constant expressions"
+  banner first, so types.c needed a follow-up commit; harmless, gates re-ran.
+- The plan missed updating the `check_toolchain.SELFHOST` cc ENTRY (Task 1
+  only made the loop list-capable); it now globs `compiler/*.c`.
+- `check_ref`'s count of prototypes varies 264/265 with whether `main` is
+  counted; the file list itself is what matters.
+- Deferred minors (final review): cc.h staging guard in check_toolchain is
+  vestigial (could be unconditional); NOTES/prototype count wording; a
+  keep-in-sync comment between `Makefile` CC_SRC, `Makefile.board`'s cc line
+  and the check_make fixture (drift is caught, but at the expensive gate).
 
 ## What it looks like now
 
