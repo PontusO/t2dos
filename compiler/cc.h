@@ -37,6 +37,7 @@ enum { TCHAR = 0, TINT = 1, TUCHAR = 2, TSHORT = 3, TUSHORT = 4, TUINT = 5, TFLO
 
 // condition codes (it, b<cond>)
 enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_MI = 4, CC_HI = 8, CC_LS = 9, CC_GE = 10, CC_LT = 11, CC_GT = 12, CC_LE = 13 };
+enum { L_INS = 1, L_LAB, L_BR, L_DEL };         // assembly line kinds (emit.c owns the lists)
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
              int hclass; int htype; int hval; int stag;
