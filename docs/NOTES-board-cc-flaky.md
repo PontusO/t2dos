@@ -1,69 +1,45 @@
-# NOTES: board cc miscompiles and the make --board flakiness (2026-11-21)
+# NOTES: board cc "cannot write /tmp/..." - RESOLVED 2026-11-21
 
-Two separate things were found while landing `make --board`. Do not
-re-investigate from scratch; read this first.
+Symptom (was): on-board `/bin/cc.bin -I /lib -o X /src/assembler/as.c`
+and the multi-source `basic.bin` failed with `cannot write /tmp/ccNNNN_1_x.s`
+(error text sometimes varied), while single-source tools built fine. Made
+visible by `make --board`; NOT make's fault.
 
-## 1. cc VARREF double-load (settled earlier, still true)
+## Root cause
 
-The committed cc (and build/ref/cc at e4fb427, so check_ref cannot see it)
-miscompiles rvalue reads of `char *` VARIABLES (VARREF emits a second load);
-lvalue stores, array-slot addresses, and builtin calls that receive literal /
-argv-slot / address-expression pointers work. make.c is written to that safe
-dialect (strings as int offsets into buf; helpers xlen/xcmp/xlit over globals;
-cmd[] slots only passed straight to builtins). See commits beff5ca.
+Memory budget, not corruption. `readfile()` malloced **1 MB per file**
+(source + every `#include`) and cc also mallocs `data` = 1 MB. On the
+board the arena lives in the ~7.8 MB PSRAM heap; since commit `de0a5bc`
+(2026-11-16, "Keep /tmp in PSRAM") `/tmp` is ramfs and its block
+allocator refuses to descend below `TMP_MARGIN` (1 MB) free - and cc's
+temporary `.s` files live in `/tmp`. as.c holds 3 MB of srcbufs for 72 KB
+of content (as.c + t2obj.c + t2obj.h); basic peaks at 3 MB at a time
+(source + basic.h + sys.h). Peak cc ≈ 6.8 MB -> free hits ~1,045,000 <
+TMP_MARGIN+4096, ramfs refuses a block for cc's own `.s` write
+(`grow()` room() false), `oflush` sees a short write and prints
+"cannot write". Intermittency was luck at that ~50 KB cliff (contents of
+/tmp, allocation order); it "worked flawlessly before" because before
+`de0a5bc` `/tmp` was on flash: no margin floor, no PSRAM pressure.
+Under host_linux/qemu the same binary passes (host heap is unbounded) -
+which is why only board runs caught it.
 
-## 2. make --board flakiness (found this round, NOT make's fault)
+## Fix (this round)
 
-Symptom: `/bin/cc.bin -I /lib -o X /src/assembler/as.c` fails on the board,
-error message varies run to run ("cannot write /tmp/ccNNNN_1_as.s", then
-"as.c:18: error: no such member near token 130"), while the same binary
-compiles nm.c/sh.c/cc.c fine, and as.c works sometimes. Parent (sh vs make vs
-a tiny exec-wrapper) changes the outcome.
+`readfile()` now `stat`s the resolved path and mallocs `size+1`, growing
+(doubling, updating `srcbuf`) only if the file changed under it; the PC
+gcc build keeps the old 1 MB fixed buffer (its `stat` binds to glibc -
+using it smashed the stack until the probe got an `#ifdef __T2CC__`).
+Codegen unchanged: `check_ref` still `different: 0`.
 
-Measured facts (board Challenger 2350, ttyACM2):
-- It is NOT flash full (df-style: 3.6 MB used / 7 MB) and NOT fd exhaustion
-  (k_open slots reclaim per exec frame, kernel.ino ~943/964).
-- /tmp is ramfs in PSRAM (kernel/ramfs.cpp), capacity down to TMP_MARGIN
-  (1 MB) free PSRAM heap; leftover probe files shrink it. `free` shows the
-  global psram number; ramfs room() checks getFreePSRAMHeap.
-- A plain program could write 2 MB files to /tmp while cc failed to write its
-  460 KB .s -> not raw capacity.
-- On a freshly booted board every source builds byte-identically through
-  make EXCEPT `assembler/as.c` and the multi-source `basic.bin`,
-  deterministically and without make involved:
-  `/bin/cc.bin -S -I /lib -o /tmp/x.s /src/assembler/as.c` from the shell
-  fails the same way, while ld/nm/ar/objdump/sh/cc all pass at the same
-  moment and `free` never moves. as.c and basic stay broken after reboot;
-  other tools still build after they fail once. (basic passed once early
-  in the session; it has failed every run since, incl. four repeats on a
-  fresh boot, always at the FIRST temp file `comp.s`.) Both failing
-  invocations read 7 (basic) or 2 (as.c via #include "t2obj.c") sources
-  into cc's 1 MB-per-source srcbufs; the single-buffer compiles pass.
-  basic fails on the first .s with only comp.c's 1 MB buffer live, so it
-  is not simple capacity either.
+## Method notes (what finally pinned it)
 
-Diagnosis status (not finished - next round picks it up here):
-- the same cc.bin (byte-identical to the PC build) compiles the same as.c
-  bytes fine under host_linux/qemu and as a gcc build on Linux; on the
-  board the .s to FLASH (/src) succeeds while the .s to /tmp (ramfs) fails;
-  a small program writing 512 KB files to /tmp succeeds in the same moment;
-  cc's own 1.24 MB .s for cc.c to /tmp succeeds; ramfs.cpp audited, remove/
-  grow free correctly; not fd exhaustion (per-exec-frame reclaim in
-  kernel.ino ~943/964); not flash full; error text varies with session state
-  (once even a bogus "no such member" parse error, at the #include line!).
-- best remaining hypothesis: address-dependent PSRAM corruption tied to
-  where cc's 64 KB obuf/name strings land in the PSRAM heap (layout shifts
-  with parent program and /tmp usage), i.e. a kernel/PSRAM/cache bug that
-  selfhost (single source, small /tmp) never triggers.
-- reproduce recipe (board, fresh boot): `/bin/cc.bin -S -I /lib -o
-  /tmp/zz.s /src/t2/zz.c` with zz.c = assembler/as.c copied to /src/t2.
-  Compare with nm.c under the identical command (passes).
-
-Open follow-up candidates (next rounds):
-- unlink tmp .s in cc.c right after assemble (lower /tmp peak for
-  multi-source targets like basic.bin).
-- bisect as.c content at brace-balanced cuts for the board failure (host cc
-  compiles every cut fine; find the cut where the BOARD starts failing and
-  shrink from there); and/or instrument k_open/k_write error paths in a
-  debug kernel build to see which step returns -1.
-
+- Instrumented cc (`ccdbg`): psramfree + obuf at the `.s` open; kernel
+  `k_open`/`k_write` and ramfs `grow`/`make` prints via a debug kernel
+  flash. The decisive line: `k_write want 60001 got 0 psram 1045416` -
+  under the 1 MB margin, at a WRITE (open had succeeded: "cannot write"
+  is printed by oflush too, not only by the open failure!).
+- The `k_open fs-null /basic.h` lines are a red herring: readfile's
+  first raw-name attempt against cwd, then `-I` succeeds. Normal.
+- Debug kernel: copy kernel.ino/ramfs.cpp, add Serial.printf in failure
+  branches only, compile+upload (Challenger FQBN per AGENTS.md), restore
+  from backup afterwards. `arduino-cli upload` keeps the flash FS.

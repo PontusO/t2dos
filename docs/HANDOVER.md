@@ -111,7 +111,7 @@ Notes:
 
 Recent work, newest first:
 
-0. **`make`** (`userland/make.c` → `/bin/make.bin`, spec `2026-11-21-make-utility-design.md`, on branch `cc-window` awaiting merge): a target-line build executor; `Makefile.board` builds the whole toolchain tree on-board (`/src/...` sources, headers mirrored in `/lib`), always rebuilds, `-n` prints the plan. `tools/check_make.py --pc` runs the plan cases under the PC harness, `--board [--tools a,b]` builds and byte-compares each tool. Board status: every single-source tool builds byte-identically (cc 19 s, ld, nm, ar, objdump, sh); the on-board `cc` fails two invocations even straight from `sh` - `assembler/as.c` and the multi-source `basic.bin` - a pre-existing board-side defect, repro recipe and bisect plan in `docs/NOTES-board-cc-flaky.md` (backlog 16). This makes splitting `compiler/cc.c` into files the natural next round.
+0. **`make`** (`userland/make.c` → `/bin/make.bin`, spec `2026-11-21-make-utility-design.md`, on branch `cc-window` awaiting merge): a target-line build executor; `Makefile.board` builds the whole toolchain tree on-board (`/src/...` sources, headers mirrored in `/lib`), always rebuilds, `-n` prints the plan. `tools/check_make.py --pc` runs the plan cases under the PC harness, `--board [--tools a,b]` builds and byte-compares each tool. Board status: all eight tools build byte-identically through make (cc 19 s, basic 19 s, the rest 2-7 s). Two of them (as.c, basic) failed every attempt until root-caused and fixed this round: `readfile`'s 1 MB-per-file mallocs crossed the PSRAM floor `/tmp` allocates from since `de0a5bc` moved /tmp to PSRAM; read buffers are now sized to the file (`docs/NOTES-board-cc-flaky.md`). This makes splitting `compiler/cc.c` into files the natural next round.
 1. **cc -O cheaper function entry and exit** (`trimframe()` in `cc.c`; spec `2026-11-17-cc-calls-design.md`):
    - functions with no locals no longer set up a frame;
    - small frames use `sub sp, #N`;
@@ -156,11 +156,10 @@ None of these are urgent. Everything the user uses day to day works.
 13. **Align loop starts to 4 bytes with `-O`.** This should make board timings steadier and win back the alignment loss in `tests/bench/loop.c`.
 14. **Dead code after an inlined return:** when a `return` becomes an inline `pop`, the unreachable code behind it is kept. This only costs size.
 15. **Jump tables for `switch`** were looked at and put aside: the hot paths (the BASIC VM) dispatch through function-pointer tables, not `switch`, so the gain would be small.
-16. **On-board `cc` fails two compiles**: the board `cc` (byte-identical to the PC build) cannot write its `.s` to `/tmp` when compiling `assembler/as.c` or the multi-source `basic.bin`, deterministically, even invoked straight from `sh`; every single-source tool (incl. cc.c itself) builds fine. Repro recipe, ruled-out causes and a bisect plan in `docs/NOTES-board-cc-flaky.md`.
 
 **Older:**
 
-17. The multi-mount netfs review left 8 minor items that were never written down here. Rerun a review of `userland/mount.c`, `umount.c`, `lib/mtab.c` and the netfs parts of the kernel to collect them again.
+16. The multi-mount netfs review left 8 minor items that were never written down here. Rerun a review of `userland/mount.c`, `umount.c`, `lib/mtab.c` and the netfs parts of the kernel to collect them again.
 
 ## 7. Working with the user
 

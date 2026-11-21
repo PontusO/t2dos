@@ -166,10 +166,10 @@ Checker (`tools/check_make.py`):
   prereqs - listing them would make cc compile them twice), runs make,
   byte-compares each tool against `root/bin`, and checks a child failure
   stops make with the child's code.
-- Fresh-boot board run: cc 206823 B / 19 s, ld 3 s, nm 2 s, ar 3 s,
-  objdump 6 s and sh all PASS byte-identical; the board-fail case
-  PASSes. `assembler/as.c` and the multi-source `basic.bin` FAIL - the
-  on-board cc cannot write its first `.s` to `/tmp` for those two
-  invocations even straight from `sh`, a pre-existing board-side defect
-  unrelated to make (see `docs/NOTES-board-cc-flaky.md`, filed in the
-  HANDOVER backlog).
+- Fresh-boot board run: cc 207403 B / 19 s, as 7 s, ld 3 s, nm 2 s, ar
+  2 s, objdump 4 s, basic 19 s and sh 6 s - ALL byte-identical to
+  `root/bin`; the board-fail case PASSes. (as.c and basic.bin failed
+  every attempt until root-caused: `readfile`'s 1 MB-per-file mallocs
+  pushed peak cc past the PSRAM floor `/tmp` allocates from, so the
+  temp `.s` writes were denied their own blocks. Fixed by sizing read
+  buffers to the file - see `docs/NOTES-board-cc-flaky.md`.)

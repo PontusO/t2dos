@@ -103,21 +103,41 @@ int quit() { if (ofd >= 0) { close(ofd); unlink(outname); } cleanup(); exit(1); 
 int die(char *msg) { printf("%s:%d: error: %s near token %d\n", srcname, line, msg, tk); quit(); return 0; }
 
 char *readfile(char *name) {
-  int fd; char *buf; int n; int total; char *alt;
+  int fd; char *buf; int n; int total; char *alt; char *real; int cap; int want; int slot;
+  struct stat_t st;
+  real = name;
   fd = open(name, 0, 0);
   if (fd < 0 && incdir) {                   // -I dir
     alt = malloc(strlen(incdir) + strlen(name) + 2); strcpy(alt, incdir); strcpy(alt + strlen(alt), "/"); strcpy(alt + strlen(alt), name);
-    fd = open(alt, 0, 0);
+    fd = open(alt, 0, 0); real = alt;
   }
   if (fd < 0) {                             // includes also resolve against /lib
     alt = malloc(strlen(name) + 6); strcpy(alt, "/lib/"); strcpy(alt + 5, name);
-    fd = open(alt, 0, 0);
+    fd = open(alt, 0, 0); real = alt;
   }
   if (fd < 0) { printf("cannot open %s\n", name); quit(); }
-  buf = malloc(1048576);
-  if (nsrcbuf < 256) { srcbuf[nsrcbuf] = buf; nsrcbuf = nsrcbuf + 1; }
+  // the buffer fits the file (it grew 1 MB per file, sources and headers alike, which on
+  // the board pushed big or multi-file compiles past the PSRAM floor /tmp allocates from)
+  cap = 1048576;
+#ifdef __T2CC__
+  if (stat(real, &st) == 0) cap = st.size + 1;   // the builtin stat, not the PC build's glibc one
+#endif
+  buf = malloc(cap);
+  slot = -1;
+  if (nsrcbuf < 256) { srcbuf[nsrcbuf] = buf; slot = nsrcbuf; nsrcbuf = nsrcbuf + 1; }
   total = 0;
-  while ((n = read(fd, buf + total, 65536)) > 0) total = total + n;
+  while (1) {
+    if (total + 1 >= cap) {                 // the file grew past stat's size: double
+      alt = malloc(cap * 2); memcpy(alt, buf, total); free(buf);
+      buf = alt; cap = cap * 2;
+      if (slot >= 0) srcbuf[slot] = buf;    // srcbuf must keep the live pointer for free()
+    }
+    want = cap - total - 1;
+    if (want > 65536) want = 65536;
+    n = read(fd, buf + total, want);
+    if (!(n > 0)) break;
+    total = total + n;
+  }
   buf[total] = 0;
   close(fd);
   return buf;
