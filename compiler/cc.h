@@ -23,11 +23,12 @@ enum { Num = 128, Str, Id,
   Long, Short, Signed, Unsigned, Float, Double,
   Assign, AddA, SubA, MulA, DivA, ModA, AndA, OrA, XorA, ShlA, ShrA, Cond, Lor, Lan, Or, Xor, And, Eq, Ne, Lt, Gt, Le, Ge, Shl, Shr,
   Add, Sub, Mul, Div, Mod, Inc, Dec, Dot, Arrow, Brak,
-  Extern };   // keywords added later go after the operators, whose order expr() relies on
+  Extern, Static };   // keywords added later go after the operators, whose order expr() relies on
 
 // symbol classes
-enum { CNum = 1, CFun, CSys, CGlo, CLoc };   // 6 = global array, 8 = typedef
+enum { CNum = 1, CFun, CSys, CGlo, CLoc, CSta = 10, CStaArr };   // 6 = global array, 8 = typedef
 // 7 = extern variable, 9 = extern array: no storage in this file, ld finds the symbol
+// 10/11 = static var/array (no label, .Ldata refs)
 // base types; struct i is TSTRUCT+i; each pointer level adds PTR
 // FN marks a function type; bits 22.. index fnret[] (its return type). A function
 // designator has 0 pointer levels, a function pointer 1.
@@ -40,8 +41,8 @@ enum { CC_EQ = 0, CC_NE = 1, CC_HS = 2, CC_LO = 3, CC_MI = 4, CC_HI = 8, CC_LS =
 enum { L_INS = 1, L_LAB, L_BR, L_DEL };         // assembly line kinds (emit.c owns the lists)
 
 struct Sym { char *name; int len; int hash; int tk; int class; int type; int val;
-             int hclass; int htype; int hval; int stag;
-             int mdef; char *mbody; char **margs; int mnargs; int mvar;
+             int hclass; int htype; int hval; int statik; int stag;   // statik: internal linkage (functions; vars use CSta/CStaArr)
+             int hstatik; int mdef; char *mbody; char **margs; int mnargs; int mvar;
              int *ptypes; int nptypes; };   // parameter types of a function, for argument conversion   // macro: defined, body, params (-1: object-like), ...
 struct Mem { struct Sym *id; int type; int off; int next; int cnt; };   // cnt: array member length, else -1
 

@@ -157,12 +157,14 @@ int expr(int lev) {
     }
     else if (d->class == CNum) { imm(0, d->val); ty = d->type; }
     else if (d->class == 6) { lea_var(d); ty = d->type; }   // global array: address
+    else if (d->class == CStaArr) { lea_data(0, d->val, d->val); ty = d->type; }   // static array: .Ldata address (with s 0 the printed n is the whole offset)
     else if (d->class == 9) { lea_ext(d); ty = d->type; }        // extern array: address
     else if (d->class == CFun || d->class == CSys) { fn_addr(d); ty = fntype_p(d->type, d->ptypes, d->ptypes ? d->nptypes : -1); }   // function as a value
     else {
       if (d->class == CLoc) lea_loc(d->val);
       else if (d->class == CGlo) lea_var(d);
       else if (d->class == 7) lea_ext(d);
+      else if (d->class == CSta) lea_data(0, d->val, d->val);   // static: .Ldata + off, no label (with s 0 the printed n is the whole offset)
       else die("undefined variable");
       ty = d->type;
       load(ty);

@@ -22,7 +22,7 @@ int restore_lex() {                    // lexing strings wrote to data: clear wh
   fdepth = sv_fdepth; memcpy(fstack_p, sv_fp, 4 * fdepth); memcpy(fstack_line, sv_fl, 4 * fdepth); memcpy(fstack_mac, sv_fm, 4 * fdepth);
   return 0;
 }
-int init_addr(int off) { if (ikind) lea_loc(ibase + off); else lea_data(isym, off, ibase + off); return 0; }
+int init_addr(int off) { if (ikind) lea_loc(ibase + off); else if (isym) lea_data(isym, off, ibase + off); else lea_data(0, ibase + off, ibase + off); return 0; }   // isym 0: a string literal or a static (.Ldata target)
 int init_code() { if (!ikind) init_open = 1; return 0; }   // global initializer code: it goes to .Linit
 int init_close() { if (init_open) { tobuf = 1; flush(); tobuf = 0; init_open = 0; } return 0; }
 int poke(int off, int v, int t) {
@@ -129,7 +129,7 @@ int init_zero(int n) {                       // local aggregate: memset(storage,
 
 // ------------------------------------------------------------------ statements
 int newlocal(struct Sym *s, int t, int size) {
-  s->hclass = s->class; s->htype = s->type; s->hval = s->val;
+  s->hclass = s->class; s->htype = s->type; s->hval = s->val; s->hstatik = s->statik;
   loc = loc + ((size + 3) & -4);
   if (loc > maxloc) maxloc = loc;
   s->class = CLoc; s->type = t; s->val = -loc;
@@ -257,7 +257,7 @@ int stmt() {
 
 // ------------------------------------------------------------------ top level
 int parse_global() {
-  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz; int hi; int ext;
+  int bt; int t; struct Sym *s; int n; int i; int frame_at; int sz; int hi; int ext; int st;
   if (tk == Enum) {
     next(); if (tk == Id) next();
     if (tk == '{') {
@@ -281,8 +281,11 @@ int parse_global() {
     if (tk != ';') die("; expected"); next();
     return 0;
   }
-  ext = 0;
-  if (tk == Extern) { ext = 1; next(); }        // a declaration: the storage is in another file
+  ext = 0; st = 0;
+  if (tk == Static) { st = 1; next(); }             // internal linkage: no .global, no data label
+  if (tk == Extern) { ext = 1; next(); }            // a declaration: the storage is in another file
+  if (tk == Static) { if (st) die("duplicate static"); st = 1; next(); }   // extern static
+  if (st && ext) die("static and extern");
   bt = parse_type();
   while (tk != ';') {
     t = declarator(bt);
@@ -303,7 +306,7 @@ int parse_global() {
         if (darr != -1) bt = bt + PTR;          // int a[N] or a[] as a parameter is int *a
         if (dname) {
           if (dname->class == CLoc) die("duplicate param");
-          dname->hclass = dname->class; dname->htype = dname->type; dname->hval = dname->val;
+          dname->hclass = dname->class; dname->htype = dname->type; dname->hval = dname->val; dname->hstatik = dname->statik;
           dname->class = CLoc; dname->type = bt; dname->val = n;   // index, fixed up below
         }
         if (n < 32) s->ptypes[n] = bt;
@@ -312,9 +315,11 @@ int parse_global() {
       }
       next();
       s->nptypes = n < 32 ? n : 32;
+      if (st) s->statik = 1;
+      if (s->statik && s->len == 4 && strncmp(s->name, "main", 4) == 0) die("static main");   // strncmp: names are not NUL-terminated
       if (tk == ';') {                          // prototype
         next();
-        i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
+        i = 0; while (i < nsyms) { if (syms[i].class == CLoc || syms[i].class == CSta || syms[i].class == CStaArr) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; syms[i].statik = syms[i].hstatik; } i = i + 1; }
         if (s->class != CFun) { s->class = CFun; s->val = -1; }
         return 0;
       }
@@ -322,8 +327,10 @@ int parse_global() {
       // fix param offsets: param i at r7 + 8 + 4*(n-1-i)
       i = 0; while (i < nsyms) { if (syms[i].class == CLoc) syms[i].val = 8 + 4 * (n - 1 - syms[i].val); i = i + 1; }
       if (optim) { i = 0; while (i < nsyms) { if (syms[i].class == CLoc && syms[i].type == TFLOAT && slotix(syms[i].val) >= 0) slotf[slotix(syms[i].val)] = 1; i = i + 1; } }
+      if (s->statik && !st) die("static mismatch");   // declared static, defined plain
       s->class = CFun; s->val = 0; nparams = n; fnrty = t;   // val >= 0: defined
-      oput("\t.global\t"); oname(s); oput("\n"); oname(s); oput(":\n");
+      if (!s->statik) { oput("\t.global\t"); oname(s); oput("\n"); }
+      oname(s); oput(":\n");
       ins("push\t{r7, lr}");
       if (optim) pvpush = lnew(L_DEL);         // promote()'s vpush
       ins("mov\tr7, sp");
@@ -343,7 +350,7 @@ int parse_global() {
       flush();
       npro = 0; phold = -1;
       // restore shadowed symbols
-      i = 0; while (i < nsyms) { if (syms[i].class == CLoc) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; } i = i + 1; }
+      i = 0; while (i < nsyms) { if (syms[i].class == CLoc || syms[i].class == CSta || syms[i].class == CStaArr) { syms[i].class = syms[i].hclass; syms[i].type = syms[i].htype; syms[i].val = syms[i].hval; syms[i].statik = syms[i].hstatik; } i = i + 1; }
       return 0;
     }
     if (ext) {                                  // extern variable or array
@@ -357,6 +364,7 @@ int parse_global() {
     }
     // global variable (declared extern before, it is now defined here: later references are normal)
     if (s->class && s->class != 7 && s->class != 9) die("duplicate global");
+    if (st && (s->class == 7 || s->class == 9)) die("static after extern");
     if (nglob >= 8192) die("too many globals");
     hi = 0;
     if (tk == Assign) { next(); hi = 1; }
@@ -366,17 +374,19 @@ int parse_global() {
       n = n * darr;
       // global array: the symbol is the storage itself; treat name as pointer constant
       dpos = (dpos + 3) & -4;
-      s->class = 6; s->type = t + PTR; s->val = dpos;     // val = address of storage
-      gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1;
+      s->class = st ? CStaArr : 6; s->type = t + PTR; s->val = dpos;     // val = address of storage
+      if (st) { s->hclass = s->class; s->htype = s->type; s->hval = s->val; s->hstatik = s->statik; }   // restore loops then no-op on file-scope statics (shadowing saves overwrite these)
+      if (!st) { gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1; }   // static: no label, .Ldata refs
       dpos = dpos + n;
     } else {
       dpos = (dpos + 3) & -4;
-      s->class = CGlo; s->type = t; s->val = dpos;
-      gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1;
+      s->class = st ? CSta : CGlo; s->type = t; s->val = dpos;
+      if (st) { s->hclass = s->class; s->htype = s->type; s->hval = s->val; s->hstatik = s->statik; }
+      if (!st) { gsym[nglob] = s; goff[nglob] = dpos; nglob = nglob + 1; }
       dpos = dpos + n;
     }
     if (hi) {
-      ikind = 0; ibase = s->val; isym = s;
+      ikind = 0; ibase = s->val; isym = st ? 0 : s;
       if (darr >= 0) init_array(t, darr, 0); else init_elem(t, 0);
       init_close();
     }
