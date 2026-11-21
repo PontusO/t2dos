@@ -14,7 +14,9 @@ define CCBIN
 	@mkdir -p root/bin
 	./$(CC_HOST) $(OPT) $(2) -o $@ $(1)
 endef
-# the compiler's own sources: one file per stage (compiler/cc.h holds what they share)
+# the compiler's own sources: one file per stage (compiler/cc.h holds what they share).
+# Adding a file lands here free, but Makefile.board's /src/cc.bin line and the
+# check_make plan-board fixture list them too - update those as well (--pc fails on drift).
 CC_SRC = $(sort $(wildcard compiler/*.c))
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
 $(CC_HOST): $(CC_SRC) sys.h

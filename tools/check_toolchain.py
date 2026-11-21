@@ -494,8 +494,7 @@ def check_selfhost():
     r.run('mkdir /lib')
     for f in ('sys.h', 'lib/t2obj.h', 'lib/t2obj.c', 'lib/net.c'):
         r.put(os.path.join(ROOT, f), '/lib/' + os.path.basename(f))
-    if os.path.exists(os.path.join(ROOT, 'compiler', 'cc.h')):      # once the cc is split
-        r.put(os.path.join(ROOT, 'compiler', 'cc.h'), '/lib/cc.h')
+    r.put(os.path.join(ROOT, 'compiler', 'cc.h'), '/lib/cc.h')   # always: a split cc build without it is broken anyway
     ok = True
     made = {'/src'}
     for name, srcs in SELFHOST:

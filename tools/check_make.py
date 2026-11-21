@@ -138,6 +138,8 @@ def pc_cases():
         if tok.startswith('/') and tok not in targets:
             stage(tok, 'int main(void) { return 0; }\n')
     rc, out = run_make(['-n', '-f', '/tmp/make/Makefile.board', 'all'])
+    # the cc sources below mirror Makefile.board's /src/cc.bin line (which mirrors the
+    # PC Makefile's CC_SRC) - the three lists are one fact, update them together
     want = ['/bin/cc.bin -I /lib -o /src/cc.bin /src/compiler/cc.c /src/compiler/emit.c '
             '/src/compiler/expr.c /src/compiler/fp.c /src/compiler/lex.c /src/compiler/licm.c '
             '/src/compiler/opt.c /src/compiler/regs.c /src/compiler/state.c '
