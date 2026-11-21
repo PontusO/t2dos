@@ -8,18 +8,20 @@ all: $(CC_HOST) root/bin/cc.bin $(PROGS) $(BIN_BINS) build/host/as root/bin/as.b
 # Board binaries: compiler/cc compiles to assembly and runs build/host/as and build/host/ld
 # itself (temporary files in /tmp). TOOLS is what every such build needs.
 TOOLS = $(CC_HOST) build/host/as build/host/ld sys.h
-# CCBIN source flags: one C file to $@. OPT=-O builds with the peephole optimizer.
+# CCBIN source flags: sources to $@. OPT=-O builds with the peephole optimizer.
 OPT =
 define CCBIN
 	@mkdir -p root/bin
 	./$(CC_HOST) $(OPT) $(2) -o $@ $(1)
 endef
+# the compiler's own sources: one file per stage (compiler/cc.h holds what they share)
+CC_SRC = $(sort $(wildcard compiler/*.c))
 # gcc finds sys.h through -I .; T2CC resolves it against the current directory (the repo root)
-$(CC_HOST): compiler/cc.c sys.h
-	gcc -O2 -w -I . -o $@ compiler/cc.c
-root/bin/cc.bin: compiler/cc.c $(TOOLS)
+$(CC_HOST): $(CC_SRC) sys.h
+	gcc -O2 -w -I . -I compiler -o $@ $(CC_SRC)
+root/bin/cc.bin: $(CC_SRC) $(TOOLS)
 	@mkdir -p root/lib root/src
-	$(call CCBIN,compiler/cc.c,)
+	$(call CCBIN,$(CC_SRC),-I compiler)
 root/bin/%.bin: userland/%.c $(TOOLS) lib/net.c lib/mtab.c
 	$(call CCBIN,$<,-I lib)
 # binutils: host builds for the PC (tests) and board builds with compiler/cc

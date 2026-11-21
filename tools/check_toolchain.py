@@ -478,8 +478,10 @@ def check_ramtmp(r):
     return ok
 
 
-SELFHOST = [('cc', 'compiler/cc.c'), ('as', 'assembler/as.c'), ('ld', 'linker/ld.c'),
-            ('ar', 'binutils/ar.c'), ('nm', 'binutils/nm.c'), ('objdump', 'binutils/objdump.c')]
+# (name, sources): sources are repo-relative and staged at /src/<that path>, so a
+# multi-file tool (cc) keeps its layout; the board compiles them in one command.
+SELFHOST = [('cc', ['compiler/cc.c']), ('as', ['assembler/as.c']), ('ld', ['linker/ld.c']),
+            ('ar', ['binutils/ar.c']), ('nm', ['binutils/nm.c']), ('objdump', ['binutils/objdump.c'])]
 
 
 def check_selfhost():
@@ -491,10 +493,21 @@ def check_selfhost():
     r.run('mkdir /lib')
     for f in ('sys.h', 'lib/t2obj.h', 'lib/t2obj.c', 'lib/net.c'):
         r.put(os.path.join(ROOT, f), '/lib/' + os.path.basename(f))
+    if os.path.exists(os.path.join(ROOT, 'compiler', 'cc.h')):      # once the cc is split
+        r.put(os.path.join(ROOT, 'compiler', 'cc.h'), '/lib/cc.h')
     ok = True
-    for name, src in SELFHOST:
-        r.put(os.path.join(ROOT, src), '/src/%s.c' % name)
-        cmd = 'cc -I /lib -o /src/%s2.bin /src/%s.c' % (name, name)
+    made = {'/src'}
+    for name, srcs in SELFHOST:
+        bpaths = []
+        for src in srcs:
+            bp = '/src/' + src
+            bpaths.append(bp)
+            d = bp.rsplit('/', 1)[0]
+            if d not in made:
+                r.run('mkdir ' + d)
+                made.add(d)
+            r.put(os.path.join(ROOT, src), bp)
+        cmd = 'cc -I /lib -o /src/%s2.bin %s' % (name, ' '.join(bpaths))
         t0 = time.time()
         out, code = r.run(cmd, 300.0)
         dt = time.time() - t0
