@@ -1248,7 +1248,7 @@ pointers, except for the maths functions, which take and return `float`
 | Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
 | Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)`, `wifi_save(ssid, password)` (encrypted, joined at boot; `wifi_save(0, 0)` forgets it), `wifi_saved(buf, max)` (the saved SSID: 1, 0 if none, -1 if it cannot be opened) |
-| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)` |
+| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)`, `time(&valid)` (seconds since 1970 UTC; stores 1 when synced, 0 while running unsynced) |
 | Maths | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `pow(x, y)`, `sqrt`, `fabs`, `floor`, `ceil`, `fmod(x, y)` |
 
 `printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
@@ -2560,6 +2560,12 @@ is the first argument.
 Each argument word and the result in `r0` is a `float`'s 32-bit pattern;
 the kernel computes with `sinf`, `cosf`, ..., `fmodf`.
 
+#### Board
+
+| Call | Number | Meaning |
+|---|---|---|
+| `time(&valid)` | 105 | the wall clock: seconds since 1970 UTC; stores 1 into the int `valid` points at when the time is synced, 0 while running unsynced (no DS1307, no NTP yet). Pass a real int, or 0 to ignore the flag |
+
 #### Jobs and pipes
 
 | Call | Number | Meaning |
@@ -2656,7 +2662,7 @@ src/basic/        the BASIC interpreter (several files; pcsys.c is the shim for 
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 src/userland/     sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
                   write, edit, blink, reboot, wifi, get, send, rls, rcd, rcp, ping, nc,
-                  mount, umount, demosrv
+                  mount, umount, demosrv, date
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ and
                   tests/netfs/ have the programs for the job and /mnt/fs checks
 tools/            board.py (board access), fileserver.py, the check scripts
