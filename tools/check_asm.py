@@ -14,7 +14,7 @@
                                    "SECT OFFSET TYPE SYMBOL+ADDEND" line each in object order,
                                    then a blank line and the nm listing of the object
   check_asm.py --inits file.s      print the names of the SYM_INIT (.t2init) symbols, sorted
-  check_asm.py --corpus            disassemble every root/bin/*.bin and compiler/tests/*.c (built
+  check_asm.py --corpus            disassemble every root/bin/*.bin and src/compiler/tests/*.c (built
                                    with src/compiler/cc into build/corpus/), turn it back into
                                    assembly, and require build/host/as and GNU as to reproduce
                                    the original code bytes
@@ -228,7 +228,7 @@ BRANCH_RE = re.compile(r'^bl?(eq|ne|cs|cc|hs|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al
 
 
 def build_corpus():
-    """root/bin/*.bin plus compiler/tests/*.c built with compiler/cc -S, build/host/as and
+    """root/bin/*.bin plus src/compiler/tests/*.c built with src/compiler/cc -S, build/host/as and
     build/host/ld into build/corpus/. A program that does not build fails the check."""
     out = os.path.join(ROOT, 'build', 'corpus')
     os.makedirs(out, exist_ok=True)

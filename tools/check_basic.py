@@ -5,10 +5,10 @@ A case is tests/basic/NAME.bas with NAME.out, the expected stdout followed by a 
 `exit N` (the interpreter's exit code). NAME.in, if present, is the program's stdin.
 NAME.args, if present, holds the arguments after `basic NAME.bas` (an empty NAME.args means
 `basic` alone, with no file). NAME.env, if present, holds VAR=VALUE lines for the PC run's
-environment (basic/pcsys.c reads BASIC_PSRAM and BASIC_MALLOC_CAP); such a case is PC only.
+environment (src/basic/pcsys.c reads BASIC_PSRAM and BASIC_MALLOC_CAP); such a case is PC only.
 A NAME.bas without a NAME.out is a board-only case run by a function below (pipesrv).
 
-  check_basic.py --pc      build build/basic-pc (gcc -m32, basic/pcsys.h maps the T2DOS
+  check_basic.py --pc      build build/basic-pc (gcc -m32, src/basic/pcsys.h maps the T2DOS
                            library onto libc) and run every case with `basic-pc NAME.bas`
                            in tests/basic/; stdout must match NAME.out byte for byte.
                            Then build build/basic-asan (the same with -fsanitize=address)
