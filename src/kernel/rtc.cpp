@@ -142,6 +142,11 @@ static void sntp_service(uint32_t now_ms) {
 
 void rtc_init(void) {
   base_ms = millis();               // ticks from 1970 (valid=0) until something seeds us
+  udp.begin(0);                     // bind the rx side up front: the core registers its lwIP
+                                    // recv callback only in begin()/listen(), so without this
+                                    // the reply to a beginPacket-sent request is never read.
+                                    // Port 0 asks lwIP for a random one from its ephemeral
+                                    // range; binding while WiFi is still down is fine.
   next_probe = millis() + PROBE_MS;
   uint32_t t;
   if (ds1307_read(&t)) clock_correct(t);
