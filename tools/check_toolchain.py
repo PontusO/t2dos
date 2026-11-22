@@ -2,7 +2,9 @@
 """Check the cc driver (cc runs as and ld) with the multi-file programs in tests/toolchain/.
 
 A case is a list of build steps (cc, ar, mkdir) run in its own directory; it ends with
-NAME.bin, whose run must print NAME.expected (the output lines, then "exit N").
+NAME.bin, whose run must print NAME.expected (the output lines, then "exit N").  QEMU_RUN
+cases are additionally EXECUTED under qemu-arm with host_linux in --pc mode (the same
+NAME.expected file); --board skips them.
 tests/toolchain/pipeline_errors/NAME.c or NAME.s with NAME.expected: `cc -o NAME.bin SRC` must
 print the tool's message (a /tmp/ccXXXX_N_NAME name stands for any temporary file) and exit with
 the code on the last line, write no NAME.bin and leave no /tmp/cc* files.
@@ -68,7 +70,14 @@ CASES = [
       ['mkdir', 'lib'],
       ['ar', 'rc', 'lib/libtc.a', 'lib_square.o', 'lib_cube.o'],
       ['cc', '-o', 'lib_use.bin', 'lib_use.c', '-L', 'lib', '-l', 'tc']]),
+    # -I ROOT: clock.c includes sys.h, which is not next to the case sources
+    ('clock', ['clock.c'],
+     [['cc', '-I', ROOT, '-o', 'clock.bin', 'clock.c']]),
 ]
+
+# cases that also EXECUTE under qemu-arm with host_linux in PC mode (check_qemu); board
+# mode skips them entirely (the board's clock is only synced opportunistically there)
+QEMU_RUN = {'clock'}
 
 # symbols (nm type letter, name) the objects of a case must have
 SYMBOLS = {
@@ -135,6 +144,28 @@ def build_case(name, srcs, steps):
     hdr, good = bin_header(os.path.join(wd, name + '.bin'))
     if not good:
         return fail('%s: bad .bin header %r' % (name, hdr))
+    return True
+
+
+def check_qemu(name):
+    """run WORK/name/name.bin under qemu-arm with host_linux (root/tmp scratch, the
+    check_telnetd convention) and compare stdout + 'exit N' with NAME.expected"""
+    host = os.path.join(ROOT, 'host_linux')
+    if not os.path.exists(host):
+        return fail('%s: no host_linux binary, run `make host`' % name)
+    tmp = os.path.join(ROOT, 'root', 'tmp')
+    os.makedirs(tmp, exist_ok=True)
+    shutil.copyfile(os.path.join(WORK, name, name + '.bin'), os.path.join(tmp, name + '.bin'))
+    try:
+        r = subprocess.run(['qemu-arm', host, '-r', os.path.join(ROOT, 'root'), '/tmp/%s.bin' % name],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return fail('%s under qemu: %s' % (name, e))
+    got = r.stdout.rstrip('\n').split('\n') if r.stdout else []
+    got = [l.rstrip() for l in got] + ['exit %d' % r.returncode]
+    want = open(os.path.join(TESTS, name + '.expected')).read().rstrip('\n').split('\n')
+    if got != want:
+        return fail('%s under qemu: output %r, want %r' % (name, got, want))
     return True
 
 
@@ -292,7 +323,10 @@ def check_pc():
     ok = True
     n = 0
     for name, srcs, steps in CASES:
-        ok = build_case(name, srcs, steps) and ok
+        good = build_case(name, srcs, steps)
+        if good and name in QEMU_RUN:
+            good = check_qemu(name) and good
+        ok = ok and good
         n += 1
     ok = check_symbols() and ok
     ok = check_lib() and ok
@@ -378,6 +412,8 @@ def check_board():
     ok = True
     before = r.tmp_files()
     for name, srcs, steps in CASES:
+        if name in QEMU_RUN:
+            continue
         good = True
         d = '%s/%s' % (REMOTE, name)
         r.run('mkdir ' + d)

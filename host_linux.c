@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -430,6 +431,7 @@ int sys(int num, int n, int *argv) {
     case SYS_sock_avail: { struct pollfd p = { A(0), POLLIN, 0 }; return poll(&p, 1, 0) > 0; }
     case SYS_gpio_mode: case SYS_gpio_write: case SYS_pwm_write: case SYS_delay_us: case SYS_spi_transfer: return 0;
     case SYS_gpio_read: case SYS_analog_read: case SYS_i2c_write: case SYS_i2c_read: return 0;
+    case SYS_time: { if ((int *)A(0)) *(int *)A(0) = 1; return (int)time(NULL); }  // the host clock is always valid
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
