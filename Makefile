@@ -112,6 +112,8 @@ check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/l
 	python3 tools/check_ref.py
 	@# the cc driver: multi-file programs, assembly and C mixed, archives, pipeline errors
 	python3 tools/check_toolchain.py --pc
+	@# the tz DST engine: native unit tests of src/kernel/tz.c
+	gcc -Wall -o build/host/tz_test tests/tz/test_tz.c && build/host/tz_test
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin build/s
