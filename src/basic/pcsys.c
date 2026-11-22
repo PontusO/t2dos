@@ -69,6 +69,11 @@ int t2_millis(void) {
 
 int t2_sleep(int ms) { if (ms > 0) usleep(ms * 1000); return 0; }
 
+// the kernel's localtime(valid): the local second, *valid telling whether the clock is
+// synced. The host clock is always right and has no zone, so: time(NULL), valid left
+// alone (callers here pass 0), which is the zero-offset local second.
+int t2_localtime(int valid) { return (int)time(NULL); }
+
 // Memory as on the board: PSRAM of BASIC_PSRAM bytes (8 MB if not set in the environment), of
 // which what the interpreter holds is not free; malloc fails beyond BASIC_MALLOC_CAP bytes
 // held (no limit if not set: set below the PSRAM size it tests malloc returning 0).

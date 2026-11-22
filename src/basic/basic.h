@@ -46,7 +46,7 @@ enum {
   K_CINT, K_CLNG, K_CSNG, K_CDBL, K_LEN, K_LEFTS, K_RIGHTS, K_MIDS, K_INSTR, K_UCASES,
   K_LCASES, K_LTRIMS, K_RTRIMS, K_STRS, K_VAL, K_CHRS, K_ASC, K_STRINGS, K_SPACES, K_HEXS,
   K_OCTS, K_INKEYS, K_EOF, K_FREEFILE, K_LBOUND, K_UBOUND, K_COMMANDS, K_TAB, K_SPC,
-  K_PINREAD, K_ANALOGREAD,
+  K_PINREAD, K_ANALOGREAD, K_DATES, K_TIMES,
   // a QBasic word outside this BASIC (SCREEN, USING, ON, DEF, ...): val is the word as
   // written; reaching it is the load-time error "Advanced feature unavailable"
   K_UNSUP,
@@ -54,7 +54,7 @@ enum {
   NTOK
 };
 #define K_FN_FIRST K_ABS
-#define K_FN_LAST K_ANALOGREAD
+#define K_FN_LAST K_TIMES
 
 // One token. line: the physical source line (from 1) where its logical line starts, so all
 // tokens of a `_` continuation carry the first line. val by kind:

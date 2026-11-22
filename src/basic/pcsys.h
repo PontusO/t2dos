@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <time.h>   // before the localtime rename below, so time.h's own declaration is read first
 
 struct stat_t;
 struct dirent_t;
@@ -56,6 +57,9 @@ struct job_t;
 #define analog_read t2_analog_read
 #define pwm_write t2_pwm_write
 #define delay_us t2_delay_us
+// localtime(valid) -> local second, like the kernel's: the host runs need no zone, so
+// the shim returns time(NULL) with zero offset (the tests assert format, never a value)
+#define localtime t2_localtime
 
 void t2_exit(int code);
 int t2_exec(char *path, int argc, char **argv);
@@ -96,6 +100,7 @@ int t2_gpio_read(int pin);
 int t2_analog_read(int pin);
 int t2_pwm_write(int pin, int v);
 int t2_delay_us(int us);
+int t2_localtime(int valid);
 
 // maths: T2DOS's are single precision (float in, float out)
 #define sin(x) sinf(x)
