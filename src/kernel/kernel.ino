@@ -862,6 +862,7 @@ extern "C" int sys(int num, int n, int *argv) {
       tz_rule r; if (tz_parse(s, &r)) return -1;                         // rejected: the active rule stays
       tz_load(&r); tz_store(s);                                          // live first; a /etc/tz write failure is ignored
       return tz_now((long)clock_now()); }
+    case SYS_tzlocal: { long t = (long)A(0); return (int)(t + tz_now(t)); }   // local epoch for the instant t (tzlocal(utc) -> utc + tz_now(utc))
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));

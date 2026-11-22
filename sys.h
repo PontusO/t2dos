@@ -29,6 +29,7 @@ enum {
   SYS_time = 105,   // time(valid) -> wall-clock second; *valid = 1 when it is the real time (0: not synced)
   SYS_localtime = 106,   // localtime(valid) -> local second (time + the tz offset in effect then); *valid as in time; UTC until a zone is set
   SYS_tzset = 107,       // tzset(str): apply a POSIX TZ string and save it to /etc/tz; str 0 queries the current offset; -1 rejected, nothing changed (a zone whose live offset is exactly -1 s, a sub-minute GMT+0:0:1, would collide with that sentinel - no real rule does)
+  SYS_tzlocal = 108,     // tzlocal(utc) -> local epoch for utc under the active rule (UTC until a zone is set)
   // maths: float arguments and result travel as the float's bit pattern (float sin(float), ...)
   SYS_sin = 112, SYS_cos = 113, SYS_tan = 114, SYS_asin = 115, SYS_acos = 116, SYS_atan = 117, SYS_atan2 = 118,
   SYS_sinh = 119, SYS_cosh = 120, SYS_tanh = 121, SYS_exp = 122, SYS_log = 123, SYS_log10 = 124, SYS_pow = 125,

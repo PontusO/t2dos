@@ -438,6 +438,7 @@ int sys(int num, int n, int *argv) {
       if (!s) return tz_now(time(NULL));
       tz_rule r; if (tz_parse(s, &r)) return -1; tz_load(&r);   // the engine is under test, not libc; no file persistence here
       return tz_now(time(NULL)); }
+    case SYS_tzlocal: { long t = (long)A(0); return (int)(t + tz_now(t)); }   // local epoch for the instant t (tzlocal(utc) -> utc + tz_now(utc))
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
