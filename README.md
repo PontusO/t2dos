@@ -2041,7 +2041,7 @@ Board access (T2DOS extras, so that a blinking LED is a five-line program):
   used gives `Array not defined`.
 - `RUN` works only at the immediate prompt; inside a program it gives
   `Advanced feature unavailable`.
-- `DATE$` and `TIME$` do not exist: the board has no clock.
+- `DATE$` and `TIME$` do not exist: `basic` does not read the kernel clock.
 - Any QBasic statement or function that `basic` does not have stops the
   program, before it runs, with `Advanced feature unavailable`. The few
   things that are accepted without an effect are listed above: `WIDTH`,

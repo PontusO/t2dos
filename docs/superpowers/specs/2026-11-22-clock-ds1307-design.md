@@ -114,3 +114,49 @@ variant-defined pins, not hardcoded GPIO.
 - Exact BCD/epoch helpers (a small `days_from_civil`/reverse pair in
   `rtc.cpp` - 2000..2099 range, leap years by rule).
 - `date` tool formatting and its one-line README entry.
+
+## Results (landed 2026-11-22)
+
+Implemented as designed, with the promised deferral (no DS1307 on the
+bench: chip-boot and heal-a-live-chip tests wait for a round that has a
+chip) and four deviations, all ledgered:
+
+- Two esp_hosted bind fixes the design did not anticipate, both
+  board-proven through fix rounds on Task 2: (1) `udp.begin()` is
+  actually required - core 6.3.2 registers the `udp_recv` callback only
+  in `begin()`/`listen()` (the lazy-socket reading from review held for
+  the pico-WiFi path, not esp_hosted), so without it replies never
+  arrive; (2) the bind must happen at the `WL_CONNECTED` edge, not in
+  `rtc_init` at boot: the lwIP stack (`ESPHostLwIP::initHW`) only comes
+  up with `WiFi.mode`/`WiFi.begin`, so a pcb created earlier binds
+  against a stack that does not exist yet. `udp_bound` clears on the
+  reconnect edge; a reconnect while a reply is pending costs up to 62 s
+  extra first-resync latency (parked, harmless).
+- The spec's hot-plug re-probe is gated on `!valid`: a synced clock has
+  nothing to pick up, and while connected the hourly write-back heals
+  the chip anyway; the literal reading would cost two I2C transactions
+  per minute forever for the one path "offline board + chip hot-plugged
+  later", which is not this bench.
+- `check_sh.py` has no `--board` mode (the AGENTS triage table's "their
+  `--board` variants" is not universal) - the console regression was
+  substituted: script-case replay, pipe/redirect smoke, and 15 console
+  round-trips all 0.38 s.
+- Hourly resync is unverifiable inside the test window; the code-level
+  `next_try = now_ms + NTP_HOURLY_MS` arm is consistent with
+  observation - the 60 s retry loop demonstrably stops cycling after a
+  sync and the timer holds.
+
+Verification on the Challenger, across the three passes
+(`c126b88`/`10a4d87`/`d608c04`; `--selfhost` ran in the first pass on
+`c126b88` - the two later fix commits are kernel-only): unsynced ticks from
+the epoch with 0 s drift over 90 s; first NTP sync <=16 s from boot,
+board-vs-PC delta 1 s, holds over +127 s; reboot round-trip synced 4 s
+after power-on+join; no DNS stall across three passes (~45 round-trips
+uniform 0.38 s, spanning both join edges); `rtc_write` to the absent
+0x68 is silent; `--selfhost` six IDENTICAL + on-board tests 2m28.8s.
+PC gates green - `check_toolchain --pc` at 10 cases, `check_ref`
+different: 0 with `date.c` in the "newer builtins" class
+(`check_ref.py`'s `NEWER_BUILTINS` gained `'time'` - the plan's "the
+corpus uses no `time`" went stale when Task 3 added `date.c`, and no
+later gate re-ran `make check` until this pass; ruling and evidence in
+`.superpowers/sdd/2026-11-22-clock-ds1307/task-5-report.md`).
