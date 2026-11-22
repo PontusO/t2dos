@@ -70,7 +70,8 @@ CASES = [
       ['mkdir', 'lib'],
       ['ar', 'rc', 'lib/libtc.a', 'lib_square.o', 'lib_cube.o'],
       ['cc', '-o', 'lib_use.bin', 'lib_use.c', '-L', 'lib', '-l', 'tc']]),
-    # -I ROOT: clock.c includes sys.h, which is not next to the case sources
+    # -I ROOT: clock.c includes sys.h, which is not next to the case sources; the
+    # absolute ROOT never reaches the board because QEMU_RUN below skips this case there
     ('clock', ['clock.c'],
      [['cc', '-I', ROOT, '-o', 'clock.bin', 'clock.c']]),
 ]

@@ -90,7 +90,7 @@ static int ds1307_read(uint32_t *epoch) {
   return 1;
 }
 
-// write regs 6..0, reg 0 last and with CH clear: the oscillator only starts on a
+// write regs 1..6 then reg 0 last, with CH clear: the oscillator only starts on a
 // complete, consistent time, so a part-write (dead battery) leaves the clock cleanly
 // halted instead of running on garbage. Chip absent: both transactions NACK, ignored.
 static void rtc_write(uint32_t epoch) {
