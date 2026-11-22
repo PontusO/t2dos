@@ -1,0 +1,11 @@
+T2DOS shell, type help
+/> tz CET-1CEST,M3.5.0,M10.5.0
+rule CET-1CEST,M3.5.0,M10.5.0 offset +01:00 std live only, not saved
+/> ls /tmp/lsdir
+----------         5  sentinel.bin
+2025-07-15 12:00         1  summer.bin
+----------         4  zero.bin
+----------         3  junk.bin
+2025-11-22 13:00         2  winter.bin
+5 files, 15 bytes
+/> 
