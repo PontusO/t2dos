@@ -6,8 +6,8 @@ places, the `time(&valid)` builtin, `/bin/date`. Spec:
 `docs/superpowers/specs/2026-11-22-clock-ds1307-design.md` (Results
 there too), plan `docs/superpowers/plans/2026-11-22-clock-ds1307.md`.
 SDD ledger (all rulings): `.superpowers/sdd/2026-11-22-clock-ds1307/progress.md`,
-board evidence trail in `task-4-report.md` beside it. Landed on branch
-`clock` awaiting merge.
+board evidence trail in `task-4-report.md` beside it. Merged to `main`
+2026-11-22.
 
 ## Settled (don't re-investigate)
 
