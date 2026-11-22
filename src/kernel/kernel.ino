@@ -451,6 +451,7 @@ static void tz_store(const char *s) {   // best effort: a failed write never fai
 // zone; no file, empty or malformed leaves UTC silently - a fresh card behaves exactly as before
 static void tz_boot() {
   File f = fsys->open(TZ_FILE, "r"); if (!f) return;
+  if (f.size() > 96) { f.close(); return; }   // over-long (tampered or garbage): stay UTC, never parse a truncated prefix
   char buf[97];
   int n = f.read((uint8_t *)buf, 96); f.close();
   if (n <= 0) return;
