@@ -15,6 +15,9 @@
 // hour Europe actually changes at. t2 stores the resolved left-side time.
 #ifndef TZ_H
 #define TZ_H
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
   int std_off, dst_off;         // seconds, local = UTC + off; dst_off = std_off + 3600 when the string omits it
@@ -28,4 +31,7 @@ int  tz_offset(const tz_rule *r, long utc); // seconds to add to utc; also expor
 void tz_load(const tz_rule *r);             // install as active rule (kernel and host keep exactly one)
 int  tz_now(long utc);                      // tz_offset(active, utc); active with no load = UTC (offset 0)
 
+#ifdef __cplusplus
+}
+#endif
 #endif

@@ -68,8 +68,8 @@ root/lib/sys.h: sys.h
 root/lib/math.h: src/lib/math.h
 	@mkdir -p root/lib && cp $< root/lib/
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
-host: host_linux.c sys.h src/kernel/netfs.c src/kernel/netfs.h src/kernel/telnetd.c src/kernel/telnetd.h
-	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static -lm
+host: host_linux.c sys.h src/kernel/netfs.c src/kernel/netfs.h src/kernel/telnetd.c src/kernel/telnetd.h src/kernel/tz.c src/kernel/tz.h
+	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c src/kernel/tz.c -static -lm
 # Reference compiler: gcc build of compiler/cc.c as of build/ref/COMMIT (byte-identity reference).
 # The git show path is the HISTORIC tree's path (pre src/ move at that commit): do not prefix it.
 ref:

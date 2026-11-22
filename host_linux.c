@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "sys.h"
+#include "src/kernel/tz.h"
 
 #define MAX_NEST 4
 static jmp_buf jbs[MAX_NEST]; static int exit_codes[MAX_NEST]; static int nest = -1;
@@ -432,6 +433,11 @@ int sys(int num, int n, int *argv) {
     case SYS_gpio_mode: case SYS_gpio_write: case SYS_pwm_write: case SYS_delay_us: case SYS_spi_transfer: return 0;
     case SYS_gpio_read: case SYS_analog_read: case SYS_i2c_write: case SYS_i2c_read: return 0;
     case SYS_time: { if ((int *)A(0)) *(int *)A(0) = 1; return (int)time(NULL); }  // the host clock is always valid
+    case SYS_localtime: { if ((int *)A(0)) *(int *)A(0) = 1; return (int)time(NULL) + tz_now(time(NULL)); }
+    case SYS_tzset: { const char *s = (const char *)A(0);
+      if (!s) return tz_now(time(NULL));
+      tz_rule r; if (tz_parse(s, &r)) return -1; tz_load(&r);   // the engine is under test, not libc; no file persistence here
+      return tz_now(time(NULL)); }
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
@@ -511,6 +517,8 @@ int main(int argc, char **argv) {
   for (int i = 0; i < MAX_PIPE_FDS; i++) pfd[i].pipe = -1;
   if (argc < 2) { fprintf(stderr, "usage: host_linux [-r rootdir] prog.bin [args]\n"); return 1; }
   if (!strcmp(argv[1], "-r")) { strcpy(root, argv[2]); argv += 2; argc -= 2; }
+  { tz_rule r; char *tzenv = getenv("TZ");   // the standard PC-side knob, read once at startup (UTC when unset)
+    if (tzenv && !tz_parse(tzenv, &r)) tz_load(&r); }
   nfs_boot();
   if (isatty(0)) { struct termios t; tcgetattr(0, &t); t.c_lflag &= ~(ICANON | ECHO); tcsetattr(0, TCSANOW, &t); }
   int r;
