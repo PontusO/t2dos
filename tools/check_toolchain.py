@@ -74,11 +74,13 @@ CASES = [
     # absolute ROOT never reaches the board because QEMU_RUN below skips this case there
     ('clock', ['clock.c'],
      [['cc', '-I', ROOT, '-o', 'clock.bin', 'clock.c']]),
+    ('tz', ['tz.c'],
+     [['cc', '-I', ROOT, '-o', 'tz.bin', 'tz.c']]),
 ]
 
 # cases that also EXECUTE under qemu-arm with host_linux in PC mode (check_qemu); board
 # mode skips them entirely (the board's clock is only synced opportunistically there)
-QEMU_RUN = {'clock'}
+QEMU_RUN = {'clock', 'tz'}
 
 # symbols (nm type letter, name) the objects of a case must have
 SYMBOLS = {
@@ -157,9 +159,12 @@ def check_qemu(name):
     tmp = os.path.join(ROOT, 'root', 'tmp')
     os.makedirs(tmp, exist_ok=True)
     shutil.copyfile(os.path.join(WORK, name, name + '.bin'), os.path.join(tmp, name + '.bin'))
+    # strip TZ: host_linux honors it at startup, so a dev or CI shell exporting TZ
+    # would make the tz case's tzset(0) == 0 leg nondeterministic
+    env = {k: v for k, v in os.environ.items() if k != 'TZ'}
     try:
         r = subprocess.run(['qemu-arm', host, '-r', os.path.join(ROOT, 'root'), '/tmp/%s.bin' % name],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return fail('%s under qemu: %s' % (name, e))
     got = r.stdout.rstrip('\n').split('\n') if r.stdout else []

@@ -691,6 +691,49 @@ After a restart, join WiFi again, unless the network was saved with
 rebooting into the bootloader
 ```
 
+#### date
+
+```
+date [-u]
+```
+
+Prints the wall clock: local time and the numeric UTC offset of the
+current zone (see `tz`), or plain UTC with `-u`. While nothing has synced
+the clock it adds `unsynced: no chip, no NTP` under the line.
+
+```
+/> date
+2026-11-22 22:15:46 +01:00
+/> date -u
+2026-11-22 21:15:47 UTC
+```
+
+#### tz
+
+```
+tz [rule | +N | -N | UTC]
+```
+
+Shows or sets the time zone. Without an argument it prints the current
+rule and the live UTC offset (`std` or `dst` when the rule has two
+sides). A POSIX rule sets it, `+N` and `-N` are shorthand for a fixed
+whole-hour offset, `UTC` clears it. A set rule is saved to `/etc/tz` and
+reloaded at boot, so it survives a reboot; a malformed rule is rejected
+and the previous one keeps standing.
+
+```
+/> tz CET-1CEST,M3.5.0,M10.5.0
+rule CET-1CEST,M3.5.0,M10.5.0 offset +01:00 std
+/> tz +2
+rule UTC-2 offset +02:00
+/> tz UTC
+rule UTC offset +00:00
+```
+
+POSIX counts zone offsets west-positive, so Sweden's rule starts
+`CET-1`: the minus means *east* of UTC. The `+N` shorthand means the
+opposite, "add N hours", so `tz +2` maps to the rule `UTC-2`.
+
 ### Background
 
 `jobs`, `kill` and `&` are part of the shell, see
@@ -1248,7 +1291,7 @@ pointers, except for the maths functions, which take and return `float`
 | Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
 | Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)`, `wifi_save(ssid, password)` (encrypted, joined at boot; `wifi_save(0, 0)` forgets it), `wifi_saved(buf, max)` (the saved SSID: 1, 0 if none, -1 if it cannot be opened) |
-| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)`, `time(&valid)` (seconds since 1970 UTC; stores 1 when synced, 0 while running unsynced) |
+| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)`, `time(&valid)` (seconds since 1970 UTC; stores 1 when synced, 0 while running unsynced), `localtime(&valid)` (the local wall clock: UTC plus the current zone's offset; same valid flag), `tzset(str)` (applies a POSIX zone rule and saves it to `/etc/tz`; returns the applied offset in seconds, -1 if rejected; `tzset(0)` queries the live offset) |
 | Maths | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `pow(x, y)`, `sqrt`, `fabs`, `floor`, `ceil`, `fmod(x, y)` |
 
 `printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
@@ -2565,6 +2608,8 @@ the kernel computes with `sinf`, `cosf`, ..., `fmodf`.
 | Call | Number | Meaning |
 |---|---|---|
 | `time(&valid)` | 105 | the wall clock: seconds since 1970 UTC; stores 1 into the int `valid` points at when the time is synced, 0 while running unsynced (no DS1307, no NTP yet). Pass a real int, or 0 to ignore the flag |
+| `localtime(&valid)` | 106 | the local wall clock: `time` plus the UTC offset the zone rule gives for that instant; with no zone set, exactly `time`. Same valid flag |
+| `tzset(str)` | 107 | apply a POSIX zone rule (like `CET-1CEST,M3.5.0,M10.5.0`): parsed and applied live, saved to `/etc/tz`. Returns the applied offset in seconds, local = UTC + offset (POSIX counts west-positive, so `GMT+3` returns -10800); -1 rejects it and nothing changes; `tzset(0)` queries the current offset |
 
 #### Jobs and pipes
 
@@ -2662,7 +2707,7 @@ src/basic/        the BASIC interpreter (several files; pcsys.c is the shim for 
 examples/basic/   example BASIC programs; make copies them to root/src/basic/
 src/userland/     sh, ls, cat, cp, mv, rm, mkdir, rmdir, echo, hexdump, free, put,
                   write, edit, blink, reboot, wifi, get, send, rls, rcd, rcp, ping, nc,
-                  mount, umount, demosrv, date
+                  mount, umount, demosrv, date, tz
 tests/            assembler, linker, object and toolchain tests; tests/jobs/ and
                   tests/netfs/ have the programs for the job and /mnt/fs checks
 tools/            board.py (board access), fileserver.py, the check scripts

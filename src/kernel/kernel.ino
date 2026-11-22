@@ -21,6 +21,7 @@
 #include "netfs_fs.h"
 #include "telnetd.h"
 #include "rtc.h"
+#include "tz.h"
 #include <hardware/irq.h>
 #include <hardware/structs/timer.h>
 
@@ -438,6 +439,28 @@ static int k_telnetd(int port, const char *pw) {
   return 0;
 }
 
+// The time zone: /etc/tz holds the exact accepted POSIX TZ string, one line of plain text -
+// the first *unsealed* settings file (nothing secret about a time zone). The engine is tz.c.
+#define TZ_FILE "/etc/tz"
+static void tz_store(const char *s) {   // best effort: a failed write never fails SYS_tzset
+  if (!is_dir("/etc")) fsys->mkdir("/etc");
+  File f = fsys->open(TZ_FILE, "w"); if (!f) return;
+  f.write((const uint8_t *)s, strlen(s)); f.close();
+}
+// called from setup() AFTER the filesystem mounts (rtc_init runs before it): apply the saved
+// zone; no file, empty or malformed leaves UTC silently - a fresh card behaves exactly as before
+static void tz_boot() {
+  File f = fsys->open(TZ_FILE, "r"); if (!f) return;
+  if (f.size() > 96) { f.close(); return; }   // over-long (tampered or garbage): stay UTC, never parse a truncated prefix
+  char buf[97];
+  int n = f.read((uint8_t *)buf, 96); f.close();
+  if (n <= 0) return;
+  while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) n--;   // tolerate a trailing newline
+  buf[n] = 0;
+  tz_rule r;
+  if (!tz_parse(buf, &r)) tz_load(&r);
+}
+
 // ============================================================ named pipes
 static bool is_pipe_fd(int fd) { return fd >= PIPE_FD && fd < PIPE_FD + MAX_PIPE_FDS; }
 // a resolved path's pipe name (the part after /pipe/), or nullptr if it is not under /pipe/
@@ -833,6 +856,12 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_spi_transfer: SPI.transfer((void *)A(0), A(1)); return 0;
     case SYS_delay_us: delayMicroseconds(A(0)); return 0;
     case SYS_time: { int *vp = (int *)A(0); if (vp) *vp = clock_valid(); return (int)clock_now(); }
+    case SYS_localtime: { int *vp = (int *)A(0); if (vp) *vp = clock_valid(); return (int)clock_now() + tz_now((long)clock_now()); }   // local = UTC + the offset in effect then
+    case SYS_tzset: { const char *s = (const char *)A(0);
+      if (!s) return tz_now((long)clock_now());                          // query the current offset
+      tz_rule r; if (tz_parse(s, &r)) return -1;                         // rejected: the active rule stays
+      tz_load(&r); tz_store(s);                                          // live first; a /etc/tz write failure is ignored
+      return tz_now((long)clock_now()); }
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
@@ -1268,6 +1297,7 @@ void setup() {
   if (mounted && tmpfs && !fsys->exists("/tmp")) fsys->mkdir("/tmp");   // so ls / shows it
   netfs = netfs_begin();
   if (mounted) netfs_boot();         // connects on first use, so no network is needed yet
+  if (mounted) tz_boot();            // the saved time zone, after the mount (tz.c; UTC without /etc/tz)
   preempt_start();
   vault_boot();
   char ssid[33], pass[64];          // join the saved network, without waiting for it

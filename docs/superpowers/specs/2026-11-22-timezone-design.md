@@ -188,3 +188,50 @@ not by hand).
 - `host_linux` TZ-env pickup point (before first syscall dispatch is enough).
 - Whether `tzset` also accepts the full string via `TZ=` naming a zone absent
   from any database - no: only POSIX-style strings, always, both sides.
+
+## Results (landed 2026-11-22, branch `tz`, awaiting merge)
+
+Implemented as designed, with the promised deferral (DS1307 legs stay out,
+no chip on the bench, Round A ruling) and these deviations, all ledgered in
+`.superpowers/sdd/2026-11-22-timezones/progress.md`:
+
+- `date` takes its offset from `tzset(0)` (the documented NULL query), not
+  the plan's `localtime - time` subtraction: C truncation at a second
+  straddle (d=-10799 truncates to -179 min) would render "-02:59" for up to
+  a second every minute at negative offsets. One syscall returns the exact
+  whole-minute offset, zero userland arithmetic.
+- The plan's `M1.1.0` DST-start example was wrong: POSIX `d` is 0=Sunday,
+  and the pinned test epochs only hold for Monday=1, so it resolved to
+  `M1.1.1`. Brief wording, the legs won as instructed.
+- A one-line boot guard beyond the spec's letter (found in review): the
+  boot load rejects an over-long `/etc/tz` instead of truncating it into
+  the parse buffer, which would have half-applied untrusted SD input past
+  the engine's own >96-byte guard. `tz_store` never writes newlines, so
+  system-written files never hit it.
+- An omitted `/n` transition time is 02:00 *local standard* on both sides
+  in both engine copies (documented in `tz.h`, pinned by the tests): a
+  deliberate deviation from glibc (local of the side being left) that
+  matches the real EU transition instant (02:00 CET = 01:00 UTC) for
+  `CET-1CEST,M3.5.0,M10.5.0`, the string the owner types.
+- Selfhost cost two flaky attempts (a corrupted fetch with a gap at offset
+  8676, then a hard hang mid-cc-compile power-cycled with the exact AGENTS
+  hub command); the third attempt on a freshly booted board was a clean
+  full PASS. Pre-existing board-cc flakiness class
+  (`docs/NOTES-board-cc-flaky.md`), not tz-caused.
+
+Verification on the Challenger at `a0ddc24`: fresh card `tz` prints
+`rule UTC offset +00:00`; `tz CET-1CEST,M3.5.0,M10.5.0` gives
+`offset +01:00 std` (winter) and `date` = host UTC + 1 h; a console reboot
+restored the rule from `/etc/tz` without re-setting it (epoch + 1 h until
+NTP re-syncs, the tz applies over the timer clock); `tz +2` ->
+`rule UTC-2 offset +02:00` with `date -u` still `... UTC`; `tz nonsense`
+rejected with the previous rule kept; `tz UTC` cleared the offset and
+unlinked `/etc/tz`; 15/15 console round-trips at 0.37 s. Kernel compile
+(Challenger FQBN, patched ESPHost): 262316 bytes flash (25%), 164884 bytes
+RAM (31%); the tz share is +1720 text, +48 bss. PC gates green: `make
+check` ok, `check_ref` different: 0 with `date`/`tz` in the
+newer-builtins class (`localtime`, `tzset` added to `NEWER_BUILTINS` the
+commit they land in), `check_toolchain --pc` 11 cases (the new `tz`
+QEMU_RUN case runs with `TZ` stripped from the subprocess env),
+`check_make --pc` 13/13, `bench --pc` ok; `--selfhost` six IDENTICAL (the
+third attempt above).

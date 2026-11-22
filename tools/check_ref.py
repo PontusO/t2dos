@@ -38,7 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORK = os.path.join(ROOT, 'build', 's', 'ref')
 REF_CC = os.path.join(ROOT, 'build', 'ref', 'cc')
 CC = os.path.join(ROOT, 'src', 'compiler', 'cc')
-NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe', 'reboot', 'wifi_save', 'wifi_saved', 'ping', 'mount', 'mountat', 'telnetd', 'time',   # unknown to the reference cc
+NEWER_BUILTINS = ('spawn', 'yield', 'jobs', 'kill', 'mkpipe', 'reboot', 'wifi_save', 'wifi_saved', 'ping', 'mount', 'mountat', 'telnetd', 'time', 'localtime', 'tzset',   # unknown to the reference cc
                   'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
                   'exp', 'log', 'log10', 'pow', 'sqrt', 'fabs', 'floor', 'ceil', 'fmod')
 UNDEF_RE = re.compile(r'undefined function: (\w+)\(')

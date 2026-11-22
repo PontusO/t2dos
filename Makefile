@@ -68,8 +68,8 @@ root/lib/sys.h: sys.h
 root/lib/math.h: src/lib/math.h
 	@mkdir -p root/lib && cp $< root/lib/
 # Linux/ARM harness: make host && printf 'ls\n' | qemu-arm ./host_linux -r root /bin/sh.bin
-host: host_linux.c sys.h src/kernel/netfs.c src/kernel/netfs.h src/kernel/telnetd.c src/kernel/telnetd.h
-	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c -static -lm
+host: host_linux.c sys.h src/kernel/netfs.c src/kernel/netfs.h src/kernel/telnetd.c src/kernel/telnetd.h src/kernel/tz.c src/kernel/tz.h
+	arm-linux-gnueabihf-gcc -O1 -U_FORTIFY_SOURCE -mthumb -w -o host_linux host_linux.c src/kernel/tz.c -static -lm
 # Reference compiler: gcc build of compiler/cc.c as of build/ref/COMMIT (byte-identity reference).
 # The git show path is the HISTORIC tree's path (pre src/ move at that commit): do not prefix it.
 ref:
@@ -112,6 +112,8 @@ check: build/host/nm build/host/ar build/host/objdump build/host/as build/host/l
 	python3 tools/check_ref.py
 	@# the cc driver: multi-file programs, assembly and C mixed, archives, pipeline errors
 	python3 tools/check_toolchain.py --pc
+	@# the tz DST engine: native unit tests of src/kernel/tz.c
+	gcc -Wall -o build/host/tz_test tests/tz/test_tz.c && build/host/tz_test
 .PHONY: ref check
 clean:
 	rm -rf $(CC_HOST) host_linux root/bin/*.bin build/s
