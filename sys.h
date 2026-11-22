@@ -101,4 +101,4 @@ struct job_t { int id; int state; int exit_code; char name[32]; };
 // number of complete messages queued: when mtime > 0 a read of the next message will not wait
 struct stat_t { int size; int isdir; int mtime; };
 // readdir() fills this
-struct dirent_t { char name[64]; int size; int isdir; };
+struct dirent_t { char name[64]; int size; int isdir; int mtime; };   // mtime: seconds UTC, 0 = the FS reports no time

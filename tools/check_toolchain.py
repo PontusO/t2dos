@@ -76,11 +76,13 @@ CASES = [
      [['cc', '-I', ROOT, '-o', 'clock.bin', 'clock.c']]),
     ('tz', ['tz.c'],
      [['cc', '-I', ROOT, '-o', 'tz.bin', 'tz.c']]),
+    ('mtime', ['mtime.c'],
+     [['cc', '-I', ROOT, '-o', 'mtime.bin', 'mtime.c']]),
 ]
 
 # cases that also EXECUTE under qemu-arm with host_linux in PC mode (check_qemu); board
 # mode skips them entirely (the board's clock is only synced opportunistically there)
-QEMU_RUN = {'clock', 'tz'}
+QEMU_RUN = {'clock', 'tz', 'mtime'}
 
 # symbols (nm type letter, name) the objects of a case must have
 SYMBOLS = {
