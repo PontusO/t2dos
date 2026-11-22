@@ -33,6 +33,7 @@ static uint32_t next_probe;         // millis of the next DS1307 re-probe
 static int last_connected;
 
 static WiFiUDP udp;
+static int udp_bound;               // socket bound for the current esp_hosted session
 
 unsigned long clock_now(void) { return base_epoch + (uint32_t)((millis() - base_ms) / 1000); }
 int clock_valid(void) { return valid; }
@@ -111,6 +112,11 @@ static void rtc_write(uint32_t epoch) {
 // resolves via the core. A success also writes back to the chip: a fresh (or dead-
 // battery) DS1307 gets healed and boot-from-chip works on the next reboot.
 static void sntp_service(uint32_t now_ms) {
+  // Edge detection runs first, before the pending-reply branch: a reconnect shorter
+  // than the poll interval would otherwise slip by unnoticed and keep the dead socket.
+  int connected = WiFi.status() == WL_CONNECTED;
+  if (connected && !last_connected) { next_try = 0; udp_bound = 0; }   // the edge asks for a sync now, on a fresh socket
+  last_connected = connected;
   if (rx_deadline) {
     if (udp.parsePacket() >= 48) {
       uint8_t r[48];
@@ -128,10 +134,15 @@ static void sntp_service(uint32_t now_ms) {
     }
     return;
   }
-  int connected = WiFi.status() == WL_CONNECTED;
-  if (connected && !last_connected) next_try = 0;     // the WL_CONNECTED edge asks for a sync now
-  last_connected = connected;
   if (!connected || (int32_t)(now_ms - next_try) < 0) return;
+  if (!udp_bound) {
+    // Bind at the edge, never at boot: the esp_hosted stack (initHW ->
+    // __startEthernetContext, the lwIP context and netif) is only born inside
+    // WiFi.begin(), and a pcb bound before that is dead once it is (board-proven).
+    // begin() unrefs the previous context, so re-binding on every reconnect is safe.
+    if (!udp.begin(0)) { next_try = now_ms + NTP_RETRY_MS; return; }   // port 0 = lwIP ephemeral range
+    udp_bound = 1;
+  }
   uint8_t req[48] = {0x1B};                           // LI 0, VN 3, Mode 3 (client); payload zero
   if (!udp.beginPacket("pool.ntp.org", 123) || !udp.write(req, 48) || !udp.endPacket()) {
     next_try = now_ms + NTP_RETRY_MS;
@@ -142,11 +153,6 @@ static void sntp_service(uint32_t now_ms) {
 
 void rtc_init(void) {
   base_ms = millis();               // ticks from 1970 (valid=0) until something seeds us
-  udp.begin(0);                     // bind the rx side up front: the core registers its lwIP
-                                    // recv callback only in begin()/listen(), so without this
-                                    // the reply to a beginPacket-sent request is never read.
-                                    // Port 0 asks lwIP for a random one from its ephemeral
-                                    // range; binding while WiFi is still down is fine.
   next_probe = millis() + PROBE_MS;
   uint32_t t;
   if (ds1307_read(&t)) clock_correct(t);
