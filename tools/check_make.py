@@ -168,7 +168,10 @@ def cleanup():
     shutil.rmtree(MKTMP, ignore_errors=True)
 
 
-REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'src/basic/basic.h', '/lib/cc.h': 'src/compiler/cc.h'}  # mirrored headers
+REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'src/basic/basic.h', '/lib/cc.h': 'src/compiler/cc.h',
+           '/lib/t2obj.c': 'src/lib/t2obj.c', '/lib/t2obj.h': 'src/lib/t2obj.h',
+           '/lib/net.c': 'src/lib/net.c', '/lib/mtab.c': 'src/lib/mtab.c',
+           '/lib': 'src/lib'}   # -I /lib directory token: maps to the (existing) repo dir
 
 
 def repo_path(tok):                       # board path -> repo file (check_toolchain layout)

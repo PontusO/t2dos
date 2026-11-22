@@ -103,3 +103,31 @@ round is cheaper).
 `check_make --pc` then `--board` (byte-identical) · `check_toolchain --pc`
 then `--selfhost` (IDENTICAL ×6 + tests) · `bench --pc` · `check_basic --pc`
 · `check_jobs --build`-style PC path if quick · `make host` + one qemu run.
+
+## Results (landed 2026-11-22)
+
+Executed as designed; five deviations, all ledgered:
+
+- One deliberate content change: cc.c's PC-only `init_tools` walked two
+  path components up to find `build/host`; the moved host cc sits three
+  deep, so the walk is now three (`#ifndef __T2CC__` branch - the board
+  build never sees it, selfhost confirms).
+- The `root/lib` staging recipes hardcoded their source paths (the plan
+  assumed `$<`); they now use `$<`, which cannot drift again.
+- The baseline checksum set included gitignored scratch `root/bin/*.bin`
+  from earlier checker runs; the forced clean removed them. No hash
+  mismatch on any built binary.
+- `check_asm --objdump-corpus` silently ran an EMPTY compiler-tests corpus
+  for one round (the glob of the moved-away dir matched nothing). Fixed
+  and guarded (`sys.exit 1`); corpus back to 59 files.
+- `check_make --board` staging (only reachable on the board) dead-ended on
+  the `/lib/t2obj.c|net.c|mtab.c` and `/lib`-directory tokens, whose
+  `lstrip('/')` fallback no longer resolved; `REPO_OF` maps them now.
+
+Gates on the final tree: full clean rebuild byte-identical; `make check`
+ok; `check_ref` different: 0 (39 identical); `check_make --pc` 13/13 and
+`--board` 8/8 byte-identical + fail case; `check_toolchain --pc` 9 cases +
+7 errors; `--selfhost` IDENTICAL ×6 (cc 230240 B, 32.4 s) + tests 4-12 and
+15 on-board; `bench --pc` 11/11; `check_basic --pc` 139 cases;
+`check_jobs --build`, `check_netfs --pc` (105 steps), `check_telnetd --pc`,
+licm/prolog/frame all ok.

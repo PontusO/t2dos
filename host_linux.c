@@ -187,7 +187,7 @@ void *nt_alloc(int n) {
   *(int *)p = n; nt_used += n; return p + 8;
 }
 void nt_free(void *p) { if (p) { nt_used -= *(int *)((char *)p - 8); free((char *)p - 8); } }
-#include "kernel/netfs.c"
+#include "src/kernel/netfs.c"
 
 // ---- telnetd: kernel/telnetd.c over POSIX sockets.  The setting lives until host_linux exits.
 static int td_lfd = -1, td_port;
@@ -210,7 +210,7 @@ void td_peer(int h, char *ip, int sz) {
 }
 void td_note(const char *m) { char b[128]; int l = snprintf(b, sizeof b, "\n%s\n", m); write(1, b, l); }
 unsigned td_millis(void) { return nt_millis(); }
-#include "kernel/telnetd.c"
+#include "src/kernel/telnetd.c"
 static int k_telnetd(int port, const char *pw, char *ip) {
   if (port == -1) { if (ip) strcpy(ip, td_live_ip()); return td_port ? td_port | TELNETD_LISTENING | (td_live() ? TELNETD_LIVE : 0) : 0; }
   if (port == 0) { td_stop("telnetd stopped"); if (td_lfd >= 0) close(td_lfd); td_lfd = -1; td_port = 0; return 0; }
