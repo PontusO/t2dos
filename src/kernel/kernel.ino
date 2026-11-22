@@ -20,6 +20,7 @@
 #include "netfs.h"
 #include "netfs_fs.h"
 #include "telnetd.h"
+#include "rtc.h"
 #include <hardware/irq.h>
 #include <hardware/structs/timer.h>
 
@@ -154,12 +155,13 @@ struct SharedConsole : Console {
     for (;;) {
       if (Serial.available()) return Serial.read();
       telnetd_service();
+      clock_service();
       if (td_avail()) return td_getc();
       k_wait();
     }
   }
-  int kbhit() override { td_flush(); telnetd_service(); return Serial.available() + td_avail(); }
-  int peek() override { if (Serial.available()) return Serial.peek(); telnetd_service(); return td_peek(); }
+  int kbhit() override { td_flush(); telnetd_service(); clock_service(); return Serial.available() + td_avail(); }
+  int peek() override { if (Serial.available()) return Serial.peek(); telnetd_service(); clock_service(); return td_peek(); }
   void ctl(int cmd, int a, int b) override {
     char e[24]; const char *s = SerialConsole::ansi(cmd, a, b, e);
     Serial.print(s);
@@ -830,6 +832,7 @@ extern "C" int sys(int num, int n, int *argv) {
     case SYS_i2c_read: { int got = Wire.requestFrom((int)A(0), (int)A(2)); uint8_t *b = (uint8_t *)A(1); int i = 0; while (i < got && Wire.available()) b[i++] = Wire.read(); return i; }
     case SYS_spi_transfer: SPI.transfer((void *)A(0), A(1)); return 0;
     case SYS_delay_us: delayMicroseconds(A(0)); return 0;
+    case SYS_time: { int *vp = (int *)A(0); if (vp) *vp = clock_valid(); return (int)clock_now(); }
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
@@ -1251,6 +1254,7 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) {}
   Wire.begin(); SPI.begin();
+  rtc_init();                         // seed the wall clock from a DS1307 if one is there (rtc.cpp)
   SDFS.setConfig(SDFSConfig(SD_CS, SPI_FULL_SPEED));
   const char *fsname = "NONE";
   bool mounted = SDFS.begin();
