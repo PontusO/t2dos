@@ -703,9 +703,9 @@ the clock it adds `unsynced: no chip, no NTP` under the line.
 
 ```
 /> date
-2026-11-22 22:15:46 +01:00
+2026-11-22 23:16:36 +02:00
 /> date -u
-2026-11-22 21:15:47 UTC
+2026-11-22 21:16:36 UTC
 ```
 
 #### tz

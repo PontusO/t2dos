@@ -9,6 +9,10 @@
 // CET-1 is UTC+1 and GMT+3 is UTC-3. Offsets are seconds east of UTC here
 // (std_off = -parsed). dst_off defaults to std_off + 3600 when omitted.
 //
+// Sentinel edge: a caller that maps a reject to -1 collides with the legal
+// -1-second offset of a sub-minute west zone (GMT+0:0:1 parses); no real
+// POSIX rule does this, and SYS_tzset in sys.h documents the collision.
+//
 // Rule times: an explicit /n is local time of the side being left (the end
 // rule's /3 is 03:00 DST = 01:00 UTC for Sweden). An omitted /n means 02:00
 // local standard, so a Sweden-style string flips both ways at 01:00 UTC - the

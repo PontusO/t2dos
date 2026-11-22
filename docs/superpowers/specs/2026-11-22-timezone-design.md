@@ -189,7 +189,7 @@ not by hand).
 - Whether `tzset` also accepts the full string via `TZ=` naming a zone absent
   from any database - no: only POSIX-style strings, always, both sides.
 
-## Results (landed 2026-11-22, branch `tz`, awaiting merge)
+## Results (landed 2026-11-22, merged into `main` at `a44acd8`)
 
 Implemented as designed, with the promised deferral (DS1307 legs stay out,
 no chip on the bench, Round A ruling) and these deviations, all ledgered in

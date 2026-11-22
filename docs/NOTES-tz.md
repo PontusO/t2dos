@@ -8,8 +8,8 @@ sets (POSIX rule or `+N` shorthand) and clears. Spec:
 `docs/superpowers/specs/2026-11-22-timezone-design.md` (Results there
 too), plan `docs/superpowers/plans/2026-11-22-timezones.md`. SDD ledger
 (all rulings): `.superpowers/sdd/2026-11-22-timezones/progress.md`,
-board evidence trail in `task-5-report.md` beside it. On branch `tz`,
-awaiting merge.
+board evidence trail in `task-5-report.md` beside it. Merged to `main`
+2026-11-22 (`tz` merge `a44acd8`).
 
 ## Settled (don't re-investigate)
 
