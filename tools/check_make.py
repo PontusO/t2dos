@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Check the make tool (src/userland/make.c) on the PC and on the board.
 
-make reads a target-line build file ("name: [-flags] prereqs": leading -tokens
-are that target's build flags, -I takes the next token, # starts a comment, a
-prereq naming another target makes the line a collection) and runs one cc call
-per .bin target (as -o first for .s prereqs). host_linux has no spawn, so the
-PC mode verifies only the -n dry-run plan over a scratch tree staged under
-root/ (which host_linux maps as /); the board mode runs the real build and
-requires byte equality with root/bin/*.bin. -v (echo each command before
-running it) lives on that same real-run path, so it is board-observable only.
+make reads a target-line build file and runs the build. Dialect (spec
+2026-11-23-make-variables-recipes-design.md): target lines start at column 0
+("name: [-flags] prereqs": leading -tokens are that target's build flags, -I
+takes the next token, # starts a comment, a prereq naming another target makes
+the line a collection); a TAB-indented line after a target is that target's
+recipe (expanded, one exec per line, $@ $< $^ per rule, @ silences the -v
+echo, word 0 maps to /bin/<name>.bin); variables NAME :=|=|?=|+= value plus
+command-line NAME=value, $(NAME) expanded at use time; .PHONY, .DEFAULT_GOAL,
+V=1 like -v. A .bin target without a recipe runs one implicit cc call (as -o
+first for .s prereqs). host_linux has no spawn, so the PC mode verifies only
+the -n dry-run plan (recipe lines printed RESOLVED) over a scratch tree staged
+under root/ (which host_linux maps as /); the board mode runs the real build,
+requires byte equality with root/bin/*.bin, and adds /src/mkfeat feature legs
+for variables, recipes, the default goal, V=1 and the rm/mkdir tools. -v
+(echo each command before running it) lives on that same real-run path, so it
+is board-observable only.
 
   check_make.py --pc                     dry-run plan cases + rm/mkdir tool cases (needs `make` and `make host`)
-  check_make.py --board [--tools NAMES]  build on the board, byte-compare each
+  check_make.py --board [--tools NAMES]  build on the board, byte-compare each tool, run the feature legs
 Exit status 0 when every case passes.
 """
 import os, shutil, subprocess, sys
@@ -147,8 +155,9 @@ def pc_cases():
         if tok.startswith('/') and tok not in targets:
             stage(tok, 'int main(void) { return 0; }\n')
     rc, out = run_make(['-n', '-f', '/tmp/make/Makefile.board', 'all'])
-    # the cc sources below mirror Makefile.board's /src/cc.bin line (which mirrors the
-    # PC Makefile's CC_SRC) - the three lists are one fact, update them together
+    # the cc sources below mirror Makefile.board's /src/cc.bin line: the four
+    # lists (the root Makefile's CC_SRC, this fixture, Makefile.board and
+    # src/compiler/Makefile's cc.bin line) are one fact, update them together
     want = ['/bin/cc.bin -I /lib -o /src/cc.bin /src/compiler/cc.c /src/compiler/emit.c '
             '/src/compiler/expr.c /src/compiler/fp.c /src/compiler/lex.c /src/compiler/licm.c '
             '/src/compiler/opt.c /src/compiler/regs.c /src/compiler/state.c '
@@ -238,6 +247,21 @@ def pc_cases():
               [], ['/bin/cc.bin -o /src/mk/q.bin /src/mk/a.c', '/bin/echo.bin all'])
     expect_err('err-reserved-name', '.SUFFIXES: x\n', [], '.SUFFIXES', 'reserved')
     expect_err('err-unknown-defgoal', '.DEFAULT_GOAL := nope\nall:\n\techo a\n', [], 'nope')
+
+    # 16: edges Task 5 left to manual probes (review minors). plan-phony-first:
+    # a .PHONY line before any target parses, creates no target (if it did, the
+    # default goal would be that .PHONY collection and `all`'s own recipe would
+    # never print), and leaves `all` the first target; a command-line target
+    # beats .DEFAULT_GOAL; two .PHONY lines consume cleanly (no
+    # duplicate-target error) and both names work.
+    expect_ok('plan-phony-first', '.PHONY: gen\nall: gen\n\techo after\ngen:\n\techo gen\n',
+              [], ['/bin/echo.bin gen', '/bin/echo.bin after'])
+    expect_ok('plan-cli-beats-defgoal', '.DEFAULT_GOAL := a\na:\n\techo a\nb:\n\techo b\n',
+              ['b'], ['/bin/echo.bin b'])
+    expect_ok('plan-phony-twice', '.PHONY: p\np:\n\techo p\n.PHONY: q\nq:\n\techo q\n',
+              [], ['/bin/echo.bin p'])
+    expect_ok('plan-phony-twice-q', '.PHONY: p\np:\n\techo p\n.PHONY: q\nq:\n\techo q\n',
+              ['q'], ['/bin/echo.bin q'])
 
     tool_cases()
 
@@ -380,7 +404,9 @@ def board_main(tool_names=None):
     r.put(os.path.join(ROOT, 'root', 'bin', 'make.bin'), '/bin/make.bin')
     for t in ('cc', 'as'):                # make runs the toolchain already on the board
         r.put(os.path.join(ROOT, 'root', 'bin', t + '.bin'), '/bin/%s.bin' % t)
-    for t in ['/lib/t2obj.c', '/lib/net.c', '/lib/mtab.c'] + toks:   # included/not-listed files too
+    for t in ('rm', 'mkdir', 'echo'):     # the board's rm/mkdir predate -rf/-p; echo runs the recipe legs
+        r.put(os.path.join(ROOT, 'root', 'bin', t + '.bin'), '/bin/%s.bin' % t)
+    for t in ['/lib/t2obj.c', '/lib/net.c', '/lib/mtab.c', '/src/userland/echo.c'] + toks:   # included/not-listed files too (echo.c: the mkfeat legs)
         src = os.path.join(ROOT, repo_path(t))
         if os.path.isdir(src):                    # -I /lib: a directory token, push nothing
             r.run('mkdir ' + t, 10.0)
@@ -404,6 +430,67 @@ def board_main(tool_names=None):
             fail('board-' + n, '%s.bin differs: %d vs %d bytes, first diff at %d'
                  % (n, len(got), len(want), off))
         print('PASS board-%s: byte-identical to root/bin, %d bytes, %.0f s' % (n, len(got), secs))
+    # Feature legs (spec 2026-11-23): variables, default goal, recipes, V=1,
+    # and the -rf/-p tools, in a /src/mkfeat scratch tree.
+    r.run('mkdir /src/mkfeat', 10.0)      # "exists" is a fine answer
+    out, code = r.run('/bin/mkdir.bin -p /src/mkfeat/t/a/b', 10.0)
+    if code:
+        fail('board-mkdir-p', 'mkdir -p t/a/b exited %d: %r' % (code, out[-4:]))
+    out, code = r.run('ls /src/mkfeat/t/a', 10.0)
+    if code or 'b' not in [l.split()[1].rstrip('/') for l in out if len(l.split()) == 2]:
+        fail('board-mkdir-p', 'ls /src/mkfeat/t/a should show b, exit %d out %r' % (code, out))
+    out, code = r.run('/bin/mkdir.bin /src/mkfeat/t', 10.0)
+    if code == 0:
+        fail('board-mkdir-p', 'plain mkdir on existing t exited 0')
+    print('PASS board-mkdir-p: -p built t/a/b; plain mkdir on an existing dir failed')
+    # the PC build the board outputs must match (same cc, same flags up to paths)
+    pc = '/tmp/opencode/mkfeat-echo.bin'
+    subprocess.run(['src/compiler/cc', '-I', 'src/lib', '-o', pc, 'src/userland/echo.c'],
+                   cwd=ROOT, capture_output=True, check=True)
+    with open(pc, 'rb') as f:
+        want = f.read()
+
+    def cmp_pc(board_path, name):
+        got = r.fetch(board_path)
+        if got != want:
+            off = next((i for i in range(min(len(got), len(want))) if got[i] != want[i]),
+                       min(len(got), len(want)))
+            fail(name, '%s differs from the PC build: %d vs %d bytes, first diff at %d'
+                 % (board_path, len(got), len(want), off))
+        print('PASS %s: %s byte-identical to the PC build, %d bytes' % (name, board_path, len(got)))
+
+    r.put(b'CCFLAGS := -I /lib\n'
+          b'/src/mkfeat/echo.bin: $(CCFLAGS) /src/userland/echo.c /lib/sys.h\n'
+          b'.PHONY: clean\nclean:\n\trm -rf /src/mkfeat/t\n\t@echo hushed\n'
+          b'.DEFAULT_GOAL := /src/mkfeat/echo.bin\n', '/src/mkfeat/Makefile')
+    out, code = r.run('/bin/make.bin -f /src/mkfeat/Makefile', 120.0)   # no target: .DEFAULT_GOAL
+    if code:
+        fail('board-mkfeat-default', 'default-goal build exited %d: %r' % (code, out[-4:]))
+    cmp_pc('/src/mkfeat/echo.bin', 'board-mkfeat-default')              # implicit cc under variables
+    out, code = r.run('/bin/make.bin V=1 -f /src/mkfeat/Makefile clean', 60.0)
+    text = '\n'.join(out)
+    if code or '/bin/rm.bin -rf /src/mkfeat/t' not in text:
+        fail('board-mkfeat-v1', 'V=1 clean exited %d, want the resolved rm line in %r'
+             % (code, out[-6:]))
+    # @ silence: @ suppresses the -v echo of the line, not the program's
+    # stdout (GNU semantics, pinned PC-side by plan-recipe-quiet). So the
+    # board pin is: the echoed command line "/bin/echo.bin hushed" is absent,
+    # the program's own output "hushed" is present. (The task plan's "output
+    # does not contain hushed" was wrong; corrected here, flagged in the
+    # task-7 report for the controller's board run.)
+    if any(l.strip() == '/bin/echo.bin hushed' for l in out):
+        fail('board-mkfeat-v1', 'the @ line was echoed under V=1: %r' % (out[-6:],))
+    if not any(l.strip() == 'hushed' for l in out):
+        fail('board-mkfeat-v1', 'the @ line did not run: %r' % (out[-6:],))
+    out, code = r.run('ls /src/mkfeat/t', 10.0)
+    if code == 0:
+        fail('board-mkfeat-rmrf', 'ls /src/mkfeat/t still succeeds after clean: %r' % (out[-4:],))
+    print('PASS board-mkfeat-v1: V=1 echoed the resolved rm line, @ ran silently, rm -rf removed the tree')
+    r.put(b'/src/mkfeat/echo2.bin: -I /lib /src/userland/echo.c /lib/sys.h\n', '/src/mkfeat/Makefile.old')
+    out, code = r.run('/bin/make.bin -f /src/mkfeat/Makefile.old /src/mkfeat/echo2.bin', 120.0)
+    if code:
+        fail('board-mkfeat-old', 'old-dialect build exited %d: %r' % (code, out[-4:]))
+    cmp_pc('/src/mkfeat/echo2.bin', 'board-mkfeat-old')                  # old files mean what they meant
     # a child failure must stop make with a message and the child's code
     r.run('mkdir /src/mkfail', 10.0)
     r.put(b'int main(void) { bogus syntax here; }\n', '/src/mkfail/bad.c')

@@ -1,6 +1,6 @@
 # make GNU-ish dialect round — variables and command targets
 
-Date: 2026-11-23. Status: draft for owner approval.
+Date: 2026-11-23. Status: implemented (branch `make-vars-recipes`; board run pending owner go-ahead).
 Supersedes nothing: the make round spec (`2026-11-21-make-utility-design.md`)
 stays binding for everything this doc does not extend. The `make -v` round
 (merged 2026-11-23) already shipped verbose echo; this doc builds on it.
@@ -228,3 +228,30 @@ tokens are taken, avoiding whole-line intermediates); whether `MAXLINE`
 grows for recipe lines; exact cap values for `MAXVAR`/value width
 (document in the file header); where the `.PHONY`/`.DEFAULT_GOAL`
 tables live. None of these change what gets built.
+
+## Results
+
+PC (branch gates, all green):
+
+- `check_make.py --pc`: 49 cases pass: the original 13 plan cases, the
+  variables/recipes/`.PHONY`/`.DEFAULT_GOAL` plan cases of this round, four
+  edge pins added at close-out (`.PHONY` before any target creates no
+  target; command-line target beats `.DEFAULT_GOAL`; two `.PHONY` lines
+  consume cleanly), and the `rm`/`mkdir` tool cases under qemu.
+- The plan-board fixture passed with zero change against the rewritten
+  `Makefile.board`: expansion is faithful (Goal 8's proof).
+- `check_ref.py`: `different: 0`; full `make check` clean.
+- Shipped caps (make.c header): `MAXVAR 32`, `MAXVAL 512`, `MAXEXPASS 8`,
+  `MAXRECI 8`, `MAXPHONY 16`/`MAXPHNAME 64`; `MAXLINE` stayed 128.
+
+board: PENDING (owner go-ahead round)
+
+- `check_make.py --board`: the eight byte-compare legs through the rewritten
+  `Makefile.board`, plus `/src/mkfeat` feature legs (`mkdir -p`; default-goal
+  build byte-identical to a PC build; `V=1` resolved echo of the `rm` line
+  with the `@` line running unechoed; `rm -rf` really removing the tree;
+  old-dialect file byte-identical). One plan correction at implementation:
+  `@` silences the `-v` echo, not the program's stdout, so the leg pins the
+  echoed command line absent and the program output present.
+- `check_toolchain.py --selfhost`: six IDENTICAL (make.bin is not among the
+  six; the rebuild must stay clean).
