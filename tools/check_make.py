@@ -7,7 +7,8 @@ prereq naming another target makes the line a collection) and runs one cc call
 per .bin target (as -o first for .s prereqs). host_linux has no spawn, so the
 PC mode verifies only the -n dry-run plan over a scratch tree staged under
 root/ (which host_linux maps as /); the board mode runs the real build and
-requires byte equality with root/bin/*.bin.
+requires byte equality with root/bin/*.bin. -v (echo each command before
+running it) lives on that same real-run path, so it is board-observable only.
 
   check_make.py --pc                     dry-run plan cases (needs `make` and `make host`)
   check_make.py --board [--tools NAMES]  build on the board, byte-compare each

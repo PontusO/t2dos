@@ -18,7 +18,7 @@
 // below. cmd[] slots (the sh.c sargv idiom: a stored address passed straight
 // to exec/printf) are the one pointer-valued store this program makes.
 //
-// usage: make [-n] [-f file] [target ...]   (default: the file's first target)
+// usage: make [-n] [-v] [-f file] [target ...]   (default: the file's first target)
 
 #define MAXLINE 128
 #define MAXTARGETS 64
@@ -35,6 +35,7 @@ int tvis[MAXTARGETS];                  // counts live in tpn/tfn scratch below
 int tfn[MAXTARGETS], tpn[MAXTARGETS];
 int ntargets;
 int dry;                               // -n: print the plan, run nothing
+int verbose;                           // -v: echo each command before running it
 int glen;                              // strlen cache for the current resolve
 
 char *curfile;                         // -f argument, a main argv slot: for error messages
@@ -246,16 +247,24 @@ void addw(char *w) {
   cmd[nw] = w; nw = nw + 1;
 }
 
+// the command line, space separated: what -n prints and what -v echoes
+void print_cmd(void) {
+  int j;
+  j = 0;
+  while (j < nw) { if (j) printf(" "); printf("%s", cmd[j]); j = j + 1; }
+  printf("\n");
+}
+
 // the built command: printed under -n, run by exec() otherwise (exec is the
-// synchronous foreground call sh uses for programs: it returns the child code)
+// synchronous foreground call sh uses for programs: it returns the child code).
+// -v echoes the command first, so a long cc.bin run shows what is building.
 void emit_cmd(void) {
   int j, r;
   if (dry) {
-    j = 0;
-    while (j < nw) { if (j) printf(" "); printf("%s", cmd[j]); j = j + 1; }
-    printf("\n");
+    print_cmd();
     return;
   }
+  if (verbose) print_cmd();
   r = exec(cmd[0], nw, cmd);
   if (r != 0) {
     printf("make:");
@@ -328,10 +337,11 @@ int main(int argc, char **argv) {
   char *fpath;
   char *req[MAXTARGETS];                      // argv slots, like grep.c's argv use
   int i, nreq, k;
-  fpath = "Makefile"; nreq = 0; dry = 0;
+  fpath = "Makefile"; nreq = 0; dry = 0; verbose = 0;
   i = 1;
   while (i < argc) {
     if (strcmp(argv[i], "-n") == 0) dry = 1;
+    else if (strcmp(argv[i], "-v") == 0) verbose = 1;
     else if (strcmp(argv[i], "-f") == 0) {
       i = i + 1;
       if (i >= argc) { printf("make: -f needs a file\n"); exit(1); }
