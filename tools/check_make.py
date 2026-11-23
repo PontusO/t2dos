@@ -10,7 +10,7 @@ root/ (which host_linux maps as /); the board mode runs the real build and
 requires byte equality with root/bin/*.bin. -v (echo each command before
 running it) lives on that same real-run path, so it is board-observable only.
 
-  check_make.py --pc                     dry-run plan cases + rm tool cases (needs `make` and `make host`)
+  check_make.py --pc                     dry-run plan cases + rm/mkdir tool cases (needs `make` and `make host`)
   check_make.py --board [--tools NAMES]  build on the board, byte-compare each
 Exit status 0 when every case passes.
 """
@@ -20,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MKTMP = os.path.join(ROOT, 'root', 'tmp', 'make')     # staged: the Makefile(s)
 MKSRC = os.path.join(ROOT, 'root', 'src', 'mk')       # staged: scratch sources
 RMT = os.path.join(ROOT, 'root', 'tmp', 'rmt')        # staged: the rm tool's test tree
+MKT = os.path.join(ROOT, 'root', 'tmp', 'mkt')        # host-side tree the mkdir tool builds
 CREATED = []                                          # files this checker wrote (cleanup)
 
 
@@ -39,8 +40,8 @@ def run_make(args):
     return r.returncode, r.stdout
 
 
-def run_tool(args):
-    r = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/bin/rm.bin'] + args,
+def run_tool(name, args):
+    r = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/bin/%s.bin' % name] + args,
                        capture_output=True, text=True, cwd=ROOT, timeout=30)
     return r.returncode, r.stdout
 
@@ -177,7 +178,7 @@ def stage_rmt():
 def tool_cases():
     # rm -rf removes the whole tree (host view: root/tmp/rmt gone).
     stage_rmt()
-    rc, out = run_tool(['-rf', '/tmp/rmt'])
+    rc, out = run_tool('rm', ['-rf', '/tmp/rmt'])
     if rc != 0 or os.path.isdir(RMT):
         fail('rm-tree', 'want exit 0 and tree gone, got exit %d out %r gone=%s'
              % (rc, out, not os.path.isdir(RMT)))
@@ -185,24 +186,24 @@ def tool_cases():
 
     # a directory without -r: fails, message names it.
     stage_rmt()
-    rc, out = run_tool(['/tmp/rmt/sub'])
+    rc, out = run_tool('rm', ['/tmp/rmt/sub'])
     if rc == 0 or 'sub' not in out:
         fail('rm-dir-norec', 'want exit != 0 naming sub, got exit %d out %r' % (rc, out))
     ok('rm-dir-norec')
 
     # missing path: fails without -f; with -f silent success.
-    rc, out = run_tool(['/tmp/rmt/nope'])
+    rc, out = run_tool('rm', ['/tmp/rmt/nope'])
     if rc == 0:
         fail('rm-missing-fail', 'want exit != 0, got exit %d out %r' % (rc, out))
     ok('rm-missing-fail')
 
-    rc, out = run_tool(['-f', '/tmp/rmt/nope'])
+    rc, out = run_tool('rm', ['-f', '/tmp/rmt/nope'])
     if rc != 0 or out != '':
         fail('rm-missing-force', 'want exit 0 no output, got exit %d out %r' % (rc, out))
     ok('rm-missing-force')
 
     # a plain file goes, the rest of the tree stays.
-    rc, out = run_tool(['/tmp/rmt/a.txt'])
+    rc, out = run_tool('rm', ['/tmp/rmt/a.txt'])
     gone = not os.path.exists(os.path.join(RMT, 'a.txt'))
     intact = (os.path.isfile(os.path.join(RMT, 'sub', 'b.txt')) and
               os.path.isdir(os.path.join(RMT, 'sub', 'deep')))
@@ -212,10 +213,50 @@ def tool_cases():
     ok('rm-file')
 
     # unknown flag: usage line, exit != 0.
-    rc, out = run_tool(['-q', '/tmp'])
+    rc, out = run_tool('rm', ['-q', '/tmp'])
     if rc == 0 or 'usage' not in out:
         fail('rm-badflag', 'want exit != 0 with usage, got exit %d out %r' % (rc, out))
     ok('rm-badflag')
+
+    # letters reversed: -fr behaves exactly like -rf (combined-flag parse both ways).
+    stage_rmt()
+    rc, out = run_tool('rm', ['-fr', '/tmp/rmt'])
+    if rc != 0 or os.path.isdir(RMT):
+        fail('rm-fr', 'want exit 0 and tree gone, got exit %d out %r gone=%s'
+             % (rc, out, not os.path.isdir(RMT)))
+    ok('rm-fr')
+
+    # mkdir -p creates every parent (host view: root/tmp/mkt/sub/deep exists).
+    shutil.rmtree(MKT, ignore_errors=True)
+    rc, out = run_tool('mkdir', ['-p', '/tmp/mkt/sub/deep'])
+    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'sub', 'deep')):
+        fail('mk-p', 'want exit 0 and mkt/sub/deep, got exit %d out %r exists=%s'
+             % (rc, out, os.path.isdir(os.path.join(MKT, 'sub', 'deep'))))
+    ok('mk-p')
+
+    # -p again over the same tree: existing directories are not an error.
+    rc, out = run_tool('mkdir', ['-p', '/tmp/mkt/sub/deep'])
+    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'sub', 'deep')):
+        fail('mk-p-exists', 'want exit 0 (idempotent), got exit %d out %r' % (rc, out))
+    ok('mk-p-exists')
+
+    # without -p an existing directory fails.
+    rc, out = run_tool('mkdir', ['/tmp/mkt'])
+    if rc == 0:
+        fail('mk-exists-fail', 'want exit != 0, got exit %d out %r' % (rc, out))
+    ok('mk-exists-fail')
+
+    # plain mkdir under an existing parent.
+    rc, out = run_tool('mkdir', ['/tmp/mkt/x'])
+    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'x')):
+        fail('mk-plain', 'want exit 0 and mkt/x, got exit %d out %r' % (rc, out))
+    ok('mk-plain')
+
+    # without -p a missing parent fails.
+    rc, out = run_tool('mkdir', ['/tmp/mkt/ghost/x'])
+    if rc == 0:
+        fail('mk-nop-parent-fail', 'want exit != 0, got exit %d out %r' % (rc, out))
+    ok('mk-nop-parent-fail')
 
 
 def cleanup():
@@ -227,6 +268,7 @@ def cleanup():
     shutil.rmtree(MKSRC, ignore_errors=True)     # never root/src itself: it holds basic/
     shutil.rmtree(MKTMP, ignore_errors=True)
     shutil.rmtree(RMT, ignore_errors=True)
+    shutil.rmtree(MKT, ignore_errors=True)
 
 
 REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'src/basic/basic.h', '/lib/cc.h': 'src/compiler/cc.h',
