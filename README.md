@@ -2814,7 +2814,7 @@ SRCS := /src/userland/echo.c
 CFLAGS := -I /lib
 
 .PHONY: clean
-.DEFAULT_GOAL := $(TARGET).bin
+.DEFAULT_GOAL := app.bin
 
 $(TARGET).bin: $(CFLAGS) $(SRCS) /lib/sys.h
 
@@ -2840,8 +2840,9 @@ clean:
     `-v` echo of that line (the command still runs); a word 0 without a `/`
     runs as `/bin/<word>.bin`, so `rm -rf /src/app` runs `/bin/rm.bin`.
   - The default goal is `.DEFAULT_GOAL` if set, else the first target; a
-    target named on the command line beats both. `.PHONY: name ...` marks
-    names that are never files. `V=1` acts like `-v`.
+    target named on the command line beats both. `.DEFAULT_GOAL` must name a
+    literal target: its value is stored verbatim, not expanded. `.PHONY:
+    name ...` records names that are never files. `V=1` acts like `-v`.
   - `-n` prints the plan without running it. Recipe lines print resolved:
     word 0 mapped, variables expanded, `@` stripped; the same text `-v`
     echoes.

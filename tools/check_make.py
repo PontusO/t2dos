@@ -247,6 +247,12 @@ def pc_cases():
               [], ['/bin/cc.bin -o /src/mk/q.bin /src/mk/a.c', '/bin/echo.bin all'])
     expect_err('err-reserved-name', '.SUFFIXES: x\n', [], '.SUFFIXES', 'reserved')
     expect_err('err-unknown-defgoal', '.DEFAULT_GOAL := nope\nall:\n\techo a\n', [], 'nope')
+    # the .DEFAULT_GOAL value is literal (the spec's expansion-site list is
+    # exhaustive: names, flags, prereqs, recipe words), so a $(NAME) there
+    # stays raw text and the lookup fails like any unknown target.
+    expect_err('err-defgoal-literal',
+               'T := /src/mk/z\n.DEFAULT_GOAL := $(T).bin\n/src/mk/z.bin: /src/mk/a.c\n',
+               [], 'unknown target')
 
     # 16: edges Task 5 left to manual probes (review minors). plan-phony-first:
     # a .PHONY line before any target parses, creates no target (if it did, the
@@ -445,8 +451,10 @@ def board_main(tool_names=None):
     print('PASS board-mkdir-p: -p built t/a/b; plain mkdir on an existing dir failed')
     # the PC build the board outputs must match (same cc, same flags up to paths)
     pc = '/tmp/opencode/mkfeat-echo.bin'
-    subprocess.run(['src/compiler/cc', '-I', 'src/lib', '-o', pc, 'src/userland/echo.c'],
-                   cwd=ROOT, capture_output=True, check=True)
+    p = subprocess.run(['src/compiler/cc', '-I', 'src/lib', '-o', pc, 'src/userland/echo.c'],
+                       cwd=ROOT, capture_output=True, text=True)
+    if p.returncode:
+        fail('board-mkfeat-pcbuild', 'PC echo build exited %d: %r' % (p.returncode, p.stderr[-200:]))
     with open(pc, 'rb') as f:
         want = f.read()
 
