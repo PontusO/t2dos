@@ -10,7 +10,7 @@ root/ (which host_linux maps as /); the board mode runs the real build and
 requires byte equality with root/bin/*.bin. -v (echo each command before
 running it) lives on that same real-run path, so it is board-observable only.
 
-  check_make.py --pc                     dry-run plan cases (needs `make` and `make host`)
+  check_make.py --pc                     dry-run plan cases + rm tool cases (needs `make` and `make host`)
   check_make.py --board [--tools NAMES]  build on the board, byte-compare each
 Exit status 0 when every case passes.
 """
@@ -19,6 +19,7 @@ import os, shutil, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MKTMP = os.path.join(ROOT, 'root', 'tmp', 'make')     # staged: the Makefile(s)
 MKSRC = os.path.join(ROOT, 'root', 'src', 'mk')       # staged: scratch sources
+RMT = os.path.join(ROOT, 'root', 'tmp', 'rmt')        # staged: the rm tool's test tree
 CREATED = []                                          # files this checker wrote (cleanup)
 
 
@@ -34,6 +35,12 @@ def stage(path, text=''):
 
 def run_make(args):
     r = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/bin/make.bin'] + args,
+                       capture_output=True, text=True, cwd=ROOT, timeout=30)
+    return r.returncode, r.stdout
+
+
+def run_tool(args):
+    r = subprocess.run(['qemu-arm', './host_linux', '-r', 'root', '/bin/rm.bin'] + args,
                        capture_output=True, text=True, cwd=ROOT, timeout=30)
     return r.returncode, r.stdout
 
@@ -158,6 +165,58 @@ def pc_cases():
         fail('plan-board', 'exit %d, want %r, got %r' % (rc, want, got))
     ok('plan-board')
 
+    tool_cases()
+
+
+def stage_rmt():
+    os.makedirs(os.path.join(RMT, 'sub', 'deep'), exist_ok=True)
+    for f in ('/tmp/rmt/a.txt', '/tmp/rmt/sub/b.txt', '/tmp/rmt/sub/deep/c.txt'):
+        stage(f, 'x\n')          # stage() skips existing files, recreates deleted ones
+
+
+def tool_cases():
+    # rm -rf removes the whole tree (host view: root/tmp/rmt gone).
+    stage_rmt()
+    rc, out = run_tool(['-rf', '/tmp/rmt'])
+    if rc != 0 or os.path.isdir(RMT):
+        fail('rm-tree', 'want exit 0 and tree gone, got exit %d out %r gone=%s'
+             % (rc, out, not os.path.isdir(RMT)))
+    ok('rm-tree')
+
+    # a directory without -r: fails, message names it.
+    stage_rmt()
+    rc, out = run_tool(['/tmp/rmt/sub'])
+    if rc == 0 or 'sub' not in out:
+        fail('rm-dir-norec', 'want exit != 0 naming sub, got exit %d out %r' % (rc, out))
+    ok('rm-dir-norec')
+
+    # missing path: fails without -f; with -f silent success.
+    rc, out = run_tool(['/tmp/rmt/nope'])
+    if rc == 0:
+        fail('rm-missing-fail', 'want exit != 0, got exit %d out %r' % (rc, out))
+    ok('rm-missing-fail')
+
+    rc, out = run_tool(['-f', '/tmp/rmt/nope'])
+    if rc != 0 or out != '':
+        fail('rm-missing-force', 'want exit 0 no output, got exit %d out %r' % (rc, out))
+    ok('rm-missing-force')
+
+    # a plain file goes, the rest of the tree stays.
+    rc, out = run_tool(['/tmp/rmt/a.txt'])
+    gone = not os.path.exists(os.path.join(RMT, 'a.txt'))
+    intact = (os.path.isfile(os.path.join(RMT, 'sub', 'b.txt')) and
+              os.path.isdir(os.path.join(RMT, 'sub', 'deep')))
+    if rc != 0 or not gone or not intact:
+        fail('rm-file', 'want exit 0 gone intact, got exit %d out %r gone=%s intact=%s'
+             % (rc, out, gone, intact))
+    ok('rm-file')
+
+    # unknown flag: usage line, exit != 0.
+    rc, out = run_tool(['-q', '/tmp'])
+    if rc == 0 or 'usage' not in out:
+        fail('rm-badflag', 'want exit != 0 with usage, got exit %d out %r' % (rc, out))
+    ok('rm-badflag')
+
 
 def cleanup():
     for f in CREATED:
@@ -167,6 +226,7 @@ def cleanup():
             pass
     shutil.rmtree(MKSRC, ignore_errors=True)     # never root/src itself: it holds basic/
     shutil.rmtree(MKTMP, ignore_errors=True)
+    shutil.rmtree(RMT, ignore_errors=True)
 
 
 REPO_OF = {'/lib/sys.h': 'sys.h', '/lib/basic.h': 'src/basic/basic.h', '/lib/cc.h': 'src/compiler/cc.h',
@@ -243,7 +303,7 @@ def main(argv):
     if '--pc' in argv:
         try:
             pc_cases()
-            print('ok: %d make plan cases' % len(PASSED))
+            print('ok: %d make plan and tool cases' % len(PASSED))
             return 0
         finally:
             cleanup()
