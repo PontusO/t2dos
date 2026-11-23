@@ -84,7 +84,7 @@ def fail(name, msg):
 
 
 def pc_cases():
-    for f in ('/src/mk/a.c', '/src/mk/b.c', '/src/mk/util.s', '/src/mk/hdr.h'):
+    for f in ('/src/mk/a.c', '/src/mk/b.c', '/src/mk/c.c', '/src/mk/util.s', '/src/mk/hdr.h'):
         stage(f, 'int main(void) { return 0; }\n')
 
     # 1: one cc line; flags right after the program, -o target, then sources.
@@ -165,6 +165,40 @@ def pc_cases():
     if rc != 0 or got != want:
         fail('plan-board', 'exit %d, want %r, got %r' % (rc, want, got))
     ok('plan-board')
+
+    # 12: variables (spec 2026-11-23): the four operators. CLI values beat all of
+    # them; += space-joins; -I is recognized on the EXPANDED word (Z := -I +
+    # Z += /src/mk yields the flag pair).
+    amk = ('T := /src/mk/a.c\nU = /src/mk/b.c\nW ?= /src/mk/c.c\nZ := -I\nZ += /src/mk\n'
+           '/src/mk/p.bin: $(Z) $(T) $(U) $(W)\n')
+    expect_ok('plan-assign', amk, [],
+              ['/bin/cc.bin -I /src/mk -o /src/mk/p.bin /src/mk/a.c /src/mk/b.c /src/mk/c.c'])
+    expect_ok('plan-assign-cli', amk, ['W=/src/mk/b.c', 'Z=-O'],
+              ['/bin/cc.bin -O -o /src/mk/p.bin /src/mk/a.c /src/mk/b.c /src/mk/b.c'])
+
+    # 13: use-time expansion: nesting $(O.$(BLD)), ?= default, forward reference,
+    # a CLI value referencing a file var, target-name expansion, undefined -> no
+    # token; unterminated $( and A := $(A) (nesting cap) are errors; per-target
+    # epool rows survive nested resolve() (Review Focus pin).
+    exp = ('O.debug := -O\nO.release := -DREL\nBLD ?= debug\nFL := $(O.$(BLD))\n'
+           '/src/mk/e.bin: $(FL) $(S) /src/mk/hdr.h\nS := /src/mk/a.c\n')
+    expect_ok('plan-expand', exp, [], ['/bin/cc.bin -O -o /src/mk/e.bin /src/mk/a.c'])
+    expect_ok('plan-expand-release', exp, ['BLD=release'],
+              ['/bin/cc.bin -DREL -o /src/mk/e.bin /src/mk/a.c'])
+    expect_ok('plan-expand-cli-var', exp, ['FL=$(O.release)'],
+              ['/bin/cc.bin -DREL -o /src/mk/e.bin /src/mk/a.c'])
+    expect_ok('plan-expand-tname', 'T := /src/mk/t1\n$(T).bin: /src/mk/a.c\n', ['/src/mk/t1.bin'],
+              ['/bin/cc.bin -o /src/mk/t1.bin /src/mk/a.c'])
+    expect_ok('plan-expand-empty', '/src/mk/g.bin: $(NOPE) /src/mk/a.c\n', ['/src/mk/g.bin'],
+              ['/bin/cc.bin -o /src/mk/g.bin /src/mk/a.c'])
+    expect_err('err-unterminated', '/src/mk/u.bin: $(A\n', ['/src/mk/u.bin'], 'unterminated')
+    expect_err('err-recursion', 'A := a $(A)\n/src/mk/r.bin: $(A) /src/mk/a.c\n',
+               ['/src/mk/r.bin'], 'nesting')
+    expect_ok('plan-expand-coll',
+              ('A := /src/mk/a.c\nB := /src/mk/b.c\n/src/mk/x.bin: $(A)\n/src/mk/y.bin: $(B)\n'
+               'coll: /src/mk/x.bin /src/mk/y.bin\n'), ['coll'],
+              ['/bin/cc.bin -o /src/mk/x.bin /src/mk/a.c',
+               '/bin/cc.bin -o /src/mk/y.bin /src/mk/b.c'])
 
     tool_cases()
 
