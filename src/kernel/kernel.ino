@@ -606,8 +606,40 @@ static int k_rename(const char *a, const char *b) {
   while ((k = in.read(buf, sizeof buf)) > 0) if ((int)out.write(buf, k) != k) { ok = false; break; }
   in.close(); netfs_close_result = 0; out.close();      // a /mnt/fs save can fail at close
   if (netfs_close_result < 0) ok = false;
-  if (!ok || k < 0) { fb->remove(b); return -1; }
-  return fa->remove(a) ? 0 : -1;
+  if (!ok || k < 0) { k_del_saf(fb, b, false); return -1; }
+  return k_del_saf(fa, a, false) ? 0 : -1;
+}
+
+// core 6.3.2's SDFS remove()/rmdir() delete the PARENT entry for paths with two
+// or more slashes (open/mkdir/rename traverse fine; LittleFS/ramfs/netfs are
+// correct).  Verified on board: rm of /a/b/c.txt deletes /a/b, rmdir of /a/b/c
+// removes /a/b.  k_del_saf hoists the target to "/del~~tmp" at the root by
+// rename (traversal proven correct) and deletes the depth-1 copy, which SDFS
+// handles right.  Deeper workarounds (or a vendored SDFS fix) wait on upstream.
+static bool k_del_saf(FS *fs, const char *p, bool isdir) {
+  int n = strlen(p); char q[170];
+  if (fs != fsys || !strchr(p + (n > 2 ? 2 : n), '/')) return isdir ? fs->rmdir(p) : fs->remove(p);   // other FS correct; SDFS is only broken from depth 3 up
+  snprintf(q, sizeof q, "%s%s", fs == tmpfs ? "/tmp" : "", isdir ? "/dir~~tmp" : "/del~~tmp");   // hoist into the FS root (ramfs: below /tmp)
+  if (fs->exists(q) && !(isdir ? fs->rmdir(q) : fs->remove(q))) return false;      // hoist spot busy: do not touch the target
+  if (!fs->rename(p, q)) return false;
+  bool ok = isdir ? fs->rmdir(q) : fs->remove(q);
+  if (!ok) fs->rename(q, p);                                                        // could not delete the copy: put the target back
+  return ok;
+}
+static int k_unlink(const char *path) {
+  FS *fs = fs_for(path);
+  if (fs == fsys) {                                   // only SDFS can "unlink" a directory (it corrupts the parent: see k_del_saf)
+    File f = fs->open(path, "r"); if (!f) return -1;
+    bool dir = f.isDirectory(); f.close();
+    if (dir) return -1;
+  }
+  return k_del_saf(fs, path, false) ? 0 : -1;
+}
+static int k_rmdir(const char *path) {
+  FS *fs = fs_for(path);
+  File f = fs->open(path, "r"); if (!f || !f.isDirectory()) { if (f) f.close(); return -1; }   // only a directory can be rmdir'ed
+  f.close();
+  return k_del_saf(fs, path, true) ? 0 : -1;
 }
 
 static int k_open(const char *name, int flags) {
@@ -779,10 +811,10 @@ extern "C" int sys(int num, int n, int *argv) {
       stat_t *st = (stat_t *)A(1); st->size = f.size(); st->isdir = f.isDirectory(); st->mtime = f.getLastWrite(); f.close(); return 0; }
     case SYS_unlink: { char path[160]; resolve((const char *)A(0), path, sizeof path);
       if (pipe_name(path)) return -1;      // only the owner's end removes a pipe
-      return fs_for(path)->remove(path) ? 0 : -1; }
+      return k_unlink(path); }
     case SYS_rename: { char a[160], b[160]; resolve((const char *)A(0), a, sizeof a); resolve((const char *)A(1), b, sizeof b); return k_rename(a, b); }
     case SYS_mkdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fs_for(path)->mkdir(path) ? 0 : -1; }
-    case SYS_rmdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return fs_for(path)->rmdir(path) ? 0 : -1; }
+    case SYS_rmdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); return k_rmdir(path); }
     case SYS_opendir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1;
       for (int i = 0; i < MAX_DIR; i++) if (!dir_used[i]) { dirs[i] = fs_for(path)->openDir(path); dir_used[i] = true; dir_owner[i] = cur_id(); return i; } return -1; }
     case SYS_readdir: { int d = A(0); if (d < 0 || d >= MAX_DIR || !dir_used[d]) return 0;

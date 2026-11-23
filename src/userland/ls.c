@@ -39,8 +39,8 @@ int list(char *dir) {
   return 0;
 }
 int main(int argc, char **argv) {
-  int i;
+  int i, rc = 0;
   if (argc < 2) return list(".");
-  for (i = 1; i < argc; i++) { if (argc > 2) printf("%s:\n", argv[i]); list(argv[i]); }
-  return 0;
+  for (i = 1; i < argc; i++) { if (argc > 2) printf("%s:\n", argv[i]); if (list(argv[i])) rc = 1; }
+  return rc;
 }

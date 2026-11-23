@@ -1,6 +1,6 @@
 # make GNU-ish dialect round — variables and command targets
 
-Date: 2026-11-23. Status: draft for owner approval.
+Date: 2026-11-23. Status: implemented (branch `make-vars-recipes`; board run pending owner go-ahead).
 Supersedes nothing: the make round spec (`2026-11-21-make-utility-design.md`)
 stays binding for everything this doc does not extend. The `make -v` round
 (merged 2026-11-23) already shipped verbose echo; this doc builds on it.
@@ -228,3 +228,62 @@ tokens are taken, avoiding whole-line intermediates); whether `MAXLINE`
 grows for recipe lines; exact cap values for `MAXVAR`/value width
 (document in the file header); where the `.PHONY`/`.DEFAULT_GOAL`
 tables live. None of these change what gets built.
+
+## Results
+
+PC (branch gates, all green):
+
+- `check_make.py --pc`: 57 cases pass: the original 13 plan cases, the
+  variables/recipes/`.PHONY`/`.DEFAULT_GOAL` plan cases of this round, four
+  edge pins added at close-out (`.PHONY` before any target creates no
+  target; command-line target beats `.DEFAULT_GOAL`; two `.PHONY` lines
+  consume cleanly), final-review pins (a phony prereq with no rule is a
+  no-op; `A#b := c` errors `no colon`; an empty command-line variable name
+  is rejected; the recipe-line cap; `mkdir -p` with a trailing slash), the
+  close-out fix-round pins (`opool` across nested resolves; a `.PHONY` name
+  that is also a real source), and
+  the `rm`/`mkdir` tool cases under qemu.
+- The plan-board fixture passed with zero change against the rewritten
+  `Makefile.board`: expansion is faithful (Goal 8's proof).
+- `check_ref.py`: `different: 0`; full `make check` clean.
+- Shipped caps (make.c header): `MAXVAR 32`, `MAXVAL 512`, `MAXEXPASS 8`,
+  `MAXRECI 8`, `MAXPHONY 16`/`MAXPHNAME 64`; `MAXLINE` stayed 128.
+
+board (2026-11-23, Challenger 2350 WiFi/BLE, all green):
+
+- `check_make.py --board`: 13 legs pass. The eight byte-compare legs
+  (`cc` 38 s, `as`, `ld`, `ar`, `nm`, `objdump`, `basic` 23 s, `sh`) build
+  byte-identically to `root/bin` through the rewritten `Makefile.board`,
+  plus `/src/mkfeat` feature legs (`mkdir -p`; default-goal
+  build byte-identical to a PC build; `V=1` resolved echo of the `rm` line
+  with the `@` line running unechoed; `rm -rf` really removing the tree;
+  old-dialect file byte-identical). One plan correction at implementation:
+  `@` silences the `-v` echo, not the program's stdout, so the leg pins the
+  echoed command line absent and the program output present.
+- `check_toolchain.py --selfhost`: six IDENTICAL (make.bin is not among the
+  six; the rebuild must stay clean), ten compiler tests PASS.
+- Three findings from the board sessions, all fixed on the branch:
+  - the kernel's `rm -rf`/nested `unlink` hit an upstream SDFS bug (core
+    6.3.2): `remove()`/`rmdir()` delete the PARENT entry for paths with
+    three or more components. Worked around in the kernel (`k_del_saf`,
+    b7a170d): deep deletes are hoisted to the FS root by rename first;
+    ramfs hoists into `/tmp`. Details and repro in
+    `docs/NOTES-nested-delete.md`; worth an upstream report.
+  - a stale header at the card root silently shadowed `#include "sys.h"`
+    (cc's `readfile` opens the name relative to the cwd before `-I`),
+    making `basic.bin` build 4 bytes short from an old 72-byte
+    `struct dirent_t` while every file on the card was byte-identical.
+    `check_make --board` now prefights stray `/{sys,basic,cc,t2obj,math}.h`.
+  - `ls` printed "not found" but always exited 0 (`main` dropped `list()`'s
+    status); the `rm -rf` leg was the first test to notice. Fixed.
+- Closed at close-out (pins `plan-opool`, `plan-phony-shadow`, both red on
+  the pre-fix code): `resolve()` wrote a target's `.o` rows into `opool`
+  (per-target scratch) before recursing into target prereqs, so a nested
+  resolve clobbered them and cc linked the inner target's `.o` silently —
+  passes are now resolve/check, assemble, one cc call (which also puts a
+  target's own `as` calls after its prereqs build, the GNU order); and a
+  `.PHONY` name that is also a real existing source reaches cc again
+  (`.PHONY` is a rebuild decision, not a `$^` exclusion). The board suite
+  now stages `ls`/`rmdir` alongside `rm`/`mkdir`/`echo` and pins
+  `mkdir -p` with a trailing slash on SDFS. Board rerun after all of it:
+  13/13 green, `check_ref` `different: 0`.

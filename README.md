@@ -1161,7 +1161,8 @@ including one that logs in to the real shell under qemu and uses `edit`.
 ### Development
 
 `cc`, `as`, `ld`, `ar`, `nm` and `objdump` are described in
-[The toolchain](#7-the-toolchain), with examples.
+[The toolchain](#7-the-toolchain), with examples. `make` is described in
+[Board make](#board-make).
 
 #### basic
 
@@ -2792,6 +2793,68 @@ reference compiler does not know, so they cannot be compared with it.
 `cc2.bin` is byte-identical to the PC build; compiling `cc.c` takes about
 22 s on the board. Because of this, the toolchain's sources may only use
 features that the previous `cc` already supports.
+
+### Board make
+
+```
+make [-n] [-v] [-f file] [NAME=value ...] [target ...]
+```
+
+`/bin/make.bin` builds a tree from a build file (`-f`, default `Makefile` in
+the current directory), always rebuilding: no timestamps. The repository's
+`Makefile.board` is the board build of the toolchain: from `/`, run
+`make -f /src/Makefile.board all`. Checker: `tools/check_make.py`.
+
+Target lines start at column 0; a TAB-indented line after a target is that
+target's recipe:
+
+```make
+TARGET := app
+SRCS := /src/userland/echo.c
+CFLAGS := -I /lib
+
+.PHONY: clean
+.DEFAULT_GOAL := app.bin
+
+$(TARGET).bin: $(CFLAGS) $(SRCS) /lib/sys.h
+
+clean:
+	rm -rf /src/app
+	@echo cleaned
+```
+
+  - A `.bin` target with no recipe builds with one implicit `cc` call: the
+    leading `-` prereqs are its flags (`-I` takes the next word), the rest
+    are sources; a `.h` prereq is checked but not passed to cc, a `.s` prereq
+    is assembled first, and a prereq naming another target makes the line a
+    collection. A `.bin` target with a recipe runs only its recipe.
+  - Variables: `NAME := value`, `NAME = value`, `NAME ?= value` (only if
+    still undefined), `NAME += more` (space-joined), and `NAME=value` on the
+    command line, which a file line never overrides. `$(NAME)` expands at use
+    time in target names, flags, prereqs and recipes; it nests
+    (`$(OPT.$(BUILD))`) and an undefined name expands to nothing. Divergences
+    from GNU make: board make has one expansion behavior, so GNU's `=` versus
+    `:=` distinction collapses; `$$` and a lone `$` in a recipe are errors
+    (GNU leaves them literal); `@` is stripped AFTER expansion, so `Q := @`
+    with `$(Q)echo x` silences the line (GNU strips `@` before expansion).
+  - A recipe line runs one program, no shell: `$@` (the target), `$<` (first
+    prereq) and `$^` (all prereqs) expand in it; a leading `@` silences the
+    `-v` echo of that line (the command still runs); a word 0 without a `/`
+    runs as `/bin/<word>.bin`, so `rm -rf /src/app` runs `/bin/rm.bin`.
+  - The default goal is `.DEFAULT_GOAL` if set, else the first target; a
+    target named on the command line beats both. `.DEFAULT_GOAL` must name a
+    literal target: its value is stored verbatim, not expanded. `.PHONY:
+    name ...` records names that are never files. `V=1` acts like `-v` (any
+    non-empty `V` value counts, GNU-style).
+  - `-n` prints the plan without running it. Recipe lines print resolved:
+    word 0 mapped, variables expanded, `@` stripped; the same text `-v`
+    echoes.
+  - Leading TAB was whitespace to the first make (a TAB-indented target line
+    parsed as a target); now a leading TAB is recipe, exclusively. No file in
+    the repository used the old form.
+  - Caps: 128-char lines, 64 targets, 16 prereqs and 32 words per cc call,
+    32 variables with 512-byte values, 8 recipe lines per target, 16 `.PHONY`
+    names, expansion nesting 8, 64 words and 1024 bytes per expanded line.
 
 ---
 

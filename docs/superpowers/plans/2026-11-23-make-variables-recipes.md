@@ -160,9 +160,13 @@ Failure modes no single task's happy-path tests cover; each gets a pin in the na
          '\t/bin/echo.bin direct\n')
   expect_ok('plan-recipe', rec, ['all'],
             ['/bin/echo.bin cc /src/mk/a.c into /src/mk/r.bin',
+             '/bin/echo.bin direct',
              '/bin/rm.bin -f gone.txt',
-             '/bin/echo.bin built /src/mk/r.bin /src/mk/r.bin /src/mk/a.c',
-             '/bin/echo.bin direct'])
+             '/bin/echo.bin built /src/mk/r.bin all /src/mk/r.bin'])
+  # (plan touch-up, Task 4 ruling: the first draft's want interleaved the
+  # prereq's recipe block around all's and evaluated $@/$^ in the wrong
+  # context; this is the GNU-consistent order: r.bin's whole block runs
+  # during the prereq's resolve, then all's, with $@=all $^=/src/mk/r.bin)
   expect_ok('plan-recipe-quiet', 'q:\n\t@echo hushed\n', ['q'], ['/bin/echo.bin hushed'])
   expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
   ```
@@ -226,7 +230,7 @@ Failure modes no single task's happy-path tests cover; each gets a pin in the na
 - Modify: `README.md` (new `## Board make` section near the tools/build docs), `docs/HANDOVER.md`, `tools/check_make.py` docstring (dialect summary), spec file Results block
 - Board (owner go-ahead REQUIRED — one session, fresh round): everything below in order.
 
-- [ ] **Step 1: Board legs in `board_main`** (all under a `/src/mkfeat` scratch dir, `r.run('mkdir ...')`-tolerant like the existing legs):
+- [ ] **Step 1: Board legs in `board_main`** (all under a `/src/mkfeat` scratch dir, `r.run('mkdir ...')`-tolerant like the existing legs). First `r.put` the NEW `root/bin/rm.bin` and `root/bin/mkdir.bin` to `/bin/` (the board's current copies predate `-rf`/`-p`), next to the existing `make.bin`/`cc.bin`/`as.bin` puts:
   1. `mkdir -p /src/mkfeat/t/a/b` via `/bin/mkdir.bin` exits 0 and `ls /src/mkfeat/t/a` shows `b` (tool leg); `/bin/mkdir.bin /src/mkfeat/t` (exists, no -p) exits != 0.
   2. Stage `/src/mkfeat/Makefile` (raw bytes via `r.put(b'...')`): `CCFLAGS := -I /lib`, `/src/mkfeat/echo.bin: $(CCFLAGS) /src/userland/echo.c /lib/sys.h` (sources already staged by the existing loop), a `.PHONY: clean` + `clean:` with a TAB recipe `rm -rf /src/mkfeat/t` + `@echo hushed`, and `.DEFAULT_GOAL := /src/mkfeat/echo.bin`. Run `/bin/make.bin -f /src/mkfeat/Makefile` (no target arg → default goal leg).
   3. Fetch `/src/mkfeat/echo.bin`, byte-compare against a PC build made the same way: `src/compiler/cc -I src/lib -o /tmp/opencode/mkfeat-echo.bin src/userland/echo.c` (expect identical; this is the implicit-cc-under-variables board proof).
