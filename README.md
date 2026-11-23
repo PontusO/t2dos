@@ -425,14 +425,19 @@ Example outputs show the format; sizes and numbers vary.
 ls [file|dir...]
 ```
 
-Lists a directory (default: the current one) with sizes, or shows one file.
+Lists a directory (default: the current one) with last-written times and
+sizes, or shows one file. Times are local (see `tz`); files on `/tmp` or
+a mounted share, and files written while the clock was unsynced, show
+`----------` instead of a time, and so do files written before stamping
+existed until they are rewritten.
 
 ```
 /> ls /src
-     112  hello.c
-    5025  hello.bin
+2026-11-22 23:08       112  hello.c
+2026-11-22 23:08      5025  hello.bin
+----------      1024  notes.txt
    <dir>  old/
-2 files, 5137 bytes
+3 files, 6161 bytes
 ```
 
 #### cat
@@ -1291,7 +1296,7 @@ pointers, except for the maths functions, which take and return `float`
 | Memory | `malloc(n)` (zeroed memory), `free(p)`, `memset`, `memcmp`, `memcpy` |
 | Strings | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strchr`, `atoi`, `printf(fmt, ...)`, `sprintf(buf, fmt, ...)` |
 | Network | `net_join(ssid, password)`, `net_status()`, `net_ip()`, `connect(host, port)`, `send(fd, buf, n)`, `recv(fd, buf, n, timeout_ms)`, `listen(port)`, `accept(timeout_ms)`, `sock_avail(fd)`, `wifi_save(ssid, password)` (encrypted, joined at boot; `wifi_save(0, 0)` forgets it), `wifi_saved(buf, max)` (the saved SSID: 1, 0 if none, -1 if it cannot be opened) |
-| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)`, `time(&valid)` (seconds since 1970 UTC; stores 1 when synced, 0 while running unsynced), `localtime(&valid)` (the local wall clock: UTC plus the current zone's offset; same valid flag), `tzset(str)` (applies a POSIX zone rule and saves it to `/etc/tz`; returns the applied offset in seconds, -1 if rejected; `tzset(0)` queries the live offset) |
+| Board | `gpio_mode(pin, mode)`, `gpio_write(pin, v)`, `gpio_read(pin)`, `analog_read(pin)`, `pwm_write(pin, v)`, `i2c_write(addr, buf, n)`, `i2c_read(addr, buf, n)`, `spi_transfer(buf, n)`, `delay_us(us)`, `time(&valid)` (seconds since 1970 UTC; stores 1 when synced, 0 while running unsynced), `localtime(&valid)` (the local wall clock: UTC plus the current zone's offset; same valid flag), `tzset(str)` (applies a POSIX zone rule and saves it to `/etc/tz`; returns the applied offset in seconds, -1 if rejected; `tzset(0)` queries the live offset), `tzlocal(utc)` (the local epoch of a given UTC second under the current zone rule, its own DST side; `utc` with no zone) |
 | Maths | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y, x)`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `log10`, `pow(x, y)`, `sqrt`, `fabs`, `floor`, `ceil`, `fmod(x, y)` |
 
 `printf` and `sprintf` support `%d %u %x %c %s %f %e %g %%` with `-`, `0`,
@@ -2058,6 +2063,10 @@ Strings: `LEN LEFT$ RIGHT$ MID$ INSTR UCASE$ LCASE$ LTRIM$ RTRIM$ STR$ VAL CHR$
 ASC STRING$ SPACE$ HEX$ OCT$`. `INKEY$`, `EOF`, `FREEFILE`, `LBOUND`,
 `UBOUND` and `COMMAND$` are described above.
 
+Date and time (T2DOS extras): `DATE$` gives `"YYYY-MM-DD"` and `TIME$`
+`"HH:MM:SS"`, both local - the current zone rule (see `tz`) and DST
+applied. They are read-only names.
+
 Board access (T2DOS extras, so that a blinking LED is a five-line program):
 `PINMODE pin, mode`, `PINWRITE pin, value`, `PINREAD(pin)`,
 `ANALOGREAD(pin)`, `PWM pin, value` and `PAUSE ms`. They are the library's
@@ -2084,7 +2093,6 @@ Board access (T2DOS extras, so that a blinking LED is a five-line program):
   used gives `Array not defined`.
 - `RUN` works only at the immediate prompt; inside a program it gives
   `Advanced feature unavailable`.
-- `DATE$` and `TIME$` do not exist: `basic` does not read the kernel clock.
 - Any QBasic statement or function that `basic` does not have stops the
   program, before it runs, with `Advanced feature unavailable`. The few
   things that are accepted without an effect are listed above: `WIDTH`,
@@ -2610,6 +2618,7 @@ the kernel computes with `sinf`, `cosf`, ..., `fmodf`.
 | `time(&valid)` | 105 | the wall clock: seconds since 1970 UTC; stores 1 into the int `valid` points at when the time is synced, 0 while running unsynced (no DS1307, no NTP yet). Pass a real int, or 0 to ignore the flag |
 | `localtime(&valid)` | 106 | the local wall clock: `time` plus the UTC offset the zone rule gives for that instant; with no zone set, exactly `time`. Same valid flag |
 | `tzset(str)` | 107 | apply a POSIX zone rule (like `CET-1CEST,M3.5.0,M10.5.0`): parsed and applied live, saved to `/etc/tz`. Returns the applied offset in seconds, local = UTC + offset (POSIX counts west-positive, so `GMT+3` returns -10800); -1 rejects it and nothing changes; `tzset(0)` queries the current offset |
+| `tzlocal(utc)` | 108 | the local epoch for a given UTC second under the current zone rule: `utc` plus the offset *of that instant* (its own DST side), not of right now (that is `tzset(0)`); with no zone set, exactly `utc` |
 
 #### Jobs and pipes
 
@@ -2860,9 +2869,9 @@ features that the previous `cc` already supports.
 - BASIC: a `DOUBLE` is a 32-bit float, an `INTEGER` is 32 bits, and numbers
   have about seven digits. There is no graphics, sound, `PRINT USING`,
   `ON ERROR`, user types or random-access files (the program stops with
-  `Advanced feature unavailable`). Without a real-time clock there is no
-  `DATE$` or `TIME$`. The special-key codes of `INKEY$` depend on the
-  terminal's escape sequences. Whether the E form of very small numbers
+  `Advanced feature unavailable`). The special-key codes of `INKEY$`
+  depend on the terminal's escape sequences. Whether the E form of very
+  small numbers
   such as 1/30 matches QBasic's in every case is not verified (no QBasic was
   available to compare with).
 - `ld -o X X` (the output also named as an input) deletes `X` when the link

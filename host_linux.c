@@ -375,13 +375,13 @@ int sys(int num, int n, int *argv) {
       for (int i = 0; i < 4; i++) if (!dirs[i]) { dirs[i] = opendir(hostpath((char *)A(0), dirpaths[i])); return dirs[i] ? i : -1; } return -1;
     case SYS_readdir: { int d = A(0);
       if (d >= 4 && d < 8) { struct dirent_t *o = (struct dirent_t *)A(1); int sz, isd;
-        if (!nfs_readdir(d - 4, o->name, sizeof o->name, &sz, &isd)) return 0; o->size = sz; o->isdir = isd; return 1; }
+        if (!nfs_readdir(d - 4, o->name, sizeof o->name, &sz, &isd)) return 0; o->size = sz; o->isdir = isd; o->mtime = 0; return 1; }   // netfs has no times
       if (d < 0 || d > 3 || !dirs[d]) return 0; struct dirent *e;
       while ((e = readdir(dirs[d])) && (e->d_name[0] == '.')) {}
       if (!e) return 0;
       struct dirent_t *o = (struct dirent_t *)A(1); strncpy(o->name, e->d_name, 63); o->name[63] = 0;
       char full[600]; struct stat st; snprintf(full, sizeof full, "%s/%s", dirpaths[d], e->d_name); stat(full, &st);
-      o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); return 1; }
+      o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = (int)st.st_mtime; return 1; }
     case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_dir_owner[d - 4] = -1; nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
     case SYS_chdir: { char r[160]; resolve((char *)A(0), r, sizeof r);
       if (nfs_path(r)) { int sz, d; if (strlen(r) >= sizeof cwd || nfs_stat(r, &sz, &d) || !d) return -1; strcpy(cwd, r); return 0; } }
@@ -438,6 +438,7 @@ int sys(int num, int n, int *argv) {
       if (!s) return tz_now(time(NULL));
       tz_rule r; if (tz_parse(s, &r)) return -1; tz_load(&r);   // the engine is under test, not libc; no file persistence here
       return tz_now(time(NULL)); }
+    case SYS_tzlocal: { long t = (long)A(0); return (int)(t + tz_now(t)); }   // local epoch for the instant t (tzlocal(utc) -> utc + tz_now(utc))
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));

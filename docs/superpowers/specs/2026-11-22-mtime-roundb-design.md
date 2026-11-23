@@ -249,3 +249,56 @@ survive the TZ strip — a case-local explicit `TZ` is required either way);
 BASIC function/handler plumbing inside `funcs.c`/`lex.c` conventions;
 whether `ls`'s civil-from-days lives in a small shared helper or per-file
 copy (either fine; duplication blessed).
+
+## Results (landed 2026-11-23, branch `mtimes`, awaiting merge)
+
+Implemented as designed, all four code tasks clean through review, with
+these deviations and findings, all ledgered in
+`.superpowers/sdd/2026-11-22-mtimes/progress.md`:
+
+- A brief-internal epoch/date inconsistency was caught at implementation:
+  the pinned epoch 1752573600 is 10:00 UTC, not the "12:00 UTC / 14:00"
+  the prose suggested. Ruling: the epoch is authoritative and the golden
+  `12:00` local at +02:00 is correct; the staging comment was corrected to
+  10:00 UTC.
+- Two seasonal landmines in the plan's own gates, both found by builder
+  check / implementer vigilance and fixed to season-independent forms:
+  the tz.c `tzset("CET-1CEST,M3.5.0,M10.5.0") == 3600` leg only holds in
+  winter (every future summer run would fail), so it accepts 3600 or 7200
+  while the fixed-epoch legs stay the year-round DST proof; and the
+  `ls_times` golden embedded the tz tool's live `offset +01:00 std` echo,
+  which flips in DST, so the case moved to an explicit
+  `TZ='CET-1CEST,M3.5.0,M10.5.0'` in `ls_times.env` (applied *after* the
+  harness TZ strip, the `check_basic` NAME.env convention), the `.in`
+  dropped the tz line, and the golden is an ls-only transcript whose date
+  column is mtime-derived hence season-independent. Seasonal-landmine
+  tally in persistent gates is now zero.
+- `ls_times` went beyond the spec letter: boundary pins `sentinel.bin`
+  stamped exactly at `MTIME_UNKNOWN` and `ceiling.bin` exactly at
+  `MTIME_MAX` (each must render `----`; they pin the exclusive bounds'
+  off-by-one), and a per-case line-sorted comparison because readdir
+  order over the staged dir is not byte-exact-stable (documented in
+  `check_sh.py`; all other cases keep byte-exact goldens).
+- Clarification from Task 2, tested as such: unsynced-window stamps
+  arrive via `readdir` as the sentinel 315532800, not 0 - the exclusive
+  dash window handles it, and the `sentinel.bin` pin keeps the equality
+  case honest (the board unsynced leg is the live witness).
+- BASIC notes: assigning to `DATE$` is now a syntax error (was an
+  unsup-word error; both errors, the name is reserved); `pcsys.c`
+  hoists `<time.h>` above the syscall macro renames so no source ever
+  sees libc's `localtime` prototype post-macro.
+
+Verification on the Challenger at `6aba4ab` (full transcript in
+`.superpowers/sdd/2026-11-22-mtimes/task-5-report.md`): kernel 262428
+bytes (+112 vs the tz round, matching the task-2 gate); synced writes
+stamp minute-exact with winter `+01:00`; `get` downloads stamped at
+transfer; pre-existing junk stamps (`cat.bin`, `wc.bin`) and ramfs and
+mounted `/mnt/fs` entries all list `----------`; the unsynced-boot write
+leg won the ~9-14 s window by 0.4 s on attempt 3 of a single-session
+serial race (attempts 1-2 lost to sync speed and a pyserial re-open race,
+harness-side); zone and mtimes survive reboot; 10/10 `ls /bin`
+round-trips uniform 0.57 s; `--selfhost` six IDENTICAL on the first
+attempt. PC gates: `make check` ok, `check_ref` different: 0 with
+`tzlocal` in the newer-builtins class, `check_toolchain --pc` 12 cases,
+`check_sh --pc` 6 cases (the new `ls_times`), `check_basic --pc` 140
+cases ASan-clean, `check_net --pc` ok, `bench --pc` ok.

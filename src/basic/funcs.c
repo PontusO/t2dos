@@ -83,6 +83,10 @@ int fn_compile() {
 
 int fn_timer() { next(); emit_fn(K_TIMER, 0); return T_SNG; }
 
+// DATE$ and TIME$: the local wall clock, zero-arg like TIMER
+int fn_dates() { next(); emit_fn(K_DATES, 0); return T_STR; }
+int fn_times() { next(); emit_fn(K_TIMES, 0); return T_STR; }
+
 // RND, RND(x)
 int fn_rnd() {
   int n;
@@ -245,6 +249,48 @@ void h_timer() {
   sec = u / 1000; ms = u % 1000;
   f = ms; f = f / 1000; g = sec; f = f + g;
   sp++; fs[sp] = f;
+}
+
+// DATE$/TIME$: the kernel's local second (localtime(0): the zone rule and DST apply
+// there, UTC until a zone is set; an unsynced clock renders the epoch as 1970-01-01,
+// the same honesty rule as `date`). Civil fields by Hinnant civil-from-days, the
+// date.c shape; a small local copy, duplication blessed.
+void h_dates() {
+  int t; int days; int z; int era; int doe; int yoe; int y; int doy; int mp; int d; int m;
+  char *s;
+  t = localtime(0);
+  days = t / 86400;
+  z = days + 719468;
+  era = (z >= 0 ? z : z - 146096) / 146097;
+  doe = z - era * 146097;
+  yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  y = yoe + era * 400;
+  doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  mp = (5 * doy + 2) / 153;
+  d = doy - (153 * mp + 2) / 5 + 1;
+  m = mp < 10 ? mp + 3 : mp - 9;
+  y = y + (m <= 2);
+  s = str_new(10);
+  s[0] = '0' + y / 1000 % 10; s[1] = '0' + y / 100 % 10;
+  s[2] = '0' + y / 10 % 10; s[3] = '0' + y % 10;
+  s[4] = '-';
+  s[5] = '0' + m / 10; s[6] = '0' + m % 10;
+  s[7] = '-';
+  s[8] = '0' + d / 10; s[9] = '0' + d % 10;
+  sp++; vs[sp] = (int)s; vt[sp] = 1;
+}
+
+void h_times() {
+  int t; int h; int m; int sec; char *s;
+  t = localtime(0);
+  h = t / 3600 % 24; m = t / 60 % 60; sec = t % 60;
+  s = str_new(8);
+  s[0] = '0' + h / 10; s[1] = '0' + h % 10;
+  s[2] = ':';
+  s[3] = '0' + m / 10; s[4] = '0' + m % 10;
+  s[5] = ':';
+  s[6] = '0' + sec / 10; s[7] = '0' + sec % 10;
+  sp++; vs[sp] = (int)s; vt[sp] = 1;
 }
 
 // arrays (the layout is in basic.h): dimension d's lower bound is a[1 + 2d], its length a[2 + 2d]
@@ -470,6 +516,8 @@ void funcs_init() {
   for (k = K_ABS; k <= K_OCTS; k++) fn_tab[k] = fn_compile;
   // the ones with their own compiler
   fn_tab[K_TIMER] = fn_timer; fnop[K_TIMER] = h_timer;
+  fn_tab[K_DATES] = fn_dates; fnop[K_DATES] = h_dates;
+  fn_tab[K_TIMES] = fn_times; fnop[K_TIMES] = h_times;
   fn_tab[K_RND] = fn_rnd; fnop[K_RND] = h_rnd;
   fn_tab[K_INSTR] = fn_instr; fnop[K_INSTR] = h_instr;
   fn_tab[K_STRINGS] = fn_strings; fnop[K_STRINGS] = h_strings;

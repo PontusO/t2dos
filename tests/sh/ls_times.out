@@ -1,0 +1,10 @@
+T2DOS shell, type help
+/> ls /tmp/lsdir
+----------         3  junk.bin
+----------         4  zero.bin
+----------         5  sentinel.bin
+----------         6  ceiling.bin
+2025-07-15 12:00         1  summer.bin
+2025-11-22 13:00         2  winter.bin
+6 files, 21 bytes
+/> 

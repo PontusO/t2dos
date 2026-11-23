@@ -116,6 +116,16 @@ static FS *fs_for(const char *path) {
   return tmpfs && !strncmp(path, "/tmp", 4) && (!path[4] || path[4] == '/') ? tmpfs : fsys;
 }
 
+#define MTIME_UNKNOWN 315532800   // 1980-01-01 00:00:00 UTC = FAT epoch floor
+// SDFS's stamp callback, run inside its write paths: reads only, no allocation, no switch point.
+// SDFS writes raw tm_sec into the 5-bit DOS field but reads it back as spec-compliant sec*2,
+// so only second 0 round-trips - hence the whole-minute truncation (spec §1).
+static time_t fs_time_cb(void) {
+  unsigned long t = clock_now();
+  if (!clock_valid() || t < MTIME_UNKNOWN + 60) return MTIME_UNKNOWN;
+  return (time_t)(t - t % 60);    // whole minutes - DOS seconds field does not round-trip
+}
+
 // ============================================================ console drivers
 struct Console {
   virtual void putc(int c) = 0;
@@ -777,7 +787,7 @@ extern "C" int sys(int num, int n, int *argv) {
       for (int i = 0; i < MAX_DIR; i++) if (!dir_used[i]) { dirs[i] = fs_for(path)->openDir(path); dir_used[i] = true; dir_owner[i] = cur_id(); return i; } return -1; }
     case SYS_readdir: { int d = A(0); if (d < 0 || d >= MAX_DIR || !dir_used[d]) return 0;
       if (!dirs[d].next()) return 0;
-      dirent_t *e = (dirent_t *)A(1); strlcpy(e->name, dirs[d].fileName().c_str(), sizeof e->name); e->size = dirs[d].fileSize(); e->isdir = dirs[d].isDirectory(); return 1; }
+      dirent_t *e = (dirent_t *)A(1); strlcpy(e->name, dirs[d].fileName().c_str(), sizeof e->name); e->size = dirs[d].fileSize(); e->isdir = dirs[d].isDirectory(); e->mtime = (int)dirs[d].fileTime(); return 1; }   // fileTime(): SDFS reads the DOS stamp, the ramfs/netfs DirImpls keep the FS base 0
     case SYS_closedir: { int d = A(0); if (d >= 0 && d < MAX_DIR) { dir_used[d] = false; dirs[d] = Dir(); } return 0; }   // frees a /mnt/fs listing now
     case SYS_chdir: { char path[160]; resolve((const char *)A(0), path, sizeof path); if (!is_dir(path)) return -1; strlcpy(cwd, path, sizeof cwd); return 0; }
     case SYS_getcwd: strlcpy((char *)A(0), cwd, A(1)); return A(0);
@@ -862,6 +872,7 @@ extern "C" int sys(int num, int n, int *argv) {
       tz_rule r; if (tz_parse(s, &r)) return -1;                         // rejected: the active rule stays
       tz_load(&r); tz_store(s);                                          // live first; a /etc/tz write failure is ignored
       return tz_now((long)clock_now()); }
+    case SYS_tzlocal: { long t = (long)A(0); return (int)(t + tz_now(t)); }   // local epoch for the instant t (tzlocal(utc) -> utc + tz_now(utc))
     // ---- maths
     case SYS_sin: return fw(sinf(wf(A(0))));
     case SYS_cos: return fw(cosf(wf(A(0))));
@@ -1287,7 +1298,7 @@ void setup() {
   SDFS.setConfig(SDFSConfig(SD_CS, SPI_FULL_SPEED));
   const char *fsname = "NONE";
   bool mounted = SDFS.begin();
-  if (mounted) fsname = "sd";
+  if (mounted) { fsname = "sd"; SDFS.setTimeCallback(fs_time_cb); }   // stamp writes from the wall clock; never before begin(): the callback would outlive a failed mount
   else if ((mounted = LittleFS.begin())) { fsys = &LittleFS; fsname = "flash"; }   // formats on first use
 #if defined(PICO_RP2350)
   Serial.printf("T2DOS kernel  psram %d  sram free %d  fs %s\r\n", (int)rp2040.getPSRAMSize(), (int)rp2040.getFreeHeap(), fsname);

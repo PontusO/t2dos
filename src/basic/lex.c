@@ -31,7 +31,7 @@ void kw_add(char *name, int tk) {
 // a program using one gets "Advanced feature unavailable", never something else
 char *unsup_words =
   "SCREEN PSET PRESET CIRCLE DRAW PAINT PALETTE VIEW WINDOW PCOPY PMAP POINT SOUND PLAY "
-  "PEEK POKE DEF DATE$ TIME$ TYPE STATIC COMMON CHAIN ON ERROR RESUME ERR ERL ERDEV ERDEV$ "
+  "PEEK POKE DEF TYPE STATIC COMMON CHAIN ON ERROR RESUME ERR ERL ERDEV ERDEV$ "
   "USING GET PUT FIELD LSET RSET RANDOM BINARY ACCESS LOCK UNLOCK SEEK LOF LOC OUT INP WAIT "
   "KEY BLOAD BSAVE CVI CVL CVS CVD MKI$ MKL$ MKS$ MKD$ ENVIRON ENVIRON$ AUTO LIST RENUM "
   "OPTION LPRINT LPOS CSRLIN POS VARPTR VARPTR$ VARSEG SADD FRE CLEAR TRON TROFF IOCTL "
@@ -89,6 +89,9 @@ int lex_init() {
   kw_add("FREEFILE", K_FREEFILE); kw_add("LBOUND", K_LBOUND); kw_add("UBOUND", K_UBOUND);
   kw_add("COMMAND$", K_COMMANDS); kw_add("TAB", K_TAB); kw_add("SPC", K_SPC);
   kw_add("PINREAD", K_PINREAD); kw_add("ANALOGREAD", K_ANALOGREAD);
+  // DATE$ and TIME$ are keywords, matched before any variable name: this reserves
+  // both names (accepted: QBasic reserves them too, they were K_UNSUP words here)
+  kw_add("DATE$", K_DATES); kw_add("TIME$", K_TIMES);
   kw_add("REM", K_REM);
   p = unsup_words;
   while (*p) {
