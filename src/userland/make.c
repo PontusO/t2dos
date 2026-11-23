@@ -17,7 +17,10 @@
 // forward references work and a CLI value may itself reference file vars. All
 // four operators store values verbatim and none expands early; the nesting cap
 // MAXEXPASS catches A := $(A) like GNU's recursion error. A TAB-indented line
-// after a target is that target's recipe: stored here, executed by Task 4.
+// after a target is that target's recipe: stored at parse, expanded and run
+// by run_recipe when the target resolves (a recipe'd .bin target gets no
+// implicit cc call; $@ $< $^ expand per rule; @ silences the -v echo; word 0
+// maps to /bin/<name>.bin unless it holds a /).
 //
 // Dialect discipline (docs/NOTES-star-deref.md): the committed cc
 // miscompiles rvalue reads through char * VARIABLES (a VARREF emits a second
@@ -186,6 +189,18 @@ int ntok(void) {                       // next token offset, -1 at the end; NULs
   s = gpos;
   while (gpos < gend && buf[gpos] && buf[gpos] != ' ' && buf[gpos] != '\t') gpos = gpos + 1;
   if (gpos < gend) { buf[gpos] = 0; gpos = gpos + 1; }
+  return s;
+}
+
+int lpos, lend;                        // run_recipe's tokenizer, over lbuf
+
+int ntokl(void) {                      // ntok over lbuf (same shape, same globals style)
+  int s;
+  while (lpos < lend && (lbuf[lpos] == ' ' || lbuf[lpos] == '\t')) lpos = lpos + 1;
+  if (lpos >= lend) return -1;
+  s = lpos;
+  while (lpos < lend && lbuf[lpos] && lbuf[lpos] != ' ' && lbuf[lpos] != '\t') lpos = lpos + 1;
+  if (lpos < lend) { lbuf[lpos] = 0; lpos = lpos + 1; }
   return s;
 }
 
@@ -466,9 +481,10 @@ void parse_line(int start, int e, int lineno) {
   }
 }
 
-// a TAB-indented line: the current target's recipe. Stored for Task 4 (which
-// expands and runs it); -n does not print recipes yet. NUL-terminated in
-// place: pass B owns these bytes once a line is classified.
+// a TAB-indented line: the current target's recipe. The line (comment
+// stripped, leading blanks skipped) is stored as a buf offset and run by
+// run_recipe when its target resolves; -n prints it RESOLVED. NUL-terminated
+// in place: pass B owns these bytes once a line is classified.
 void recipe_line(int st, int e, int lineno) {
   int i;
   i = st;
@@ -480,7 +496,7 @@ void recipe_line(int st, int e, int lineno) {
   if (lastt < 0) { printf("make: %s: line %d: recipe before any target\n", curfile, lineno); exit(1); }
   if (trcn[lastt] >= MAXRECI) { printf("make: %s: too many recipe lines (cap %d)\n", curfile, MAXRECI); exit(1); }
   buf[e] = 0;
-  trcl[lastt * MAXRECI + trcn[lastt]] = st;
+  trcl[lastt * MAXRECI + trcn[lastt]] = i;
   trcn[lastt] = trcn[lastt] + 1;
 }
 
@@ -595,6 +611,60 @@ void emit_cmd(void) {
   }
 }
 
+// copy a literal/argv string to lbuf + p (NUL included), bounded by MAXEXP
+void lput(int p, char *s) {
+  int k;
+  k = 0;
+  while (s[k]) { if (p + k >= MAXEXP) exlong(); lbuf[p + k] = s[k]; k = k + 1; }
+  if (p + k >= MAXEXP) exlong();
+  lbuf[p + k] = 0;
+}
+
+// run (or, under -n, print) target i's recipe, one exec per stored line:
+// expand in the target's context (exowner makes expandtok fill $@/$</$^),
+// strip a leading @ into quiet (GNU: the -n plan still shows the line, the
+// -v echo does not: save/restore verbose around emit_cmd), tokenize, and
+// map word 0 — a word holding / runs as given, else /bin/<word>.bin is
+// appended after the line's last token (past lend, so ntokl never reaches
+// it) and cmd[0] points there. No word-0 existence check: GNU -n plans
+// blindly; a real run reports the exec failure through emit_cmd.
+void run_recipe(int i) {
+  int n, ln, q, quiet, sv, tok, w, has, p, k;
+  n = 0;
+  while (n < trcn[i]) {
+    exowner = i;
+    ln = expandtok(trcl[i * MAXRECI + n]);
+    exowner = -1;
+    q = 0;
+    while (q < ln && (lbuf[q] == ' ' || lbuf[q] == '\t')) q = q + 1;
+    quiet = 0;
+    if (q < ln && lbuf[q] == '@') { quiet = 1; q = q + 1; }
+    lpos = q; lend = ln;
+    nw = 0;
+    tok = ntokl();
+    if (tok >= 0) {                              // "@" alone: a no-op line, like GNU
+      has = 0; w = tok;
+      while (lbuf[w]) { if (lbuf[w] == '/') has = 1; w = w + 1; }
+      if (has) addw(lbuf + tok);
+      else {
+        p = ln + 1;                              // "/bin/" + word + ".bin" + NUL
+        if (p + (w - tok) + 10 > MAXEXP) exlong();
+        lput(p, "/bin/");
+        k = 0;
+        while (k < w - tok) { lbuf[p + 5 + k] = lbuf[tok + k]; k = k + 1; }
+        lput(p + 5 + (w - tok), ".bin");
+        addw(lbuf + p);
+      }
+      while (1) { tok = ntokl(); if (tok < 0) break; addw(lbuf + tok); }
+      sv = verbose;
+      if (quiet) verbose = 0;
+      emit_cmd();
+      verbose = sv;
+    }
+    n = n + 1;
+  }
+}
+
 // expand a target's raw tokens into its own epool row, then re-split the
 // EXPANDED words with the old flag rule (leading -, -I takes the next word)
 // and classify prereqs. Words live in the row, never in shared scratch, so a
@@ -687,7 +757,9 @@ void resolve(int i) {
   curowner = namstr + i * MAXLINE;
   if (isbin) {
     // pass 1: resolve/check prereqs and assemble .s files (their as calls run
-    // or print first); the .o rows join the cc command built after
+    // or print first); the .o rows join the cc command built after. A target
+    // WITH a recipe honors its prereqs but makes zero toolchain calls: the
+    // as emissions are guarded too, and pass 2 is skipped whole.
     rot = 0;
     j = 0;
     while (j < tpn[i]) {
@@ -697,7 +769,7 @@ void resolve(int i) {
         if (!exists(epool + tpre[i * MAXRAW + j])) {
           printf("make: %s: no such prerequisite %s\n", namstr + i * MAXLINE, epool + tpre[i * MAXRAW + j]); exit(1);
         }
-        if (tpk[i * MAXPRE + j] == 2) {
+        if (trcn[i] == 0 && tpk[i * MAXPRE + j] == 2) {
           if (rot >= 8) { printf("make: %s: too many .s prereqs (cap 8)\n", namstr + i * MAXLINE); exit(1); }
           strcpy(opool + rot * MAXLINE, epool + tpre[i * MAXRAW + j]);
           opool[rot * MAXLINE + tplen[i * MAXPRE + j] - 1] = 'o';          // last char .s -> .o
@@ -708,20 +780,22 @@ void resolve(int i) {
       }
       j = j + 1;
     }
-    // pass 2: one cc call: program, flags, -o target, sources in file order,
-    // then the assembled .o rows; headers and other files are never inputs
-    nw = 0;
-    addw("/bin/cc.bin");
-    j = 0; while (j < tfn[i]) { addw(epool + tflag[i * MAXARGS + j]); j = j + 1; }
-    addw("-o"); addw(namstr + i * MAXLINE);
-    j = 0;
-    while (j < tpn[i]) {
-      if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1) addw(epool + tpre[i * MAXRAW + j]);
-      j = j + 1;
+    if (trcn[i] == 0) {
+      // pass 2: one cc call: program, flags, -o target, sources in file order,
+      // then the assembled .o rows; headers and other files are never inputs
+      nw = 0;
+      addw("/bin/cc.bin");
+      j = 0; while (j < tfn[i]) { addw(epool + tflag[i * MAXARGS + j]); j = j + 1; }
+      addw("-o"); addw(namstr + i * MAXLINE);
+      j = 0;
+      while (j < tpn[i]) {
+        if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1) addw(epool + tpre[i * MAXRAW + j]);
+        j = j + 1;
+      }
+      j = 0;
+      while (j < rot) { addw(opool + j * MAXLINE); j = j + 1; }
+      emit_cmd();
     }
-    j = 0;
-    while (j < rot) { addw(opool + j * MAXLINE); j = j + 1; }
-    emit_cmd();
   } else {
     j = 0;
     while (j < tpn[i]) {
@@ -733,6 +807,8 @@ void resolve(int i) {
       j = j + 1;
     }
   }
+  curowner = namstr + i * MAXLINE;            // nested resolves moved it: recipe errors name this target
+  run_recipe(i);                              // both branches: after prereqs, before done
   tvis[i] = 2;
 }
 

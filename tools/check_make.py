@@ -200,6 +200,24 @@ def pc_cases():
               ['/bin/cc.bin -o /src/mk/x.bin /src/mk/a.c',
                '/bin/cc.bin -o /src/mk/y.bin /src/mk/b.c'])
 
+    # 14: recipes (spec 2026-11-23 Goals 3/4): a .bin target WITH a recipe gets
+    # zero implicit toolchain calls (no /bin/cc.bin line here); the prereq's
+    # recipe runs during the prereq's resolve, so its two lines come first;
+    # $@ $< $^ expand per rule (all's $@ is "all", its $^ the expanded prereq);
+    # word 0 maps to /bin/<name>.bin unless it holds a /; @ is stripped in the
+    # resolved plan (-n still prints it, -v would not echo it).
+    rec = ('T := /src/mk/r\nall: $(T).bin\n\t# a tabbed comment\n'
+           '\trm -f gone.txt\n\techo built $(T).bin $@ $^\n'
+           '$(T).bin: /src/mk/a.c\n\techo cc $< into $@\n'
+           '\t/bin/echo.bin direct\n')
+    expect_ok('plan-recipe', rec, ['all'],
+              ['/bin/echo.bin cc /src/mk/a.c into /src/mk/r.bin',
+               '/bin/echo.bin direct',
+               '/bin/rm.bin -f gone.txt',
+               '/bin/echo.bin built /src/mk/r.bin all /src/mk/r.bin'])
+    expect_ok('plan-recipe-quiet', 'q:\n\t@echo hushed\n', ['q'], ['/bin/echo.bin hushed'])
+    expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
+
     tool_cases()
 
 
