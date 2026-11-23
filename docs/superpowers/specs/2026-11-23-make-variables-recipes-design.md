@@ -233,11 +233,14 @@ tables live. None of these change what gets built.
 
 PC (branch gates, all green):
 
-- `check_make.py --pc`: 49 cases pass: the original 13 plan cases, the
+- `check_make.py --pc`: 55 cases pass: the original 13 plan cases, the
   variables/recipes/`.PHONY`/`.DEFAULT_GOAL` plan cases of this round, four
   edge pins added at close-out (`.PHONY` before any target creates no
   target; command-line target beats `.DEFAULT_GOAL`; two `.PHONY` lines
-  consume cleanly), and the `rm`/`mkdir` tool cases under qemu.
+  consume cleanly), final-review pins (a phony prereq with no rule is a
+  no-op; `A#b := c` errors `no colon`; an empty command-line variable name
+  is rejected; the recipe-line cap; `mkdir -p` with a trailing slash), and
+  the `rm`/`mkdir` tool cases under qemu.
 - The plan-board fixture passed with zero change against the rewritten
   `Makefile.board`: expansion is faithful (Goal 8's proof).
 - `check_ref.py`: `different: 0`; full `make check` clean.

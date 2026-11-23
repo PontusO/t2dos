@@ -268,15 +268,16 @@ int findvarl(int off, int len) {        // lbuf token vs varnam rows, -1 none
 }
 
 // a definition line: [spaces]NAME op value, op one of ":=" "?=" "+=" "=".
-// The name run stops at " \t:?+=" (tab included, so "  \tcmd" has an empty
-// name: a recipe line, never a definition).
+// The name run stops at " \t:#?+=" (tab included, so "  \tcmd" has an empty
+// name: a recipe line, never a definition; # included, so "A#b := c" is no
+// definition and pass B errors it no colon, like the first make did).
 int isdef(int st, int e) {
   int i, ns;
   i = st;
   while (i < e && buf[i] == ' ') i = i + 1;
   if (i == e) return 0;
   ns = i;
-  while (i < e && buf[i] != ' ' && buf[i] != '\t' && buf[i] != ':' && buf[i] != '?' && buf[i] != '=' && buf[i] != '+') i = i + 1;
+  while (i < e && buf[i] != ' ' && buf[i] != '\t' && buf[i] != ':' && buf[i] != '#' && buf[i] != '?' && buf[i] != '=' && buf[i] != '+') i = i + 1;
   if (i == ns) return 0;
   while (i < e && buf[i] == ' ') i = i + 1;
   if (i >= e) return 0;
@@ -459,9 +460,10 @@ void read_phony(int colon, int e, int lineno) {
 }
 
 // is the expanded prereq word (epool offset, length) a declared phony name?
-// Phony prereqs that are targets already resolve through the target path (no
-// exists check); this matcher exists for Task 7's board-semantics checks and
-// the future timestamp round, which must never stat or date-check these names.
+// Phony prereqs that are targets already resolve through the target path;
+// resolve() consults this matcher so a phony with no rule skips the exists
+// check and is a no-op prereq (GNU: nothing to do). The future timestamp
+// round must never stat or date-check these names either.
 int is_phony(int off, int len) {
   int i, a, n;
   i = 0;
@@ -829,7 +831,8 @@ void resolve(int i) {
     while (j < tpn[i]) {
       k = find_tpre(i, j);
       if (k >= 0) resolve(k);                 // target prereq: build it first
-      else {
+      else if (!is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j])) {
+                                              // a phony with no rule: nothing to do (GNU), never a file
         if (!exists(epool + tpre[i * MAXRAW + j])) {
           printf("make: %s: no such prerequisite %s\n", namstr + i * MAXLINE, epool + tpre[i * MAXRAW + j]); exit(1);
         }
@@ -853,7 +856,7 @@ void resolve(int i) {
       addw("-o"); addw(namstr + i * MAXLINE);
       j = 0;
       while (j < tpn[i]) {
-        if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1) addw(epool + tpre[i * MAXRAW + j]);
+        if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1 && !is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j])) addw(epool + tpre[i * MAXRAW + j]);
         j = j + 1;
       }
       j = 0;
@@ -865,7 +868,7 @@ void resolve(int i) {
     while (j < tpn[i]) {
       k = find_tpre(i, j);
       if (k >= 0) resolve(k);
-      else if (!exists(epool + tpre[i * MAXRAW + j])) {
+      else if (!is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j]) && !exists(epool + tpre[i * MAXRAW + j])) {
         printf("make: %s: unknown prerequisite %s\n", namstr + i * MAXLINE, epool + tpre[i * MAXRAW + j]); exit(1);
       }
       j = j + 1;
@@ -894,6 +897,7 @@ int main(int argc, char **argv) {
       j = 0;
       while (argv[i][j] && argv[i][j] != '=') j = j + 1;
       if (argv[i][j] == '=') {                // NAME=value (GNU): a variable, not a target
+        if (j == 0) { printf("make: empty variable name\n"); exit(1); }   // "=x" names nothing
         if (bpos + 2 * strlen(argv[i]) + 2 >= MAXBUF) { printf("make: command line too long\n"); exit(1); }
         // copy name and value into buf scratch and setvar from there (the
         // argv[i][j] walk is grep.c's proven idiom; no pointer arithmetic on

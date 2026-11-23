@@ -15,9 +15,10 @@ int join(char *dst, char *dir, char *name) {
 // one path: 0 gone or tolerated, 1 failed.
 // -r on a directory rescan-loops: open, take the FIRST entry, close, recurse.
 // The directory is never iterated while it mutates and there is no entry-count
-// cap; any child error aborts, so an entry that will not die cannot spin the loop.
+// cap; any child error aborts, and -f's tolerate-missing path (a child that
+// reports gone without dying) is backstopped by the same-name guard below.
 int rm1(char *path, int force, int rec) {
-  char child[200]; struct stat_t st; struct dirent_t e; int d;
+  char child[200]; char prev[64]; struct stat_t st; struct dirent_t e; int d;
   if (stat(path, &st) < 0) {
     if (force) return 0;
     printf("rm: %s failed\n", path); return 1;
@@ -27,11 +28,14 @@ int rm1(char *path, int force, int rec) {
     return 0;
   }
   if (!rec) { printf("rm: %s is a directory\n", path); return 1; }
+  prev[0] = 0;                                  // spin guard: the first entry of the previous rescan
   for (;;) {
     d = opendir(path);
     if (d < 0) { printf("rm: %s failed\n", path); return 1; }
     if (!readdir(d, &e)) { closedir(d); break; }
     closedir(d);
+    if (prev[0] && strcmp(prev, e.name) == 0) { printf("rm: %s: stuck on %s\n", path, e.name); return 1; }
+    strcpy(prev, e.name);
     if (join(child, path, e.name) < 0 || rm1(child, force, rec)) return 1;
   }
   if (rmdir(path) < 0) { printf("rm: %s failed\n", path); return 1; }

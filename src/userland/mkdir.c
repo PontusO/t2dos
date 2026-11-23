@@ -10,6 +10,8 @@ int mkp(char *arg) {
   char p[200]; struct stat_t st; int k; int c;
   if (strlen(arg) >= 200) { printf("mkdir: path too long: %s\n", arg); return 1; }   // rm.c's cap: sh words reach ~255
   strcpy(p, arg);
+  k = strlen(p);
+  while (k > 1 && p[k - 1] == '/') { p[k - 1] = 0; k = k - 1; }   // trailing slashes: "a/b/" behaves like "a/b" (a bare "/" stays)
   k = 0;
   while (p[k]) {
     if (p[k] == '/' && k > 0 && p[k + 1]) {   // interior separator only

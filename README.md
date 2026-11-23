@@ -2832,9 +2832,11 @@ clean:
     still undefined), `NAME += more` (space-joined), and `NAME=value` on the
     command line, which a file line never overrides. `$(NAME)` expands at use
     time in target names, flags, prereqs and recipes; it nests
-    (`$(OPT.$(BUILD))`) and an undefined name expands to nothing. The one
-    divergence from GNU make: board make has one expansion behavior, so
-    GNU's `=` versus `:=` distinction collapses.
+    (`$(OPT.$(BUILD))`) and an undefined name expands to nothing. Divergences
+    from GNU make: board make has one expansion behavior, so GNU's `=` versus
+    `:=` distinction collapses; `$$` and a lone `$` in a recipe are errors
+    (GNU leaves them literal); `@` is stripped AFTER expansion, so `Q := @`
+    with `$(Q)echo x` silences the line (GNU strips `@` before expansion).
   - A recipe line runs one program, no shell: `$@` (the target), `$<` (first
     prereq) and `$^` (all prereqs) expand in it; a leading `@` silences the
     `-v` echo of that line (the command still runs); a word 0 without a `/`
@@ -2842,7 +2844,8 @@ clean:
   - The default goal is `.DEFAULT_GOAL` if set, else the first target; a
     target named on the command line beats both. `.DEFAULT_GOAL` must name a
     literal target: its value is stored verbatim, not expanded. `.PHONY:
-    name ...` records names that are never files. `V=1` acts like `-v`.
+    name ...` records names that are never files. `V=1` acts like `-v` (any
+    non-empty `V` value counts, GNU-style).
   - `-n` prints the plan without running it. Recipe lines print resolved:
     word 0 mapped, variables expanded, `@` stripped; the same text `-v`
     echoes.
@@ -2851,7 +2854,7 @@ clean:
     the repository used the old form.
   - Caps: 128-char lines, 64 targets, 16 prereqs and 32 words per cc call,
     32 variables with 512-byte values, 8 recipe lines per target, 16 `.PHONY`
-    names, expansion nesting 8.
+    names, expansion nesting 8, 64 words and 1024 bytes per expanded line.
 
 ---
 

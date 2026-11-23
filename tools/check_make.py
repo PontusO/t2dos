@@ -121,6 +121,9 @@ def pc_cases():
     # 4-5: grammar errors name the line; make never runs a partial build.
     expect_err('err-no-colon', 'bad /src/mk/a.c\n', [], 'bad')
     expect_err('err-flags-eol', 'x: -I\n', [], 'x')
+    # a '#' inside the name is not a definition (a comment starts there): the
+    # line falls through to the rule pass and errors no colon, like the first make.
+    expect_err('err-hash-def', 'A#b := c\n', [], 'no colon')
 
     # 6: a cycle says cycle (and returns), it never hangs.
     expect_err('err-cycle', 'c1: c2\nc2: c1\n', ['c1'], 'cycle')
@@ -184,6 +187,8 @@ def pc_cases():
               ['/bin/cc.bin -I /src/mk -o /src/mk/p.bin /src/mk/a.c /src/mk/b.c /src/mk/c.c'])
     expect_ok('plan-assign-cli', amk, ['W=/src/mk/b.c', 'Z=-O'],
               ['/bin/cc.bin -O -o /src/mk/p.bin /src/mk/a.c /src/mk/b.c /src/mk/b.c'])
+    # "=x" on the command line names nothing: rejected, not an empty variable.
+    expect_err('err-cli-empty-name', 'x:\n\techo x\n', ['=x'], 'empty variable name')
 
     # 13: use-time expansion: nesting $(O.$(BLD)), ?= default, forward reference,
     # a CLI value referencing a file var, target-name expansion, undefined -> no
@@ -233,6 +238,8 @@ def pc_cases():
     expect_err('err-recipe-missing-s', '/src/mk/rb.bin: /src/mk/nope.s\n\techo link\n',
                ['/src/mk/rb.bin'], 'no such prerequisite', 'nope.s')
     expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
+    # MAXRECI 8: the 9th recipe line errors (naming the cap) before anything runs.
+    expect_err('err-recipe-cap', 'x:\n' + '\techo l\n' * 9, [], 'recipe', 'cap')
 
     # 15: .PHONY, .DEFAULT_GOAL and reserved dot-names (spec 2026-11-23 Goal 5).
     # plan-phony: the phony prereq's recipe runs (it is a target, so the exists
@@ -268,6 +275,10 @@ def pc_cases():
               [], ['/bin/echo.bin p'])
     expect_ok('plan-phony-twice-q', '.PHONY: p\np:\n\techo p\n.PHONY: q\nq:\n\techo q\n',
               ['q'], ['/bin/echo.bin q'])
+    # a phony prereq with NO rule of its own is a no-op (GNU: nothing to do),
+    # not a missing file: both prereq loops exempt phony names from the exists check.
+    expect_ok('plan-phony-no-rule', '.PHONY: ghost\nall: ghost\n\techo done\n', ['all'],
+              ['/bin/echo.bin done'])
 
     tool_cases()
 
@@ -329,10 +340,12 @@ def tool_cases():
              % (rc, out, not os.path.isdir(RMT)))
     ok('rm-fr')
 
-    # mkdir -p creates every parent (host view: root/tmp/mkt/sub/deep exists).
+    # mkdir -p creates every parent (host view: root/tmp/mkt/sub AND its
+    # deepest sub/deep exist).
     shutil.rmtree(MKT, ignore_errors=True)
     rc, out = run_tool('mkdir', ['-p', '/tmp/mkt/sub/deep'])
-    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'sub', 'deep')):
+    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'sub')) \
+            or not os.path.isdir(os.path.join(MKT, 'sub', 'deep')):
         fail('mk-p', 'want exit 0 and mkt/sub/deep, got exit %d out %r exists=%s'
              % (rc, out, os.path.isdir(os.path.join(MKT, 'sub', 'deep'))))
     ok('mk-p')
@@ -367,6 +380,15 @@ def tool_cases():
     if rc == 0 or 'too long' not in out:
         fail('mk-toobig', 'want exit != 0 naming too long, got exit %d out %r' % (rc, out))
     ok('mk-toobig')
+
+    # a trailing slash: "x/" behaves like "x" (trimmed before the prefix walk).
+    # x exists from mk-plain: remove it first, so this really creates it.
+    shutil.rmtree(os.path.join(MKT, 'x'), ignore_errors=True)
+    rc, out = run_tool('mkdir', ['-p', '/tmp/mkt/x/'])
+    if rc != 0 or not os.path.isdir(os.path.join(MKT, 'x')):
+        fail('mk-p-slash', 'want exit 0 and mkt/x, got exit %d out %r exists=%s'
+             % (rc, out, os.path.isdir(os.path.join(MKT, 'x'))))
+    ok('mk-p-slash')
 
 
 def cleanup():
