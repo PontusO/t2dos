@@ -421,6 +421,12 @@ def board_main(tool_names=None):
     from check_toolchain import Remote
     import time
     r = Remote()
+    # cc's readfile opens a #include name relative to the cwd first, so a stray header at
+    # the card root silently shadows the staged /lib one (a stale /sys.h cost hours once).
+    for h in ('sys.h', 'basic.h', 'cc.h', 't2obj.h', 'math.h'):
+        _, c = r.run('ls /' + h, 10.0)
+        if c == 0:
+            fail('board-preflight', '/%s on the card root shadows #include "%s": delete it before running --board' % (h, h))
     with open(os.path.join(ROOT, 'Makefile.board')) as f:
         board = f.read()
     body = '\n'.join(l.split('#')[0] for l in board.splitlines())
