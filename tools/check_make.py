@@ -216,6 +216,13 @@ def pc_cases():
                '/bin/rm.bin -f gone.txt',
                '/bin/echo.bin built /src/mk/r.bin all /src/mk/r.bin'])
     expect_ok('plan-recipe-quiet', 'q:\n\t@echo hushed\n', ['q'], ['/bin/echo.bin hushed'])
+    # a .s prereq of a recipe'd .bin: still exists-checked, but the as call is
+    # skipped too (ZERO implicit toolchain calls includes as).
+    expect_ok('plan-recipe-asm',
+              '/src/mk/ra.bin: /src/mk/util.s\n\techo link $<\n', ['/src/mk/ra.bin'],
+              ['/bin/echo.bin link /src/mk/util.s'])
+    expect_err('err-recipe-missing-s', '/src/mk/rb.bin: /src/mk/nope.s\n\techo link\n',
+               ['/src/mk/rb.bin'], 'no such prerequisite', 'nope.s')
     expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
 
     tool_cases()
