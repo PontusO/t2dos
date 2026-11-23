@@ -247,14 +247,30 @@ PC (branch gates, all green):
 - Shipped caps (make.c header): `MAXVAR 32`, `MAXVAL 512`, `MAXEXPASS 8`,
   `MAXRECI 8`, `MAXPHONY 16`/`MAXPHNAME 64`; `MAXLINE` stayed 128.
 
-board: PENDING (owner go-ahead round)
+board (2026-11-23, Challenger 2350 WiFi/BLE, all green):
 
-- `check_make.py --board`: the eight byte-compare legs through the rewritten
-  `Makefile.board`, plus `/src/mkfeat` feature legs (`mkdir -p`; default-goal
+- `check_make.py --board`: 13 legs pass. The eight byte-compare legs
+  (`cc` 38 s, `as`, `ld`, `ar`, `nm`, `objdump`, `basic` 23 s, `sh`) build
+  byte-identically to `root/bin` through the rewritten `Makefile.board`,
+  plus `/src/mkfeat` feature legs (`mkdir -p`; default-goal
   build byte-identical to a PC build; `V=1` resolved echo of the `rm` line
   with the `@` line running unechoed; `rm -rf` really removing the tree;
   old-dialect file byte-identical). One plan correction at implementation:
   `@` silences the `-v` echo, not the program's stdout, so the leg pins the
   echoed command line absent and the program output present.
 - `check_toolchain.py --selfhost`: six IDENTICAL (make.bin is not among the
-  six; the rebuild must stay clean).
+  six; the rebuild must stay clean), ten compiler tests PASS.
+- Three findings from the board sessions, all fixed on the branch:
+  - the kernel's `rm -rf`/nested `unlink` hit an upstream SDFS bug (core
+    6.3.2): `remove()`/`rmdir()` delete the PARENT entry for paths with
+    three or more components. Worked around in the kernel (`k_del_saf`,
+    b7a170d): deep deletes are hoisted to the FS root by rename first;
+    ramfs hoists into `/tmp`. Details and repro in
+    `docs/NOTES-nested-delete.md`; worth an upstream report.
+  - a stale header at the card root silently shadowed `#include "sys.h"`
+    (cc's `readfile` opens the name relative to the cwd before `-I`),
+    making `basic.bin` build 4 bytes short from an old 72-byte
+    `struct dirent_t` while every file on the card was byte-identical.
+    `check_make --board` now prefights stray `/{sys,basic,cc,t2obj,math}.h`.
+  - `ls` printed "not found" but always exited 0 (`main` dropped `list()`'s
+    status); the `rm -rf` leg was the first test to notice. Fixed.
