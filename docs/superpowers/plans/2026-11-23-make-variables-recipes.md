@@ -160,9 +160,13 @@ Failure modes no single task's happy-path tests cover; each gets a pin in the na
          '\t/bin/echo.bin direct\n')
   expect_ok('plan-recipe', rec, ['all'],
             ['/bin/echo.bin cc /src/mk/a.c into /src/mk/r.bin',
+             '/bin/echo.bin direct',
              '/bin/rm.bin -f gone.txt',
-             '/bin/echo.bin built /src/mk/r.bin /src/mk/r.bin /src/mk/a.c',
-             '/bin/echo.bin direct'])
+             '/bin/echo.bin built /src/mk/r.bin all /src/mk/r.bin'])
+  # (plan touch-up, Task 4 ruling: the first draft's want interleaved the
+  # prereq's recipe block around all's and evaluated $@/$^ in the wrong
+  # context; this is the GNU-consistent order: r.bin's whole block runs
+  # during the prereq's resolve, then all's, with $@=all $^=/src/mk/r.bin)
   expect_ok('plan-recipe-quiet', 'q:\n\t@echo hushed\n', ['q'], ['/bin/echo.bin hushed'])
   expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
   ```
