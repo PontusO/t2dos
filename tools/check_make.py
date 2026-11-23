@@ -454,7 +454,7 @@ def board_main(tool_names=None):
     r.put(os.path.join(ROOT, 'root', 'bin', 'make.bin'), '/bin/make.bin')
     for t in ('cc', 'as'):                # make runs the toolchain already on the board
         r.put(os.path.join(ROOT, 'root', 'bin', t + '.bin'), '/bin/%s.bin' % t)
-    for t in ('rm', 'mkdir', 'echo'):     # the board's rm/mkdir predate -rf/-p; echo runs the recipe legs
+    for t in ('rm', 'mkdir', 'rmdir', 'echo', 'ls'):   # the board's rm/mkdir predate -rf/-p; echo runs the recipe legs; the legs assert with ls (whose exit status matters)
         r.put(os.path.join(ROOT, 'root', 'bin', t + '.bin'), '/bin/%s.bin' % t)
     for t in ['/lib/t2obj.c', '/lib/net.c', '/lib/mtab.c', '/src/userland/echo.c'] + toks:   # included/not-listed files too (echo.c: the mkfeat legs)
         src = os.path.join(ROOT, repo_path(t))
@@ -492,6 +492,16 @@ def board_main(tool_names=None):
     out, code = r.run('/bin/mkdir.bin /src/mkfeat/t', 10.0)
     if code == 0:
         fail('board-mkdir-p', 'plain mkdir on existing t exited 0')
+    out, code = r.run('/bin/mkdir.bin -p /src/mkfeat/ts/', 10.0)   # trailing slash (PC-pinned; board pins the real FS)
+    if code:
+        fail('board-mkdir-p', 'mkdir -p ts/ (trailing slash) exited %d: %r' % (code, out[-4:]))
+    out, code = r.run('ls /src/mkfeat/ts', 10.0)
+    if code:
+        fail('board-mkdir-p', 'ts missing after mkdir -p ts/: %r' % (out[-2:],))
+    out, code = r.run('/bin/mkdir.bin -p /src/mkfeat/ts/', 10.0)
+    if code:
+        fail('board-mkdir-p', 'mkdir -p over an existing ts/ exited %d' % code)
+    r.run('rm -rf /src/mkfeat/ts', 10.0)
     print('PASS board-mkdir-p: -p built t/a/b; plain mkdir on an existing dir failed')
     # the PC build the board outputs must match (same cc, same flags up to paths)
     pc = '/tmp/opencode/mkfeat-echo.bin'
