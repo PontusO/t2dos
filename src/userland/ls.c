@@ -1,6 +1,7 @@
 #include "sys.h"
 #define MTIME_UNKNOWN 315532800   // 1980-01-01 UTC: FAT floor / unsynced sentinel (mirror of the kernel bounds; userland never includes kernel headers)
 #define MTIME_MAX     2147483647  // int32 epoch ceiling: above it the stamp is junk (pre-stamping card files show ~2097) or past this OS's int time
+                                  // (within one zone offset below it tzlocal can int-wrap and render a 1901 date - unreachable from NTP/DS1307, accepted)
 
 // timestamp prefix for a file mtime e: civil fields of tzlocal(e) formatted as-if-UTC
 // (Hinnant civil-from-days, the date.c shape; a small local copy, duplication blessed),

@@ -377,10 +377,15 @@ int sys(int num, int n, int *argv) {
       if (d >= 4 && d < 8) { struct dirent_t *o = (struct dirent_t *)A(1); int sz, isd;
         if (!nfs_readdir(d - 4, o->name, sizeof o->name, &sz, &isd)) return 0; o->size = sz; o->isdir = isd; o->mtime = 0; return 1; }   // netfs has no times
       if (d < 0 || d > 3 || !dirs[d]) return 0; struct dirent *e;
-      while ((e = readdir(dirs[d])) && (e->d_name[0] == '.')) {}
+      char full[600]; struct stat st;
+      while ((e = readdir(dirs[d]))) {   // skip dot entries and entries whose stat() fails (keeps size/isdir/mtime off an uninitialized st)
+        if (e->d_name[0] == '.') continue;
+        snprintf(full, sizeof full, "%s/%s", dirpaths[d], e->d_name);
+        if (stat(full, &st)) continue;
+        break;
+      }
       if (!e) return 0;
       struct dirent_t *o = (struct dirent_t *)A(1); strncpy(o->name, e->d_name, 63); o->name[63] = 0;
-      char full[600]; struct stat st; snprintf(full, sizeof full, "%s/%s", dirpaths[d], e->d_name); stat(full, &st);
       o->size = st.st_size; o->isdir = S_ISDIR(st.st_mode); o->mtime = (int)st.st_mtime; return 1; }
     case SYS_closedir: { int d = A(0); if (d >= 4 && d < 8) { nfs_dir_owner[d - 4] = -1; nfs_closedir(d - 4); return 0; } if (d >= 0 && d < 4 && dirs[d]) { closedir(dirs[d]); dirs[d] = 0; } return 0; }
     case SYS_chdir: { char r[160]; resolve((char *)A(0), r, sizeof r);

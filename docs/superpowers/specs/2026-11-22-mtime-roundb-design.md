@@ -250,7 +250,7 @@ BASIC function/handler plumbing inside `funcs.c`/`lex.c` conventions;
 whether `ls`'s civil-from-days lives in a small shared helper or per-file
 copy (either fine; duplication blessed).
 
-## Results (landed 2026-11-23, branch `mtimes`, awaiting merge)
+## Results (landed 2026-11-23, branch `mtimes`, merged same day)
 
 Implemented as designed, all four code tasks clean through review, with
 these deviations and findings, all ledgered in

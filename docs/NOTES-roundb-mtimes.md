@@ -1,4 +1,4 @@
-# NOTES: file mtimes (round 2026-11-22 round B) — DONE
+# NOTES: file mtimes (round B, 2026-11-22) — DONE
 
 Goal: stamp every card write from the wall clock (`SDFS.setTimeCallback`
 + kernel `fs_time_cb`), `ls` shows local mtimes DST-correct per file
@@ -7,8 +7,8 @@ window), BASIC `DATE$`/`TIME$`. Spec:
 `docs/superpowers/specs/2026-11-22-mtime-roundb-design.md` (Results
 there too), plan `docs/superpowers/plans/2026-11-22-mtimes.md`. SDD
 ledger (all rulings): `.superpowers/sdd/2026-11-22-mtimes/progress.md`,
-board evidence trail in `task-5-report.md` beside it. On branch
-`mtimes`, awaiting merge.
+board evidence trail in `task-5-report.md` beside it. Merged to
+`main` 2026-11-23 (`03472a9`).
 
 ## Settled (don't re-investigate)
 
