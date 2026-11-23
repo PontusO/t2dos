@@ -8,6 +8,7 @@
 // path) names the failing prefix and returns 1.
 int mkp(char *arg) {
   char p[200]; struct stat_t st; int k; int c;
+  if (strlen(arg) >= 200) { printf("mkdir: path too long: %s\n", arg); return 1; }   // rm.c's cap: sh words reach ~255
   strcpy(p, arg);
   k = 0;
   while (p[k]) {

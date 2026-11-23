@@ -258,6 +258,13 @@ def tool_cases():
         fail('mk-nop-parent-fail', 'want exit != 0, got exit %d out %r' % (rc, out))
     ok('mk-nop-parent-fail')
 
+    # a path that does not fit the 200-byte buffer is rejected, not overflowed
+    # (sh hands out ~255-char words).
+    rc, out = run_tool('mkdir', ['-p', '/tmp/mkt/' + 'a' * 200])
+    if rc == 0 or 'too long' not in out:
+        fail('mk-toobig', 'want exit != 0 naming too long, got exit %d out %r' % (rc, out))
+    ok('mk-toobig')
+
 
 def cleanup():
     for f in CREATED:
