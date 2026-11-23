@@ -822,11 +822,11 @@ void resolve(int i) {
   isbin = endsnam(i, nl, ".bin", 4);
   curowner = namstr + i * MAXLINE;
   if (isbin) {
-    // pass 1: resolve/check prereqs and assemble .s files (their as calls run
-    // or print first); the .o rows join the cc command built after. A target
-    // WITH a recipe honors its prereqs but makes zero toolchain calls: the
-    // as emissions are guarded too, and pass 2 is skipped whole.
-    rot = 0;
+    // pass 1: resolve and check prereqs only. opool writes wait: opool is
+    // per-target scratch and a nested resolve() would clobber rows staged here
+    // (and GNU runs a target's own commands after its target prereqs anyway).
+    // A target WITH a recipe honors its prereqs but makes zero toolchain
+    // calls: passes 2-3 are skipped whole.
     j = 0;
     while (j < tpn[i]) {
       k = find_tpre(i, j);
@@ -836,7 +836,16 @@ void resolve(int i) {
         if (!exists(epool + tpre[i * MAXRAW + j])) {
           printf("make: %s: no such prerequisite %s\n", namstr + i * MAXLINE, epool + tpre[i * MAXRAW + j]); exit(1);
         }
-        if (trcn[i] == 0 && tpk[i * MAXPRE + j] == 2) {
+      }
+      j = j + 1;
+    }
+    rot = 0;
+    if (trcn[i] == 0) {
+      // pass 2: assemble the .s prereqs (no recursion from here, so the opool
+      // rows survive to the cc call)
+      j = 0;
+      while (j < tpn[i]) {
+        if (find_tpre(i, j) < 0 && !is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j]) && tpk[i * MAXPRE + j] == 2) {
           if (rot >= 8) { printf("make: %s: too many .s prereqs (cap 8)\n", namstr + i * MAXLINE); exit(1); }
           strcpy(opool + rot * MAXLINE, epool + tpre[i * MAXRAW + j]);
           opool[rot * MAXLINE + tplen[i * MAXPRE + j] - 1] = 'o';          // last char .s -> .o
@@ -844,19 +853,22 @@ void resolve(int i) {
           emit_cmd();
           rot = rot + 1;
         }
+        j = j + 1;
       }
-      j = j + 1;
-    }
-    if (trcn[i] == 0) {
-      // pass 2: one cc call: program, flags, -o target, sources in file order,
-      // then the assembled .o rows; headers and other files are never inputs
+      // pass 3: one cc call: program, flags, -o target, sources in file order,
+      // then the assembled .o rows; headers and other files are never inputs.
+      // A phony name that is a real existing file is still a source: .PHONY is
+      // a rebuild decision, not a $^ exclusion (GNU parity).
       nw = 0;
       addw("/bin/cc.bin");
       j = 0; while (j < tfn[i]) { addw(epool + tflag[i * MAXARGS + j]); j = j + 1; }
       addw("-o"); addw(namstr + i * MAXLINE);
       j = 0;
       while (j < tpn[i]) {
-        if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1 && !is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j])) addw(epool + tpre[i * MAXRAW + j]);
+        if (find_tpre(i, j) < 0 && tpk[i * MAXPRE + j] == 1 &&
+            (!is_phony(tpre[i * MAXRAW + j], tplen[i * MAXPRE + j]) || exists(epool + tpre[i * MAXRAW + j]))) {
+          addw(epool + tpre[i * MAXRAW + j]);
+        }
         j = j + 1;
       }
       j = 0;

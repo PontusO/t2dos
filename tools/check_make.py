@@ -92,7 +92,7 @@ def fail(name, msg):
 
 
 def pc_cases():
-    for f in ('/src/mk/a.c', '/src/mk/b.c', '/src/mk/c.c', '/src/mk/util.s', '/src/mk/hdr.h'):
+    for f in ('/src/mk/a.c', '/src/mk/b.c', '/src/mk/c.c', '/src/mk/util.s', '/src/mk/u2.s', '/src/mk/hdr.h'):
         stage(f, 'int main(void) { return 0; }\n')
 
     # 1: one cc line; flags right after the program, -o target, then sources.
@@ -117,6 +117,22 @@ def pc_cases():
               ['/bin/cc.bin -I /src/mk -o /src/mk/bin.bin /src/mk/a.c',
                '/bin/as.bin -o /src/mk/util.o /src/mk/util.s',
                '/bin/cc.bin -o /src/mk/asm.bin /src/mk/util.o'])
+
+    # opool is per-target scratch: a nested target resolve must not clobber the
+    # .o rows this target already staged, and the as calls run after the target
+    # prereqs are built (GNU order: prereqs first, then this target's commands).
+    clob = '/src/mk/p1.bin: /src/mk/u2.s /src/mk/a.c\n/src/mk/p2.bin: /src/mk/util.s /src/mk/p1.bin\n'
+    expect_ok('plan-opool', clob, ['/src/mk/p2.bin'],
+              ['/bin/as.bin -o /src/mk/u2.o /src/mk/u2.s',
+               '/bin/cc.bin -o /src/mk/p1.bin /src/mk/a.c /src/mk/u2.o',
+               '/bin/as.bin -o /src/mk/util.o /src/mk/util.s',
+               '/bin/cc.bin -o /src/mk/p2.bin /src/mk/util.o'])
+
+    # .PHONY changes rebuild decisions, not file membership: a phony name that
+    # is also a real source still reaches cc ($^ parity).
+    expect_ok('plan-phony-shadow',
+              '.PHONY: /src/mk/b.c\n/src/mk/ps.bin: /src/mk/a.c /src/mk/b.c\n', ['/src/mk/ps.bin'],
+              ['/bin/cc.bin -o /src/mk/ps.bin /src/mk/a.c /src/mk/b.c'])
 
     # 4-5: grammar errors name the line; make never runs a partial build.
     expect_err('err-no-colon', 'bad /src/mk/a.c\n', [], 'bad')
