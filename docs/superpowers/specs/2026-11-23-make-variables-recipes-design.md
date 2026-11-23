@@ -233,13 +233,15 @@ tables live. None of these change what gets built.
 
 PC (branch gates, all green):
 
-- `check_make.py --pc`: 55 cases pass: the original 13 plan cases, the
+- `check_make.py --pc`: 57 cases pass: the original 13 plan cases, the
   variables/recipes/`.PHONY`/`.DEFAULT_GOAL` plan cases of this round, four
   edge pins added at close-out (`.PHONY` before any target creates no
   target; command-line target beats `.DEFAULT_GOAL`; two `.PHONY` lines
   consume cleanly), final-review pins (a phony prereq with no rule is a
   no-op; `A#b := c` errors `no colon`; an empty command-line variable name
-  is rejected; the recipe-line cap; `mkdir -p` with a trailing slash), and
+  is rejected; the recipe-line cap; `mkdir -p` with a trailing slash), the
+  close-out fix-round pins (`opool` across nested resolves; a `.PHONY` name
+  that is also a real source), and
   the `rm`/`mkdir` tool cases under qemu.
 - The plan-board fixture passed with zero change against the rewritten
   `Makefile.board`: expansion is faithful (Goal 8's proof).
@@ -274,3 +276,14 @@ board (2026-11-23, Challenger 2350 WiFi/BLE, all green):
     `check_make --board` now prefights stray `/{sys,basic,cc,t2obj,math}.h`.
   - `ls` printed "not found" but always exited 0 (`main` dropped `list()`'s
     status); the `rm -rf` leg was the first test to notice. Fixed.
+- Closed at close-out (pins `plan-opool`, `plan-phony-shadow`, both red on
+  the pre-fix code): `resolve()` wrote a target's `.o` rows into `opool`
+  (per-target scratch) before recursing into target prereqs, so a nested
+  resolve clobbered them and cc linked the inner target's `.o` silently —
+  passes are now resolve/check, assemble, one cc call (which also puts a
+  target's own `as` calls after its prereqs build, the GNU order); and a
+  `.PHONY` name that is also a real existing source reaches cc again
+  (`.PHONY` is a rebuild decision, not a `$^` exclusion). The board suite
+  now stages `ls`/`rmdir` alongside `rm`/`mkdir`/`echo` and pins
+  `mkdir -p` with a trailing slash on SDFS. Board rerun after all of it:
+  13/13 green, `check_ref` `different: 0`.
