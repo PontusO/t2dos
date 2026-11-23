@@ -225,6 +225,20 @@ def pc_cases():
                ['/src/mk/rb.bin'], 'no such prerequisite', 'nope.s')
     expect_err('err-recipe-first', '\techo orphan\nx: /src/mk/a.c\n', ['x'], 'recipe')
 
+    # 15: .PHONY, .DEFAULT_GOAL and reserved dot-names (spec 2026-11-23 Goal 5).
+    # plan-phony: the phony prereq's recipe runs (it is a target, so the exists
+    # check never applies); plan-default-goal proves the default is no longer the
+    # first target (q.bin exists so the implicit-cc plan still precedes all's
+    # recipe); .SUFFIXES is rejected as a target; a .DEFAULT_GOAL naming an
+    # absent target errors like an unknown command-line target.
+    ph = ('.PHONY: gen\nall: gen\n\techo after\ngen:\n\techo gen\n')
+    expect_ok('plan-phony', ph, ['all'], ['/bin/echo.bin gen', '/bin/echo.bin after'])
+    expect_ok('plan-default-goal',
+              '/src/mk/q.bin: /src/mk/a.c\n.DEFAULT_GOAL := all\nall: /src/mk/q.bin\n\techo all\n',
+              [], ['/bin/cc.bin -o /src/mk/q.bin /src/mk/a.c', '/bin/echo.bin all'])
+    expect_err('err-reserved-name', '.SUFFIXES: x\n', [], '.SUFFIXES', 'reserved')
+    expect_err('err-unknown-defgoal', '.DEFAULT_GOAL := nope\nall:\n\techo a\n', [], 'nope')
+
     tool_cases()
 
 

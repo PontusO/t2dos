@@ -20,7 +20,10 @@
 // after a target is that target's recipe: stored at parse, expanded and run
 // by run_recipe when the target resolves (a recipe'd .bin target gets no
 // implicit cc call; $@ $< $^ expand per rule; @ silences the -v echo; word 0
-// maps to /bin/<name>.bin unless it holds a /).
+// maps to /bin/<name>.bin unless it holds a /). `.PHONY: name ...` records its
+// (expanded) names as phony rows and creates no target; `.DEFAULT_GOAL := v`
+// (pass A) overrides the default goal. Both dot-names are reserved, and so is
+// every other leading-dot target name: the check runs on the EXPANDED name.
 //
 // Dialect discipline (docs/NOTES-star-deref.md): the committed cc
 // miscompiles rvalue reads through char * VARIABLES (a VARREF emits a second
@@ -32,7 +35,8 @@
 // pointer-valued stores this program makes.
 //
 // usage: make [-n] [-v] [-f file] [NAME=value ...] [target ...]
-//   (default goal: the file's first target; V=1 acts like -v)
+//   (default goal: .DEFAULT_GOAL if set, else the file's first target;
+//    V=1 acts like -v)
 
 #define MAXLINE 128
 #define MAXTARGETS 64
@@ -46,6 +50,8 @@
 #define MAXRECI 8
 #define MAXRAW 64                        // raw tokens per line, pre-expansion
 #define MAXEXPW 64                       // expanded words per line (flags<=32 + prereqs<=16)
+#define MAXPHONY 16                      // .PHONY names
+#define MAXPHNAME 64                     // phony name rows
 
 char buf[MAXBUF];                      // the whole build file (strings are offsets into it)
 char namstr[MAXTARGETS * MAXLINE];     // target names, copied out (row k: k * MAXLINE)
@@ -75,7 +81,9 @@ char lbuf[MAXEXP], sbuf[MAXEXP];       // expansion scratch, ping-pong per pass
 int exowner;                           // recipe context: target index, or -1 outside recipes
 int tfirst[MAXTARGETS], tphat[MAXTARGETS];  // $< / $^ sources: epool offsets, -1 none
 int wbuf[MAXEXPW], wn;                   // prep's expanded word offsets (bounded at entry)
-char defgoal[MAXLINE];                 // .DEFAULT_GOAL value (stored now, honored in Task 5)
+char defgoal[MAXLINE];                 // .DEFAULT_GOAL value (pass A stores, main honors)
+char phony[MAXPHONY * MAXPHNAME];      // .PHONY name rows (row k: k * MAXPHNAME)
+int nphony;
 int trcl[MAXTARGETS * MAXRECI];        // recipe line offsets in buf (stored now, run in Task 4)
 int trcn[MAXTARGETS];
 int lastt;                             // target the recipes attach to (-1: none yet)
@@ -104,6 +112,13 @@ int xlit(int off, int ln, char *lit) {
   int i;
   i = 0;
   while (i < ln) { if (buf[off + i] != lit[i]) return 0; i = i + 1; }
+  return 1;
+}
+
+int xlitl(int ln, char *lit) {                 // same idiom over lbuf[0..ln)
+  int i;
+  i = 0;
+  while (i < ln) { if (lbuf[i] != lit[i]) return 0; i = i + 1; }
   return 1;
 }
 
@@ -325,7 +340,7 @@ void scanvar(int st, int e, int lineno) {
   vs = k;
   ve = e;
   while (ve > vs && (buf[ve - 1] == ' ' || buf[ve - 1] == '\t')) ve = ve - 1;
-  if (ne - ns == 13 && xlit(ns, 13, ".DEFAULT_GOAL")) {   // reserved, honored in Task 5
+  if (ne - ns == 13 && xlit(ns, 13, ".DEFAULT_GOAL")) {   // reserved: main honors it
     if (ve - vs > MAXLINE - 1) { printf("make: %s: value too long (cap %d)\n", curfile, MAXLINE); exit(1); }
     n = 0;
     while (n < ve - vs) { defgoal[n] = buf[vs + n]; n = n + 1; }
@@ -422,6 +437,48 @@ int expandtok(int src) {
 
 // ---- rules
 
+// a .PHONY line: every token after the colon is expanded (the whole table is
+// loaded: pass A) and copied into a phony row. No target is created and lastt
+// is untouched: a recipe line after a .PHONY line still belongs to the last
+// real target. The rows are consumed by is_phony below.
+void read_phony(int colon, int e, int lineno) {
+  int tok, nl, a, n;
+  gpos = colon + 1; gend = e;
+  while (1) {
+    tok = ntok();
+    if (tok < 0) break;
+    nl = expandtok(tok);
+    if (nphony >= MAXPHONY) { printf("make: %s: line %d: too many .PHONY names (cap %d)\n", curfile, lineno, MAXPHONY); exit(1); }
+    if (nl > MAXPHNAME - 1) { printf("make: %s: line %d: .PHONY name too long (cap %d)\n", curfile, lineno, MAXPHNAME); exit(1); }
+    a = nphony * MAXPHNAME;
+    n = 0;
+    while (n < nl) { phony[a + n] = lbuf[n]; n = n + 1; }
+    phony[a + n] = 0;
+    nphony = nphony + 1;
+  }
+}
+
+// is the expanded prereq word (epool offset, length) a declared phony name?
+// Phony prereqs that are targets already resolve through the target path (no
+// exists check); this matcher exists for Task 7's board-semantics checks and
+// the future timestamp round, which must never stat or date-check these names.
+int is_phony(int off, int len) {
+  int i, a, n;
+  i = 0;
+  while (i < nphony) {
+    a = i * MAXPHNAME;
+    n = 0;
+    while (phony[a + n]) n = n + 1;
+    if (n == len) {
+      n = 0;
+      while (n < len && phony[a + n] == epool[off + n]) n = n + 1;
+      if (n == len) return 1;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
 void parse_line(int start, int e, int lineno) {
   int i, colon, tok, nameoff, namelen, li, nl;
   buf[e] = 0;                                    // line boundary, so tokens end cleanly
@@ -447,25 +504,32 @@ void parse_line(int start, int e, int lineno) {
   while (namelen > nameoff && (buf[namelen - 1] == ' ' || buf[namelen - 1] == '\t')) namelen = namelen - 1;
   buf[namelen] = 0;
   if (namelen == nameoff) return;                // blank line
-  // .PHONY handling arrives in Task 5 (reserved dot-names, phony rows)
+  // reserved dot-names (spec Goal 5), checked on the EXPANDED name: .PHONY is
+  // consumed here (no target, lastt untouched); .DEFAULT_GOAL never reaches
+  // parse_line (pass A consumed it); any other leading-dot name is an error.
   i = nameoff;
   while (i < namelen && !(buf[i] == '$' && buf[i + 1] == '(')) i = i + 1;
   if (i < namelen) {                             // target name holds $(...): expand it
     nl = expandtok(nameoff);                     // the whole table is loaded (pass A)
     if (nl > MAXLINE - 1) { printf("make: %s: target name too long (cap %d)\n", curfile, MAXLINE); exit(1); }
+    if (nl == 6 && xlitl(nl, ".PHONY")) { read_phony(colon, e, lineno); return; }
+    if (lbuf[0] == '.') { printf("make: %s: line %d: reserved target name %s\n", curfile, lineno, lbuf); exit(1); }
     if (find_lnam(nl) >= 0) { printf("make: %s: line %d: duplicate target %s\n", curfile, lineno, lbuf); exit(1); }
     if (ntargets >= MAXTARGETS) { printf("make: %s: too many targets (cap %d)\n", curfile, MAXTARGETS); exit(1); }
     i = ntargets; ntargets = i + 1;
     for (li = 0; li < nl; li = li + 1) namstr[i * MAXLINE + li] = lbuf[li];
     namstr[i * MAXLINE + li] = 0;
   } else {
-    if (find_target(nameoff, namelen - nameoff) >= 0) {
+    nl = namelen - nameoff;
+    if (nl == 6 && xlit(nameoff, nl, ".PHONY")) { read_phony(colon, e, lineno); return; }
+    if (buf[nameoff] == '.') { printf("make: %s: line %d: reserved target name %s\n", curfile, lineno, buf + nameoff); exit(1); }
+    if (find_target(nameoff, nl) >= 0) {
       printf("make: %s: line %d: duplicate target %s\n", curfile, lineno, buf + nameoff); exit(1);
     }
-    if (namelen - nameoff > MAXLINE - 1) { printf("make: %s: target name too long (cap %d)\n", curfile, MAXLINE); exit(1); }
+    if (nl > MAXLINE - 1) { printf("make: %s: target name too long (cap %d)\n", curfile, MAXLINE); exit(1); }
     if (ntargets >= MAXTARGETS) { printf("make: %s: too many targets (cap %d)\n", curfile, MAXTARGETS); exit(1); }
     i = ntargets; ntargets = i + 1;
-    for (li = 0; li < namelen - nameoff; li = li + 1) namstr[i * MAXLINE + li] = buf[nameoff + li];
+    for (li = 0; li < nl; li = li + 1) namstr[i * MAXLINE + li] = buf[nameoff + li];
     namstr[i * MAXLINE + li] = 0;
   }
   tfn[i] = 0; tpn[i] = 0; tvis[i] = 0;
@@ -854,8 +918,13 @@ int main(int argc, char **argv) {
   }
   loadfile(fpath);
   if (ntargets == 0) { printf("make: %s: no targets\n", fpath); exit(1); }
-  if (nreq == 0) resolve(0);
-  else {
+  if (nreq == 0) {
+    if (defgoal[0]) {                            // .DEFAULT_GOAL beats the first target
+      k = find_req(defgoal);
+      if (k < 0) { printf("make: unknown target %s\n", defgoal); exit(1); }
+      resolve(k);
+    } else resolve(0);
+  } else {
     i = 0;
     while (i < nreq) {
       k = find_req(req[i]);
