@@ -262,10 +262,14 @@ board (2026-11-23, Challenger 2350 WiFi/BLE, all green):
   echoed command line absent and the program output present.
 - `check_toolchain.py --selfhost`: six IDENTICAL (make.bin is not among the
   six; the rebuild must stay clean), ten compiler tests PASS.
-- Three findings from the board sessions, all fixed on the branch:
-  - the kernel's `rm -rf`/nested `unlink` hit an upstream SDFS bug (core
-    6.3.2): `remove()`/`rmdir()` delete the PARENT entry for paths with
-    three or more components. Worked around in the kernel (`k_del_saf`,
+- Three board-session findings fixed on the branch:
+  - the kernel's `rm -rf`/nested `unlink` hit a bug in the core's **LittleFS
+    wrapper** (arduino-pico 6.3.2, `LittleFSImpl::remove`): after a successful
+    `lfs_remove` it walks up the path and deletes every ancestor directory
+    that is now empty, and `rmdir()` is `remove()` — so removing
+    `/a/b/c.txt` also deletes `/a/b`. (The board has no SD card — boot says
+    `fs flash`; an early draft of this note blamed SDFS, an unverified
+    inference.) Worked around in the kernel (`k_del_saf`,
     b7a170d): deep deletes are hoisted to the FS root by rename first;
     ramfs hoists into `/tmp`. Details and repro in
     `docs/NOTES-nested-delete.md`; worth an upstream report.
@@ -285,5 +289,5 @@ board (2026-11-23, Challenger 2350 WiFi/BLE, all green):
   `.PHONY` name that is also a real existing source reaches cc again
   (`.PHONY` is a rebuild decision, not a `$^` exclusion). The board suite
   now stages `ls`/`rmdir` alongside `rm`/`mkdir`/`echo` and pins
-  `mkdir -p` with a trailing slash on SDFS. Board rerun after all of it:
+  `mkdir -p` with a trailing slash on the flash FS (LittleFS). Board rerun after all of it:
   13/13 green, `check_ref` `different: 0`.

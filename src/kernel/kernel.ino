@@ -610,12 +610,15 @@ static int k_rename(const char *a, const char *b) {
   return k_del_saf(fa, a, false) ? 0 : -1;
 }
 
-// core 6.3.2's SDFS remove()/rmdir() delete the PARENT entry for paths with two
-// or more slashes (open/mkdir/rename traverse fine; LittleFS/ramfs/netfs are
-// correct).  Verified on board: rm of /a/b/c.txt deletes /a/b, rmdir of /a/b/c
-// removes /a/b.  k_del_saf hoists the target to "/del~~tmp" at the root by
-// rename (traversal proven correct) and deletes the depth-1 copy, which SDFS
-// handles right.  Deeper workarounds (or a vendored SDFS fix) wait on upstream.
+// core 6.3.2's LittleFS wrapper (LittleFSImpl::remove) deletes the PARENT
+// directories of any path with two or more slashes: after lfs_remove succeeds
+// it walks up and removes every ancestor that is now empty, and rmdir() is
+// remove().  Verified on board ("fs flash", no SD card): rm of /a/b/c.txt also
+// deletes /a/b.  open/mkdir/rename traverse fine; ramfs/netfs are correct.
+// k_del_saf hoists the target to "/del~~tmp" at the root by rename and deletes
+// the depth-1 copy: the ancestor walk then stops at the leading '/' (an empty
+// path fails harmlessly).  Drop the workaround if the core ever gates the
+// cascade (see docs/NOTES-nested-delete.md).
 static bool k_del_saf(FS *fs, const char *p, bool isdir) {
   int n = strlen(p); char q[170];
   if (fs != fsys || !strchr(p + (n > 2 ? 2 : n), '/')) return isdir ? fs->rmdir(p) : fs->remove(p);   // other FS correct; SDFS is only broken from depth 3 up
@@ -628,7 +631,7 @@ static bool k_del_saf(FS *fs, const char *p, bool isdir) {
 }
 static int k_unlink(const char *path) {
   FS *fs = fs_for(path);
-  if (fs == fsys) {                                   // only SDFS can "unlink" a directory (it corrupts the parent: see k_del_saf)
+  if (fs == fsys) {                                   // only the primary FS (LittleFS here) can "unlink" a directory (the cascade: see k_del_saf)
     File f = fs->open(path, "r"); if (!f) return -1;
     bool dir = f.isDirectory(); f.close();
     if (dir) return -1;
