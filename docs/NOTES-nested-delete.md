@@ -65,9 +65,12 @@ cascading calls no longer reach the wrapper. Do not re-run the old repro storm.
 
 Next steps:
 1. Done: check_make --board full green, check_toolchain --selfhost six IDENTICAL.
-2. Upstream: report the LittleFS wrapper's empty-ancestor cascade in
-   LittleFSImpl::remove (core 6.3.2) - it is deliberate code, so the ask is to
-   gate/remove it; revisit the workaround if the core changes.
+2. Upstream: PARKED by owner decision 2026-11-24 - the cascade is deliberate
+   SPIFFS-compat emulation (identical code in the esp8266 core; other littlefs
+   wrappers like Adafruit's and Teensy's do a plain lfs_remove), so the ask
+   would be "gate it behind a flag" and a fast answer is unlikely. The kernel
+   workaround stands on its own; re-check the wrapper on a core bump and drop
+   k_del_saf if the cascade ever gets gated.
 3. host_linux needs no change (host FS is correct).
 
 Board session state before the hang (all still valid):
